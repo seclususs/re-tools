@@ -1,0 +1,79 @@
+# Common build directories
+[Bb]uild/
+build/
+build-*/
+
+# Dependencies downloaded
+_deps/
+
+# Executable files
+*.exe
+*.out
+*.app
+
+# Libraries
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Object files
+*.o
+*.obj
+
+# Precompiled headers
+*.pch
+*.gch
+
+# Dependency files
+*.d
+
+# CMake-generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# CMake project generator files
+Makefile
+*.cbp
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Compilation database
+compile_commands.json
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# CLion / JetBrains
+.idea/
+
+# Vim
+*.swp
+*.swo
+
+# Emacs
+*~
+\#*\#
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# KDevelop
+*.kdev4
+*.kdev_user
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Windows
+Thumbs.db
+desktop.ini
