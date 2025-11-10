@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
-
+#include <memory>
 
 struct Section {
     std::string name;
@@ -17,6 +17,10 @@ struct Symbol {
     uint64_t address;
     // ... other properties
 };
+
+namespace LIEF {
+    class Binary;
+}
 
 class BinaryParser {
 public:
@@ -41,12 +45,17 @@ public:
      */
     std::vector<Symbol> getSymbols();
 
+    /**
+     * @brief Reads and returns the raw bytes from a specific section.
+     * @param sectionName The name of the section (e.g., ".text").
+     * @return A vector of bytes for that section, or an empty vector if not found.
+     */
+    std::vector<uint8_t> getSectionData(const std::string& sectionName);
+
+
 private:
     std::string filePath;
     std::vector<Section> sections;
     std::vector<Symbol> symbols;
-    
-    // Private helper methods for parsing (e.g., ELF, PE)
-    // void parseELF();
-    // void parsePE();
+    std::unique_ptr<LIEF::Binary> parsedBinary;
 };
