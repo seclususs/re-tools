@@ -22,8 +22,5 @@ public:
 
 private:
     std::string apiKey;
-    std::string apiUrl = "https://api.example.com/v1/chat/completions";
-    
-    // Handle for a network library like cpr or libcurl
-    // void* curl_handle; 
+    std::string apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 };

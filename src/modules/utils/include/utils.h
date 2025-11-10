@@ -18,8 +18,7 @@ namespace Utils {
     // Formatting
     std::string toHex(uint64_t value);
 
-    // Add other common utilities
-    // enum classLogLevel { INFO, WARN, ERROR };
-    // ...
+    // String manipulation
+    std::string trim(const std::string& str);
 
 } // namespace Utils

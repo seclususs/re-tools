@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 namespace Utils {
 
@@ -45,6 +46,22 @@ namespace Utils {
         std::stringstream ss;
         ss << std::hex << value;
         return ss.str();
+    }
+
+    // Function to remove whitespace and newlines from the beginning and end of a string
+    std::string trim(const std::string& str) {
+        const std::string whitespace = " \t\n\r\f\v";
+        
+        // Trim from right (end)
+        size_t end = str.find_last_not_of(whitespace);
+        if (end == std::string::npos) { // String contains only whitespace
+            return "";
+        }
+        std::string s = str.substr(0, end + 1);
+        
+        // Trim from left (start)
+        size_t start = s.find_first_not_of(whitespace);
+        return s.substr(start);
     }
 
 } // namespace Utils
