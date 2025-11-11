@@ -27,9 +27,9 @@ std::vector<uint8_t> get_text_section(const std::string& filename, uint64_t& bas
 }
 
 // Helper format hex
-std::string to_hex_str(uint64_t val) {
+inline std::string to_hex_str(uint64_t val) {
     std::stringstream ss;
-    ss << "0x" << std::hex << val;
+    ss << "0x" << std::hex << std::uppercase << val;
     return ss.str();
 }
 

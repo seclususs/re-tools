@@ -4,7 +4,7 @@
 #include <cstring>
 
 // Helper format hex
-std::string to_hex_str(uint64_t val) {
+inline std::string to_hex_str(uint64_t val) {
     std::stringstream ss;
     ss << "0x" << std::hex << std::uppercase << val;
     return ss.str();
@@ -15,7 +15,7 @@ InstruksiDecoded decodeInstruksi(const std::vector<uint8_t>& bytes, int offset) 
     instr.valid = false;
     instr.size = 0;
 
-    if (offset >= bytes.size()) return instr;
+    if (offset >= static_cast<int>(bytes.size())) return instr;
 
     uint8_t opcode = bytes[offset];
 
