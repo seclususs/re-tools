@@ -4,8 +4,10 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 
+// Struct C++
 struct InstruksiDecoded {
     std::string mnemonic;
     std::vector<std::string> operands;
@@ -13,19 +15,18 @@ struct InstruksiDecoded {
     bool valid;
 };
 
-// Fungsi disassembler
-InstruksiDecoded decodeInstruksi(const std::vector<uint8_t>& bytes, int offset);
-
-// C Interface untuk Python
+// C Interface
 extern "C" {
+    // Struct C-ABI
     struct C_Instruksi {
-        char mnemonic[32];
-        char op_str[64];
-        int size;
-        int valid;
+        char mnemonic_instruksi[32]; // Nama mnemonic
+        char str_operand[64];    // String operand
+        int ukuran;              // Ukuran instruksi
+        int valid;             // 1 kalo valid
     };
 
-    C_Instruksi c_decodeInstruksi(const uint8_t* bytes, int len, int offset);
+    // Deklarasi fungsi C-ABI
+    C_Instruksi c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset);
 }
 
 #endif // RETOOLS_DISASM_H

@@ -1,6 +1,51 @@
 cmake_minimum_required(VERSION 3.10)
 project(re-tools VERSION 0.1.0 LANGUAGES C CXX)
 
+include(ExternalProject)
+find_program(CARGO_EXECUTABLE cargo REQUIRED)
+
+set(RUST_PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/core_rs)
+set(RUST_EP_DIR ${CMAKE_CURRENT_BINARY_DIR}/rust_ep_build)
+set(RUST_TARGET_DIR ${RUST_EP_DIR}/target)
+set(RUST_LIB_NAME core_rs)
+
+if(WIN32)
+  if(MINGW)
+    set(RUST_LIB_PREFIX "lib")
+    set(RUST_LIB_SUFFIX ".a")
+  else()
+    set(RUST_LIB_PREFIX "")
+    set(RUST_LIB_SUFFIX ".lib")
+  endif()
+else()
+  set(RUST_LIB_PREFIX "lib")
+  set(RUST_LIB_SUFFIX ".a")
+endif()
+
+set(RUST_LIB_FILE ${RUST_TARGET_DIR}/release/${RUST_LIB_PREFIX}${RUST_LIB_NAME}${RUST_LIB_SUFFIX})
+
+ExternalProject_Add(
+    core_rs_project
+    SOURCE_DIR ${RUST_PROJECT_DIR}
+    BINARY_DIR ${RUST_EP_DIR}
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ${CARGO_EXECUTABLE} build --release
+                  --manifest-path ${RUST_PROJECT_DIR}/Cargo.toml
+                  --target-dir ${RUST_TARGET_DIR}
+    INSTALL_COMMAND ""
+    BYPRODUCTS ${RUST_LIB_FILE}
+)
+
+add_library(core_rs_lib STATIC IMPORTED)
+set_target_properties(core_rs_lib PROPERTIES IMPORTED_LOCATION ${RUST_LIB_FILE})
+add_dependencies(core_rs_lib core_rs_project)
+
+if(WIN32 AND MINGW)
+  set_target_properties(core_rs_lib PROPERTIES
+    INTERFACE_LINK_LIBRARIES "ws2_32;ntdll;userenv;bcrypt"
+  )
+endif()
+
 # Pengaturan C++
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,7 +74,7 @@ include_directories(tools/cfgVisualizer/include)
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
     "core/parser/src/*.cpp"
-    "core/disassembler/src/*.cpp"
+    # "core/disassembler/src/*.cpp"
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"
     "core/tracer/src/*.cpp"
@@ -52,6 +97,9 @@ add_library(retools_core SHARED
     ${CORE_SOURCES}
     ${OS_SPECIFIC_SOURCES}
 )
+
+target_link_libraries(retools_core PRIVATE core_rs_lib)
+add_dependencies(retools_core core_rs_lib)
 
 set_target_properties(retools_core PROPERTIES OUTPUT_NAME "retools_core")
 
@@ -178,6 +226,14 @@ if(BUILD_TESTS)
                 "PYTHONPATH=${TEST_PYTHONPATH}"
                 "${ENV_VAR_PATH}=${DLL_PATH}${PATH_SEP}$ENV{${ENV_VAR_PATH}}"
         )
+    endif()
+
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/integration/test_full_cpp_integration.cpp")
+        add_executable(test_full_cpp_integration tests/integration/test_full_cpp_integration.cpp)
+        
+        target_link_libraries(test_full_cpp_integration PRIVATE retools_core core_rs_lib)
+        
+        add_test(NAME TestFullCppIntegration COMMAND test_full_cpp_integration)
     endif()
 
 endif()
