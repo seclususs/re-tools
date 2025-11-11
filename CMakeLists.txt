@@ -20,6 +20,9 @@ include_directories(core/parser/include)
 include_directories(core/disassembler/include)
 include_directories(core/hexeditor/include)
 include_directories(core/analyzer/include)
+include_directories(core/tracer/include)
+include_directories(os_specific/linux)
+include_directories(os_specific/windows)
 
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
@@ -27,14 +30,24 @@ file(GLOB_RECURSE CORE_SOURCES
     "core/disassembler/src/*.cpp"
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"
+    "core/tracer/src/*.cpp"
+)
+
+# OS Specific Modules
+file(GLOB_RECURSE OS_SPECIFIC_SOURCES
+    "os_specific/linux/*.cpp"
+    "os_specific/windows/*.cpp"
 )
 
 if(NOT CORE_SOURCES)
     message(FATAL_ERROR "TIDAK ADA SOURCE FILE DITEMUKAN!")
 endif()
 
-# Buat library utama
-add_library(retools_core SHARED ${CORE_SOURCES})
+# Library utama
+add_library(retools_core SHARED 
+    ${CORE_SOURCES}
+    ${OS_SPECIFIC_SOURCES}
+)
 
 # Unit Tests
 if(BUILD_TESTS)
@@ -66,6 +79,22 @@ if(BUILD_TESTS)
         add_executable(test_analyzer tests/analyzer/testHitungEntropy.cpp)
         target_link_libraries(test_analyzer PRIVATE retools_core)
         add_test(NAME TestAnalyzer COMMAND test_analyzer)
+    endif()
+    
+    # Test Tracer
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/tracer/testAttachProses.cpp")
+        add_executable(test_tracer tests/tracer/testAttachProses.cpp)
+        target_link_libraries(test_tracer PRIVATE retools_core)
+        
+        # Link library spesifik OS
+        if(UNIX AND NOT APPLE)
+             target_link_libraries(test_tracer PRIVATE pthread)
+        endif()
+        if(WIN32)
+             target_link_libraries(test_tracer PRIVATE Advapi32.lib)
+        endif()
+
+        add_test(NAME TestTracer COMMAND test_tracer)
     endif()
 endif()
 
