@@ -53,6 +53,14 @@ add_library(retools_core SHARED
     ${OS_SPECIFIC_SOURCES}
 )
 
+# CLI Tool
+if(EXISTS "${CMAKE_SOURCE_DIR}/interfaces/cli/retools_cli.cpp")
+    add_executable(retools_cli
+        interfaces/cli/retools_cli.cpp
+    )
+    target_link_libraries(retools_cli PRIVATE retools_core)
+endif()
+
 # Unit Tests
 if(BUILD_TESTS)
     enable_testing()
@@ -114,6 +122,20 @@ if(BUILD_TESTS)
         target_link_libraries(test_cfg_visualizer PRIVATE retools_core)
         add_test(NAME TestCFGVisualizer COMMAND test_cfg_visualizer)
     endif()
+
+    # Test CLI Tool
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/interfaces/cli/test_cli_tool.cpp")
+        add_executable(test_cli_tool tests/interfaces/cli/test_cli_tool.cpp)
+        add_test(NAME TestCLITool COMMAND test_cli_tool)
+    endif()
+
+    # Test Python Pipeline
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py")
+        add_test(NAME TestPythonPipeline
+             COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py
+             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    endif()
+    
 endif()
 
 message(STATUS "Konfigurasi re-tools selesai. Siap untuk build.")
