@@ -1,21 +1,5 @@
 import ctypes
-import os
-import sys
-
-
-LIB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../build/lib'))
-if os.name == 'nt':
-    LIB_FILE = 'retools_core.dll'
-else:
-    LIB_FILE = 'libretools_core.so'
-
-FULL_PATH = os.path.join(LIB_PATH, LIB_FILE)
-
-try:
-    _lib = ctypes.CDLL(FULL_PATH)
-except OSError as e:
-    print(f"Gagal memuat library dari {FULL_PATH}: {e}")
-    _lib = None
+from utils.lib_loader import _lib
 
 # Definisi tipe
 RT_Handle = ctypes.c_void_p
@@ -115,6 +99,6 @@ class Debugger:
 def traceSyscall(pid: int):
     if not _lib:
         raise RuntimeError("Library re-tools core tidak termuat")
-    print(f"Mulai melacak syscall untuk PID {pid}. Ini akan block...")
+    print(f"Mulai melacak syscall untuk PID {pid}.")
     _lib.rt_traceSyscall(pid)
     print("Trace selesai.")

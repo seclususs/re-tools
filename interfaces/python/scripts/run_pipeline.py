@@ -9,18 +9,23 @@ import os
 
 # Setup Path
 script_dir = os.path.dirname(os.path.abspath(__file__))
-project_root_level = os.path.abspath(os.path.join(script_dir, '..'))
-sys.path.append(project_root_level)
-sys.path.append(script_dir)
+project_root_level = os.path.abspath(os.path.join(script_dir, '..')) 
+if project_root_level not in sys.path:
+    sys.path.append(project_root_level)
+
 
 try:
-    import analyze
-    import report
+    from scripts import analyze
+    from scripts import report
 except ImportError as e:
-    print(f"Error: Gagal mengimpor modul. Pastikan script ini dijalankan dari direktorinya.", file=sys.stderr)
+    print(f"Error: Gagal mengimpor modul 'analyze' atau 'report'.", file=sys.stderr)
     print(f"Detail error: {e}", file=sys.stderr)
     print(f"Sys.path saat ini: {sys.path}", file=sys.stderr)
+    print(f"PYTHONPATH: {os.environ.get('PYTHONPATH')}", file=sys.stderr)
     sys.exit(1)
+except Exception as e:
+    print(f"Error saat impor analyze/report: {e}", file=sys.stderr)
+    sys.exit(2)
 
 def jalankanPipeline(file_path, format_laporan, file_output):
     print(f"[*] Memulai pipeline untuk: {file_path}")

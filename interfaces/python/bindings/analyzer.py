@@ -1,24 +1,6 @@
 import ctypes
-import os
-import sys
 import json
-
-
-LIB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../build/lib'))
-if os.name == 'nt':
-    LIB_FILE = 'retools_core.dll'
-else:
-    LIB_FILE = 'libretools_core.so'
-
-FULL_PATH = os.path.join(LIB_PATH, LIB_FILE)
-try:
-    _lib = ctypes.CDLL(FULL_PATH)
-except OSError:
-    try:
-        _lib = ctypes.CDLL(LIB_FILE) # Coba load dari path default
-    except OSError:
-        print(f"Gagal memuat library re-tools dari {FULL_PATH}")
-        _lib = None
+from utils.lib_loader import _lib
 
 # Setup prototype fungsi C
 if _lib:

@@ -11,18 +11,7 @@ try:
     from bindings import parser, disasm, analyzer
 except ImportError as e:
     print(f"Gagal impor bindings: {e}. Pastikan library core sudah di-build.", file=sys.stderr)
-    # Jika gagal, buat mock objects agar file setidaknya bisa diimpor
-    class MockBinding:
-        def __getattr__(self, name):
-            def mock_func(*args, **kwargs):
-                print(f"Mock {name} dipanggil (binding tidak ter-load)")
-                if name == 'parseHeaderElf':
-                    return {'valid': False}
-                return []
-            return mock_func
-    parser = MockBinding()
-    disasm = MockBinding()
-    analyzer = MockBinding()
+    raise e
 
 def lakukanAnalisisLengkap(file_path):
     """
@@ -47,22 +36,25 @@ def lakukanAnalisisLengkap(file_path):
                 "magic": hdr.magic,
                 "entry_point": hex(hdr.entry_point),
                 "machine": hdr.machine,
-                "section_count": hdr.section_count
+                "section_count": hdr.section_count,
+                "valid": True
             }
         else:
-            hasil_analisis["header"] = {"error": "Bukan file ELF yang valid"}
+            hasil_analisis["header"] = {"valid": False, "error": "Bukan file ELF yang valid"}
     except Exception as e:
-        hasil_analisis["header"] = {"error": f"Gagal parse: {e}"}
+        hasil_analisis["header"] = {"valid": False, "error": f"Gagal parse: {e}"}
 
     print("  [2] Menjalankan Disassembly...")
     # Disasm
     # Note: Binding disasm saat ini hanya menerima bytes.
     try:
         with open(file_path, 'rb') as f:
-            bytes_awal = f.read(20)
+            # Baca lebih banyak bytes untuk disasm
+            bytes_awal = f.read(100) 
         
         offset = 0
-        while offset < len(bytes_awal):
+        max_offset = 20 # Batasi disasm hingga 20 byte pertama
+        while offset < max_offset and offset < len(bytes_awal):
             mnemonic, operands, size = disasm.decodeInstruksi(bytes_awal, offset)
             if size == 0:
                 break # Gagal decode

@@ -4,8 +4,14 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 
-const std::string CLI_PATH = "./retools_cli"; 
+#ifdef _WIN32
+const std::string CLI_PATH = "lib/retools_cli.exe";
+#else
+const std::string CLI_PATH = "lib/retools_cli";
+#endif
+
 
 // Helper untuk membuat file palsu
 std::string create_dummy_file_cli() {
@@ -16,7 +22,7 @@ std::string create_dummy_file_cli() {
     f.write("\x00\x00\x00\x00\x00\x00\x00\x00", 8);
     f.write("\x02\x00\x3E\x00", 4); // EXEC, AMD64
     f.write("\x01\x00\x00\x00", 4);
-    f.write("\x40\x00\x40\x00\x00\x00\x00\x00", 8); // Entry
+    f.write("\x40\x00\x40\x00\x00\x00\x00\x00", 8); // Entry 0x400040
     f.write("ini_string_cli_satu", 20);
     f.write("ini_string_cli_dua", 19);
     f.close();
@@ -27,7 +33,12 @@ std::string create_dummy_file_cli() {
 std::string exec(const std::string& cmd) {
     // Arahkan stdout ke file temporer
     std::string temp_file = "cli_test_output.tmp";
-    std::string full_cmd = cmd + " > " + temp_file;
+    // Di Windows, paksa penggunaan backslash untuk std::system
+    std::string cmd_platform = cmd;
+    #ifdef _WIN32
+        std::replace(cmd_platform.begin(), cmd_platform.end(), '/', '\\');
+    #endif
+    std::string full_cmd = cmd_platform + " > " + temp_file;
     
     int ret_code = std::system(full_cmd.c_str());
     

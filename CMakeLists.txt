@@ -12,7 +12,7 @@ option(BUILD_TESTS "Build unit tests" ON)
 # Setup Output Direktori
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Include Direktori Global
 include_directories(include)
@@ -48,10 +48,27 @@ if(NOT CORE_SOURCES)
 endif()
 
 # Library utama
-add_library(retools_core SHARED 
+add_library(retools_core SHARED
     ${CORE_SOURCES}
     ${OS_SPECIFIC_SOURCES}
 )
+
+set_target_properties(retools_core PROPERTIES OUTPUT_NAME "retools_core")
+
+# Windows
+if(WIN32 AND MINGW)
+    get_filename_component(MINGW_BIN_DIR ${CMAKE_C_COMPILER} DIRECTORY)
+
+    file(GLOB RUNTIME_DLLS
+        "${MINGW_BIN_DIR}/libgcc_s_*.dll"
+        "${MINGW_BIN_DIR}/libstdc++-*.dll"
+        "${MINGW_BIN_DIR}/libwinpthread-*.dll"
+    )
+    if(RUNTIME_DLLS)
+        message(STATUS "Menyalin MinGW runtime DLLs ke ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+        file(COPY ${RUNTIME_DLLS} DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+    endif()
+endif()
 
 # CLI Tool
 if(EXISTS "${CMAKE_SOURCE_DIR}/interfaces/cli/retools_cli.cpp")
@@ -64,7 +81,11 @@ endif()
 # Unit Tests
 if(BUILD_TESTS)
     enable_testing()
-    
+    find_package(Python3 COMPONENTS Interpreter)
+    if(NOT Python3_FOUND)
+        message(WARNING "Python 3 interpreter not found, skipping Python tests.")
+    endif()
+
     # Test Parser
     if(EXISTS "${CMAKE_SOURCE_DIR}/tests/parser/testParseHeaderElf.cpp")
         add_executable(test_parser tests/parser/testParseHeaderElf.cpp)
@@ -92,18 +113,18 @@ if(BUILD_TESTS)
         target_link_libraries(test_analyzer PRIVATE retools_core)
         add_test(NAME TestAnalyzer COMMAND test_analyzer)
     endif()
-    
+
     # Test Tracer
     if(EXISTS "${CMAKE_SOURCE_DIR}/tests/tracer/testAttachProses.cpp")
         add_executable(test_tracer tests/tracer/testAttachProses.cpp)
         target_link_libraries(test_tracer PRIVATE retools_core)
-        
+
         # Link library spesifik OS
         if(UNIX AND NOT APPLE)
-             target_link_libraries(test_tracer PRIVATE pthread)
+            target_link_libraries(test_tracer PRIVATE pthread)
         endif()
         if(WIN32)
-             target_link_libraries(test_tracer PRIVATE Advapi32.lib)
+            target_link_libraries(test_tracer PRIVATE Advapi32.lib)
         endif()
 
         add_test(NAME TestTracer COMMAND test_tracer)
@@ -127,15 +148,38 @@ if(BUILD_TESTS)
     if(EXISTS "${CMAKE_SOURCE_DIR}/tests/interfaces/cli/test_cli_tool.cpp")
         add_executable(test_cli_tool tests/interfaces/cli/test_cli_tool.cpp)
         add_test(NAME TestCLITool COMMAND test_cli_tool)
+        set_property(TEST TestCLITool PROPERTY WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
     endif()
 
     # Test Python Pipeline
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py")
-        add_test(NAME TestPythonPipeline
-             COMMAND python3 ${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py
-             WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    if(Python3_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py")
+        
+        set(PYTHON_PACKAGE_ROOT ${CMAKE_SOURCE_DIR}/interfaces/python)
+        set(DLL_PATH ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}) 
+
+        add_test(
+            NAME TestPythonPipeline
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/interfaces/python/test_python_pipeline.py
+            WORKING_DIRECTORY ${DLL_PATH}
+        )
+
+        # Separator PATH
+        if(WIN32)
+            set(PATH_SEP ";")
+            set(ENV_VAR_PATH "Path")
+        else()
+            set(PATH_SEP ":")
+            set(ENV_VAR_PATH "LD_LIBRARY_PATH")
+        endif()
+
+        set(TEST_PYTHONPATH "${PYTHON_PACKAGE_ROOT}")
+        set_property(TEST TestPythonPipeline PROPERTY
+            ENVIRONMENT 
+                "PYTHONPATH=${TEST_PYTHONPATH}"
+                "${ENV_VAR_PATH}=${DLL_PATH}${PATH_SEP}$ENV{${ENV_VAR_PATH}}"
+        )
     endif()
-    
+
 endif()
 
 message(STATUS "Konfigurasi re-tools selesai. Siap untuk build.")
