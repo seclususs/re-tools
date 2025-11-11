@@ -23,6 +23,8 @@ include_directories(core/analyzer/include)
 include_directories(core/tracer/include)
 include_directories(os_specific/linux)
 include_directories(os_specific/windows)
+include_directories(tools/binaryDiff/include)
+include_directories(tools/cfgVisualizer/include)
 
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
@@ -31,6 +33,8 @@ file(GLOB_RECURSE CORE_SOURCES
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"
     "core/tracer/src/*.cpp"
+    "tools/binaryDiff/src/*.cpp"
+    "tools/cfgVisualizer/src/*.cpp"
 )
 
 # OS Specific Modules
@@ -95,6 +99,20 @@ if(BUILD_TESTS)
         endif()
 
         add_test(NAME TestTracer COMMAND test_tracer)
+    endif()
+
+    # Test BinaryDiff
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/tools/binaryDiff/testDiffBinary.cpp")
+        add_executable(test_binary_diff tests/tools/binaryDiff/testDiffBinary.cpp)
+        target_link_libraries(test_binary_diff PRIVATE retools_core)
+        add_test(NAME TestBinaryDiff COMMAND test_binary_diff)
+    endif()
+
+    # Test CFGVisualizer
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/tools/cfgVisualizer/testGenerateCFG.cpp")
+        add_executable(test_cfg_visualizer tests/tools/cfgVisualizer/testGenerateCFG.cpp)
+        target_link_libraries(test_cfg_visualizer PRIVATE retools_core)
+        add_test(NAME TestCFGVisualizer COMMAND test_cfg_visualizer)
     endif()
 endif()
 
