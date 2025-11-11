@@ -18,11 +18,15 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 include_directories(include)
 include_directories(core/parser/include)
 include_directories(core/disassembler/include)
+include_directories(core/hexeditor/include)
+include_directories(core/analyzer/include)
 
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
     "core/parser/src/*.cpp"
     "core/disassembler/src/*.cpp"
+    "core/hexeditor/src/*.cpp"
+    "core/analyzer/src/*.cpp"
 )
 
 if(NOT CORE_SOURCES)
@@ -48,6 +52,20 @@ if(BUILD_TESTS)
         add_executable(test_disasm tests/disassembler/testDecodeInstruksi.cpp)
         target_link_libraries(test_disasm PRIVATE retools_core)
         add_test(NAME TestDisasm COMMAND test_disasm)
+    endif()
+
+    # Test HexEditor
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/hexeditor/testLihatBytes.cpp")
+        add_executable(test_hexeditor tests/hexeditor/testLihatBytes.cpp)
+        target_link_libraries(test_hexeditor PRIVATE retools_core)
+        add_test(NAME TestHexEditor COMMAND test_hexeditor)
+    endif()
+
+    # Test Analyzer
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/analyzer/testHitungEntropy.cpp")
+        add_executable(test_analyzer tests/analyzer/testHitungEntropy.cpp)
+        target_link_libraries(test_analyzer PRIVATE retools_core)
+        add_test(NAME TestAnalyzer COMMAND test_analyzer)
     endif()
 endif()
 
