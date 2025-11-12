@@ -9,9 +9,19 @@
 #include <algorithm>
 #include <cctype>
 
+// Definisi struct C++
+struct ElfSection {
+    std::string name;
+    uint64_t addr;
+    uint64_t offset;
+    uint64_t size;
+    uint32_t type;
+};
+
 // Helper untuk membaca section .text
 std::vector<uint8_t> get_text_section(const std::string& filename, uint64_t& base_addr) {
-    std::vector<ElfSection> sections = parseSectionsElf(filename);
+    std::vector<ElfSection> sections; // = parseSectionsElf(filename);
+
     for (const auto& s : sections) {
         if (s.name == ".text") {
             base_addr = s.addr;
@@ -25,7 +35,7 @@ std::vector<uint8_t> get_text_section(const std::string& filename, uint64_t& bas
         }
     }
     base_addr = 0;
-    return {};
+    return {}; // Akan return kosong karena 'sections' kosong
 }
 
 // Helper format hex
@@ -42,7 +52,9 @@ inline std::string to_hex_str(uint64_t val) {
 std::string generateCFG(const std::string& filename) {
     uint64_t base_addr = 0;
     std::vector<uint8_t> text_data = get_text_section(filename, base_addr);
-    if (text_data.empty()) return "digraph G { error [label=\"File tidak valid atau .text kosong\"]; }";
+    if (text_data.empty()) {
+        return "digraph G { error [label=\"File tidak valid atau .text kosong\"]; }";
+    }
 
     std::stringstream dot;
     dot << "digraph G {\n";

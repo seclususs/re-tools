@@ -1,1 +1,30 @@
 * text eol=lf
+
+# Rust
+*.rs text eol=lf
+*.toml text eol=lf
+
+# C/C++
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.c text eol=lf
+
+# Python
+*.py text eol=lf
+
+# CMake & config
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary (no conversion)
+*.exe binary
+*.dll binary
+*.a binary
+*.lib binary
+*.so binary
+*.png binary
+*.jpg binary

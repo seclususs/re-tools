@@ -73,7 +73,7 @@ include_directories(tools/cfgVisualizer/include)
 
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
-    "core/parser/src/*.cpp"
+    # "core/parser/src/*.cpp"
     # "core/disassembler/src/*.cpp"
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"

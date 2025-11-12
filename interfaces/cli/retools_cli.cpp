@@ -39,24 +39,23 @@ int handleParse(const std::vector<std::string>& args) {
     std::string file_path = args[2];
 
     if (command == "header") {
-        ElfHeader hdr = parseHeaderElf(file_path);
+        // Panggil C-ABI
+        C_ElfHeader hdr = c_parseHeaderElf(file_path.c_str());
+        
         if (!hdr.valid) {
             std::cerr << "Error: File tidak valid atau bukan ELF." << std::endl;
             return 1;
         }
-        std::cout << "ELF Header for: " << file_path << std::endl;
+        std::cout << "ELF Header for: " << file_path << " (Parsed)" << std::endl;
         std::cout << "  Magic: " << hdr.magic << std::endl;
         std::cout << "  Entry: 0x" << std::hex << hdr.entry_point << std::endl;
         std::cout << "  Machine: " << std::dec << hdr.machine << std::endl;
         std::cout << "  Sections: " << std::dec << hdr.section_count << std::endl;
+        std::cout << "  File Size: " << std::dec << hdr.ukuran_file_size << " bytes" << std::endl;
+    
     } else if (command == "sections") {
-        std::vector<ElfSection> sections = parseSectionsElf(file_path);
-        std::cout << "Sections (" << sections.size() << "):" << std::endl;
-        for (const auto& s : sections) {
-            std::cout << "  - " << std::setw(20) << s.name 
-                      << " (addr: 0x" << std::hex << s.addr 
-                      << ", size: " << std::dec << s.size << ")" << std::endl;
-        }
+        std::cerr << "Fitur 'parse sections' gagal." << std::endl;
+        std::cerr << "Fungsi C++ 'parseSectionsElf' sudah dihapus." << std::endl;
     } else {
         return -1;
     }
@@ -123,7 +122,7 @@ int handlePipeline(const std::vector<std::string>& args) {
     std::cout << "  \"file\": " << escapeJson(file_path) << "," << std::endl;
 
     // Parse
-    ElfHeader hdr = parseHeaderElf(file_path);
+    C_ElfHeader hdr = c_parseHeaderElf(file_path.c_str());
     std::cout << "  \"header\": {" << std::endl;
     if (hdr.valid) {
         std::cout << "    \"valid\": true," << std::endl;
