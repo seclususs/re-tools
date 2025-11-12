@@ -1,5 +1,6 @@
 mod disasm;
 mod parser;
+mod tracer;
 mod utils;
 
 extern crate capstone;
@@ -9,6 +10,7 @@ extern crate libc;
 use disasm::{logic_decode_instruksi, C_Instruksi};
 use libc::c_char;
 use parser::{logic_parse_header_elf, C_ElfHeader};
+pub use tracer::*;
 
 /// Fungsi C-ABI buat disassembly
 #[unsafe(no_mangle)]

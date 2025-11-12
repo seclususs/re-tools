@@ -77,7 +77,7 @@ file(GLOB_RECURSE CORE_SOURCES
     # "core/disassembler/src/*.cpp"
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"
-    "core/tracer/src/*.cpp"
+    # "core/tracer/src/*.cpp"
     "tools/binaryDiff/src/*.cpp"
     "tools/cfgVisualizer/src/*.cpp"
 )
