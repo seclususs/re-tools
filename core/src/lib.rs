@@ -15,7 +15,11 @@ use parser::{
     logic_parse_binary_header, logic_parse_sections_elf, logic_parse_symbols_elf,
 };
 use std::ffi::CString;
-pub use tracer::*;
+
+pub use tracer::{
+    rt_attachProses, rt_bacaMemory, rt_continueProses, rt_detachProses, rt_getRegisters,
+    rt_setBreakpoint, rt_setRegisters, rt_singleStep, rt_tulisMemory, rt_tungguEvent,
+};
 
 /// Fungsi C-ABI buat disassembly
 #[unsafe(no_mangle)]
