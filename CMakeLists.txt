@@ -4,10 +4,10 @@ project(re-tools VERSION 0.1.0 LANGUAGES C CXX)
 include(ExternalProject)
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
-set(RUST_PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/core_rs)
+set(RUST_PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/core)
 set(RUST_EP_DIR ${CMAKE_CURRENT_BINARY_DIR}/rust_ep_build)
 set(RUST_TARGET_DIR ${RUST_EP_DIR}/target)
-set(RUST_LIB_NAME core_rs)
+set(RUST_LIB_NAME core)
 
 if(WIN32)
   if(MINGW)
