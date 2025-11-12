@@ -6,10 +6,15 @@ mod utils;
 extern crate capstone;
 extern crate goblin;
 extern crate libc;
+extern crate serde;
+extern crate serde_json;
 
 use disasm::{logic_decode_instruksi, C_Instruksi};
 use libc::c_char;
-use parser::{logic_parse_header_elf, C_ElfHeader};
+use parser::{
+    logic_parse_header_elf, logic_parse_sections_elf, logic_parse_symbols_elf, C_ElfHeader,
+};
+use std::ffi::CString;
 pub use tracer::*;
 
 /// Fungsi C-ABI buat disassembly
@@ -29,6 +34,30 @@ pub unsafe extern "C" fn c_parseHeaderElf(file_path_c: *const c_char) -> C_ElfHe
     // Panggil logika dari modul parser
     logic_parse_header_elf(file_path_c)
 }
+
+/// Fungsi C-ABI untuk parse ELF Sections
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_parseSectionsElf(file_path_c: *const c_char) -> *mut c_char {
+    logic_parse_sections_elf(file_path_c)
+}
+
+/// Fungsi C-ABI untuk parse ELF Symbols
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_parseSymbolsElf(file_path_c: *const c_char) -> *mut c_char {
+    logic_parse_symbols_elf(file_path_c)
+}
+
+/// Fungsi C-ABI untuk membebaskan string JSON
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_freeJsonString(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = CString::from_raw(s);
+    }
+}
+
 
 // TESTS)
 #[cfg(test)]

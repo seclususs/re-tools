@@ -1,4 +1,5 @@
 import ctypes
+import json
 from utils.lib_loader import _lib
 
 # Definisi Struktur C untuk ctypes
@@ -15,8 +16,21 @@ class C_ElfHeader(ctypes.Structure):
 
 # Setup prototype fungsi C
 if _lib:
+    # C_ElfHeader c_parseHeaderElf(const char* filename);
     _lib.c_parseHeaderElf.argtypes = [ctypes.c_char_p]
     _lib.c_parseHeaderElf.restype = C_ElfHeader
+
+    # char* c_parseSectionsElf(const char* filename);
+    _lib.c_parseSectionsElf.argtypes = [ctypes.c_char_p]
+    _lib.c_parseSectionsElf.restype = ctypes.c_char_p
+
+    # char* c_parseSymbolsElf(const char* filename);
+    _lib.c_parseSymbolsElf.argtypes = [ctypes.c_char_p]
+    _lib.c_parseSymbolsElf.restype = ctypes.c_char_p
+
+    # void c_freeJsonString(char* s);
+    _lib.c_freeJsonString.argtypes = [ctypes.c_char_p]
+    _lib.c_freeJsonString.restype = None
 
 class ElfHeader:
     def __init__(self, c_hdr):
@@ -39,11 +53,45 @@ def parseHeaderElf(filename: str) -> ElfHeader:
     return ElfHeader(c_hdr)
 
 def parseSectionsElf(filename: str) -> list:
-    print("PERINGATAN: parseSectionsElf (C++) telah dihapus.")
-    print("PERINGATAN: Implementasi C-ABI untuk 'sections' belum dibuat.")
-    return []
+    if not _lib:
+        raise RuntimeError("Library re-tools core tidak termuat")
+    
+    c_filename = filename.encode('utf-8')
+    json_ptr = _lib.c_parseSectionsElf(c_filename)
+    
+    if not json_ptr:
+        print("PERINGATAN: c_parseSectionsElf (Rust) mengembalikan pointer null.")
+        return []
+        
+    try:
+        json_str = ctypes.string_at(json_ptr).decode('utf-8')
+        hasil_list = json.loads(json_str)
+    except Exception as e:
+        print(f"Error saat parsing JSON dari c_parseSectionsElf: {e}")
+        hasil_list = []
+    finally:
+        _lib.c_freeJsonString(json_ptr)
+        
+    return hasil_list
 
 def parseSymbolElf(filename: str) -> list:
-    print("PERINGATAN: parseSymbolElf (C++) telah dihapus.")
-    print("PERINGATAN: Implementasi C-ABI untuk 'symbols' belum dibuat.")
-    return []
+    if not _lib:
+        raise RuntimeError("Library re-tools core tidak termuat")
+        
+    c_filename = filename.encode('utf-8')
+    json_ptr = _lib.c_parseSymbolsElf(c_filename)
+    
+    if not json_ptr:
+        print("PERINGATAN: c_parseSymbolsElf (Rust) mengembalikan pointer null.")
+        return []
+        
+    try:
+        json_str = ctypes.string_at(json_ptr).decode('utf-8')
+        hasil_list = json.loads(json_str)
+    except Exception as e:
+        print(f"Error saat parsing JSON dari c_parseSymbolsElf: {e}")
+        hasil_list = []
+    finally:
+        _lib.c_freeJsonString(json_ptr)
+            
+    return hasil_list

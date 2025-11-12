@@ -1,9 +1,12 @@
 use goblin::elf::Elf;
 use libc::{c_char, c_int};
-use std::ffi::CStr;
+use serde::Serialize;
+use serde_json;
+use std::ffi::{CStr, CString};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::path::Path;
+use std::ptr;
 
 use super::utils::strncpy_rs;
 
@@ -80,5 +83,146 @@ pub fn logic_parse_header_elf(file_path_c: *const c_char) -> C_ElfHeader {
             // Gagal parse (bukan ELF valid)
             invalid_elf_header()
         }
+    }
+}
+
+#[derive(Serialize)]
+struct InfoSection<'a> {
+    name: &'a str,
+    addr: u64,
+    size: u64,
+    offset: u64,
+    tipe: u32,
+}
+
+#[derive(Serialize)]
+struct InfoSimbol<'a> {
+    name: &'a str,
+    addr: u64,
+    size: u64,
+    symbol_type: &'a str,
+    bind: &'a str,
+}
+
+/// Logika internal untuk parse sections
+pub fn logic_parse_sections_elf(file_path_c: *const c_char) -> *mut c_char {
+    let path_cstr = unsafe {
+        if file_path_c.is_null() {
+            return ptr::null_mut();
+        }
+        CStr::from_ptr(file_path_c)
+    };
+    let path_str = match path_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    let buffer_bytes = match fs::read(Path::new(path_str)) {
+        Ok(bytes) => bytes,
+        Err(_) => return ptr::null_mut(),
+    };
+    
+    match Elf::parse(&buffer_bytes) {
+        Ok(elf) => {
+            let mut sections_vec = Vec::new();
+            for section in &elf.section_headers {
+                let section_name = elf.shdr_strtab.get_at(section.sh_name).unwrap_or("(unknown)");
+                sections_vec.push(InfoSection {
+                    name: section_name,
+                    addr: section.sh_addr,
+                    size: section.sh_size,
+                    offset: section.sh_offset,
+                    tipe: section.sh_type,
+                });
+            }
+            let json_string = serde_json::to_string(&sections_vec).unwrap_or_else(|_| "[]".to_string());
+            match CString::new(json_string) {
+                Ok(c_str) => c_str.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Logika internal untuk parse symbols
+pub fn logic_parse_symbols_elf(file_path_c: *const c_char) -> *mut c_char {
+    let path_cstr = unsafe {
+        if file_path_c.is_null() {
+            return ptr::null_mut();
+        }
+        CStr::from_ptr(file_path_c)
+    };
+    let path_str = match path_cstr.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    let buffer_bytes = match fs::read(Path::new(path_str)) {
+        Ok(bytes) => bytes,
+        Err(_) => return ptr::null_mut(),
+    };
+    
+    match Elf::parse(&buffer_bytes) {
+        Ok(elf) => {
+            let mut symbols_vec = Vec::new();
+            
+            // Simbol statis
+            for sym in &elf.syms {
+                let symbol_name = elf.strtab.get_at(sym.st_name).unwrap_or("(unknown_static)");
+                if symbol_name.is_empty() { continue; } // Skip empty names
+                
+                symbols_vec.push(InfoSimbol {
+                    name: symbol_name,
+                    addr: sym.st_value,
+                    size: sym.st_size,
+                    symbol_type: st_type_to_str(sym.st_type()),
+                    bind: st_bind_to_str(sym.st_bind()),
+                });
+            }
+            
+            // Simbol dinamis
+            for sym in &elf.dynsyms {
+                 let symbol_name = elf.dynstrtab.get_at(sym.st_name).unwrap_or("(unknown_dynamic)");
+                 if symbol_name.is_empty() { continue; } // Skip empty names
+                 
+                 symbols_vec.push(InfoSimbol {
+                    name: symbol_name,
+                    addr: sym.st_value,
+                    size: sym.st_size,
+                    symbol_type: st_type_to_str(sym.st_type()),
+                    bind: st_bind_to_str(sym.st_bind()),
+                });
+            }
+
+            let json_string = serde_json::to_string(&symbols_vec).unwrap_or_else(|_| "[]".to_string());
+             match CString::new(json_string) {
+                Ok(c_str) => c_str.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// Helper untuk konversi Tipe Simbol Goblin ke string
+fn st_type_to_str(st_type: u8) -> &'static str {
+    match st_type {
+        goblin::elf::sym::STT_NOTYPE => "NOTYPE",
+        goblin::elf::sym::STT_OBJECT => "OBJECT",
+        goblin::elf::sym::STT_FUNC => "FUNC",
+        goblin::elf::sym::STT_SECTION => "SECTION",
+        goblin::elf::sym::STT_FILE => "FILE",
+        goblin::elf::sym::STT_COMMON => "COMMON",
+        goblin::elf::sym::STT_TLS => "TLS",
+        _ => "OTHER",
+    }
+}
+
+// Helper untuk konversi Binding Simbol Goblin ke string
+fn st_bind_to_str(st_bind: u8) -> &'static str {
+    match st_bind {
+        goblin::elf::sym::STB_LOCAL => "LOCAL",
+        goblin::elf::sym::STB_GLOBAL => "GLOBAL",
+        goblin::elf::sym::STB_WEAK => "WEAK",
+        _ => "OTHER_BIND",
     }
 }
