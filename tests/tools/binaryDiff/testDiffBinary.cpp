@@ -109,17 +109,21 @@ int main() {
 
     std::cout << "[TEST] Mulai testDiffBinary..." << std::endl;
 
-    // Test: File Sama (Akan gagal karena stub)
+    // Test: File Sama
     std::vector<DiffResult> results1 = diffBinary(file1, file2);
-    assert(results1.size() == 1);
-    assert(results1[0].functionName == "[INFO]");
-    std::cout << "  [PASS] Perbandingan file identik (diharapkan gagal stub) OK." << std::endl;
+    assert(results1.size() > 0);
+    // Cek hasil fallback (.text)
+    assert(results1[0].functionName == ".text");
+    assert(results1[0].status == DiffResult::MATCHED);
+    std::cout << "  [PASS] Perbandingan file identik (fallback .text MATCHED) OK." << std::endl;
 
-    // Test: File Beda (Akan gagal karena stub)
+    // Test: File Beda
     std::vector<DiffResult> results2 = diffBinary(file1, file3);
-    assert(results2.size() == 1);
-    assert(results2[0].functionName == "[INFO]");
-    std::cout << "  [PASS] Perbandingan file berbeda (diharapkan gagal stub) OK." << std::endl;
+    assert(results2.size() > 0);
+    // Cek hasil fallback (.text)
+    assert(results2[0].functionName == ".text");
+    assert(results2[0].status == DiffResult::MODIFIED);
+    std::cout << "  [PASS] Perbandingan file berbeda (fallback .text MODIFIED) OK." << std::endl;
 
     std::remove(file1.c_str());
     std::remove(file2.c_str());
