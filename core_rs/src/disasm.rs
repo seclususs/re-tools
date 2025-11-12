@@ -4,6 +4,18 @@ use std::slice;
 
 use super::utils::strncpy_rs;
 
+/// Enum C-ABI untuk menentukan arsitektur
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ArsitekturDisasm {
+    ARCH_UNKNOWN = 0,
+    ARCH_X86_32 = 1,
+    ARCH_X86_64 = 2,
+    ARCH_ARM_32 = 3,
+    ARCH_ARM_64 = 4,
+}
+
 /// Struct C-ABI yang akan di return ke C++
 #[allow(non_camel_case_types)]
 #[repr(C)]
@@ -31,11 +43,49 @@ fn invalid_instruction(size: c_int) -> C_Instruksi {
     instr
 }
 
+/// Helper untuk membuat instance berdasarkan arsitektur
+fn create_capstone_instance_by_arch(
+    arch: ArsitekturDisasm,
+) -> Result<Capstone, capstone::Error> {
+    let cs_builder_result = match arch {
+        ArsitekturDisasm::ARCH_X86_32 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode32)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_X86_64 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_ARM_32 => Capstone::new()
+            .arm()
+            .mode(arch::arm::ArchMode::Arm)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_ARM_64 => Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_UNKNOWN => {
+            // Default ke x86-64 jika tidak diketahui, tapi ini mungkin tidak ideal
+            Capstone::new()
+                .x86()
+                .mode(arch::x86::ArchMode::Mode64)
+                .detail(true)
+                .build()
+        }
+    };
+    cs_builder_result
+}
+
 /// Logika internal untuk disassembly
 pub fn logic_decode_instruksi(
     ptr_data: *const u8, // Pointer mentah ke data bytes
     len_data: usize, // Panjang total data
     offset: usize, // Offset saat ini
+    arch: ArsitekturDisasm, // Arsitektur yang diminta
 ) -> C_Instruksi {
     // Bounds check dulu
     if offset >= len_data {
@@ -51,21 +101,15 @@ pub fn logic_decode_instruksi(
         return invalid_instruction(0);
     }
 
-    // Inisialisasi Capstone
-    // TODO: Idealnya, instance Capstone ini di-cache, jangan dibuat di tiap call
-    let cs_result = Capstone::new()
-        .x86() // Set arsitektur ke x86
-        .mode(arch::x86::ArchMode::Mode64) // Mode 64-bit
-        .detail(true) // Kita butuh detail
-        .build();
-
-    let cs = match cs_result {
+    // Buat instance berdasarkan arsitektur
+    let cs_instance_result = create_capstone_instance_by_arch(arch);
+    let cs_instance = match cs_instance_result {
         Ok(cs) => cs,
-        Err(_) => return invalid_instruction(1), // Gagal init Capstone
+        Err(_) => return invalid_instruction(1), // Gagal buat capstone
     };
 
     // Disassemble SATU instruksi
-    let insns_result = cs.disasm_count(code_slice, 0x0, 1); // 0x0 itu virtual address, bisa apa aja
+    let insns_result = cs_instance.disasm_count(code_slice, 0x0, 1);
 
     match insns_result {
         Ok(insns) => {

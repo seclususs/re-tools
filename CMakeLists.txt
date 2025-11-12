@@ -73,19 +73,10 @@ include_directories(tools/cfgVisualizer/include)
 
 # Core Modules
 file(GLOB_RECURSE CORE_SOURCES
-    # "core/parser/src/*.cpp"
-    # "core/disassembler/src/*.cpp"
     "core/hexeditor/src/*.cpp"
     "core/analyzer/src/*.cpp"
-    # "core/tracer/src/*.cpp"
     "tools/binaryDiff/src/*.cpp"
     "tools/cfgVisualizer/src/*.cpp"
-)
-
-# OS Specific Modules
-file(GLOB_RECURSE OS_SPECIFIC_SOURCES
-    "os_specific/linux/*.cpp"
-    "os_specific/windows/*.cpp"
 )
 
 if(NOT CORE_SOURCES)
@@ -135,8 +126,8 @@ if(BUILD_TESTS)
     endif()
 
     # Test Parser
-    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/parser/testParseHeaderElf.cpp")
-        add_executable(test_parser tests/parser/testParseHeaderElf.cpp)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/tests/parser/testParseBinaryHeader.cpp")
+        add_executable(test_parser tests/parser/testParseBinaryHeader.cpp)
         target_link_libraries(test_parser PRIVATE retools_core)
         add_test(NAME TestParser COMMAND test_parser)
     endif()

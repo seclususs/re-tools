@@ -8,21 +8,13 @@
 
 // C Interface
 extern "C" {
-    // Wrapper untuk ctypes
-    struct C_ElfHeader {
-        char magic[5];
-        uint64_t entry_point;
-        uint16_t machine;
-        uint16_t section_count;
-        int valid;
-        uint64_t ukuran_file_size;
-        uint64_t padding; 
-    };
-
+    
     /**
-     * @brief Parse header ELF.
+     * @brief Parse header generik (ELF, PE, Mach-O) dan return sebagai JSON string.
+     * @param filename Path ke file binary.
+     * @return Pointer ke string JSON. Panggil c_freeJsonString() untuk membebaskan.
      */
-    C_ElfHeader c_parseHeaderElf(const char* filename);
+    char* c_parseBinaryHeader(const char* filename);
 
     /**
      * @brief Parse ELF sections dan return sebagai JSON string.

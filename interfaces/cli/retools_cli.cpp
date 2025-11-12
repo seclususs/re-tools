@@ -20,7 +20,7 @@ void printUsage(const char* progName) {
     std::cerr << "Usage: " << progName << " <module> <command> [file_path] [options]" << std::endl;
     std::cerr << "Modules:" << std::endl;
     std::cerr << "  parse <command> [file]" << std::endl;
-    std::cerr << "    header              : Tampilkan ELF header." << std::endl;
+    std::cerr << "    header              : Tampilkan header (ELF, PE, Mach-O) sebagai JSON." << std::endl;
     std::cerr << "    sections            : Tampilkan ELF sections." << std::endl;
     std::cerr << "  analyze <command> [file]" << std::endl;
     std::cerr << "    strings             : Ekstrak strings." << std::endl;
@@ -39,23 +39,29 @@ int handleParse(const std::vector<std::string>& args) {
     std::string file_path = args[2];
 
     if (command == "header") {
-        // Panggil C-ABI
-        C_ElfHeader hdr = c_parseHeaderElf(file_path.c_str());
+        // Panggil C-ABI (return JSON)
+        char* json_string = c_parseBinaryHeader(file_path.c_str());
         
-        if (!hdr.valid) {
-            std::cerr << "Error: File tidak valid atau bukan ELF." << std::endl;
+        if (json_string == nullptr) {
+            std::cerr << "Error: Gagal parse header (pointer null)." << std::endl;
             return 1;
         }
-        std::cout << "ELF Header for: " << file_path << " (Parsed)" << std::endl;
-        std::cout << "  Magic: " << hdr.magic << std::endl;
-        std::cout << "  Entry: 0x" << std::hex << hdr.entry_point << std::endl;
-        std::cout << "  Machine: " << std::dec << hdr.machine << std::endl;
-        std::cout << "  Sections: " << std::dec << hdr.section_count << std::endl;
-        std::cout << "  File Size: " << std::dec << hdr.ukuran_file_size << " bytes" << std::endl;
+        
+        std::cout << "Binary Header (JSON):" << std::endl;
+        std::cout << json_string << std::endl;
+        
+        // Bebaskan string
+        c_freeJsonString(json_string);
     
     } else if (command == "sections") {
-        std::cerr << "Fitur 'parse sections' gagal." << std::endl;
-        std::cerr << "Fungsi C++ 'parseSectionsElf' sudah dihapus." << std::endl;
+         char* json_string = c_parseSectionsElf(file_path.c_str());
+         if (json_string == nullptr) {
+             std::cerr << "Error: Gagal parse sections (hanya support ELF)." << std::endl;
+             return 1;
+         }
+         std::cout << "ELF Sections (JSON):" << std::endl;
+         std::cout << json_string << std::endl;
+         c_freeJsonString(json_string);
     } else {
         return -1;
     }
@@ -108,7 +114,8 @@ std::string escapeJson(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
         if (c == '"' || c == '\\') out += '\\';
-        out += c;
+        else if (c < 32 || c == 127) out += " ";
+        else out += c;
     }
     out += "\"";
     return out;
@@ -122,16 +129,13 @@ int handlePipeline(const std::vector<std::string>& args) {
     std::cout << "  \"file\": " << escapeJson(file_path) << "," << std::endl;
 
     // Parse
-    C_ElfHeader hdr = c_parseHeaderElf(file_path.c_str());
-    std::cout << "  \"header\": {" << std::endl;
-    if (hdr.valid) {
-        std::cout << "    \"valid\": true," << std::endl;
-        std::cout << "    \"entry_point\": \"0x" << std::hex << hdr.entry_point << "\"," << std::endl;
-        std::cout << "    \"machine\": " << std::dec << hdr.machine << std::endl;
+    char* json_header_ptr = c_parseBinaryHeader(file_path.c_str());
+    if (json_header_ptr) {
+        std::cout << "  \"header\": " << json_header_ptr << "," << std::endl;
+        c_freeJsonString(json_header_ptr);
     } else {
-        std::cout << "    \"valid\": false" << std::endl;
+        std::cout << "  \"header\": {\"valid\": false, \"error\": \"parse failed\"}," << std::endl;
     }
-    std::cout << "  }," << std::endl;
 
     // Analyze (Strings)
     std::vector<std::string> strings = extractStrings(file_path, 4);
@@ -142,7 +146,7 @@ int handlePipeline(const std::vector<std::string>& args) {
         std::cout << std::endl;
     }
     std::cout << "  ]," << std::endl;
-
+    
     // Analyze (Entropy)
     std::vector<double> entropy = hitungEntropy(file_path, 1024);
     std::cout << "  \"entropy\": [" << std::endl;

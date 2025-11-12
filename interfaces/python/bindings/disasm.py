@@ -1,6 +1,13 @@
 import ctypes
 from utils.lib_loader import _lib
 
+# Definisi Enum Arsitektur
+ARCH_UNKNOWN = 0
+ARCH_X86_32 = 1
+ARCH_X86_64 = 2
+ARCH_ARM_32 = 3
+ARCH_ARM_64 = 4
+
 class C_Instruksi(ctypes.Structure):
     _fields_ = [
         ("mnemonic_instruksi", ctypes.c_char * 32),
@@ -10,23 +17,28 @@ class C_Instruksi(ctypes.Structure):
     ]
 
 if _lib:
-    # c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset)
-    _lib.c_decodeInstruksi.argtypes = [ctypes.POINTER(ctypes.c_ubyte), ctypes.c_size_t, ctypes.c_size_t]
+    # c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset
+    _lib.c_decodeInstruksi.argtypes = [
+        ctypes.POINTER(ctypes.c_ubyte), 
+        ctypes.c_size_t, 
+        ctypes.c_size_t,
+        ctypes.c_int
+    ]
     _lib.c_decodeInstruksi.restype = C_Instruksi
 
-def decodeInstruksi(byte_data: bytes, offset: int) -> tuple:
-    """
-    Mendekode satu instruksi dari bytearray pada offset tertentu.
-    Return: (mnemonic: str, operands: list[str], size: int)
-    """
+def decodeInstruksi(byte_data: bytes, offset: int, arch: int) -> tuple:
     if not _lib:
         raise RuntimeError("Library re-tools core tidak termuat")
+    
+    if arch == ARCH_UNKNOWN:
+        # Jika tidak diketahui, coba default ke X86_64
+        arch = ARCH_X86_64
 
     # Konversi bytes Python ke array ctypes
     ByteArr = ctypes.c_ubyte * len(byte_data)
     c_bytes = ByteArr.from_buffer_copy(byte_data)
 
-    c_instr = _lib.c_decodeInstruksi(c_bytes, len(byte_data), offset)
+    c_instr = _lib.c_decodeInstruksi(c_bytes, len(byte_data), offset, arch)
 
     if not c_instr.valid:
         size = c_instr.ukuran if c_instr.ukuran > 0 else 1

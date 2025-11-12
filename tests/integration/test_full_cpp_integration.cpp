@@ -91,9 +91,14 @@ int main() {
     try {
         // Test Parser
         std::cout << "  [TEST] Menjalankan Parser..." << std::endl;
-        C_ElfHeader header_data = c_parseHeaderElf(file_name.c_str());
-        assert(header_data.valid == 1);
-        assert(std::string(header_data.magic) == "ELF");
+        char* json_header_ptr = c_parseBinaryHeader(file_name.c_str());
+        assert(json_header_ptr != nullptr);
+        std::string json_header(json_header_ptr);
+        c_freeJsonString(json_header_ptr);
+        
+        assert(json_header.find("\"valid\":true") != std::string::npos);
+        assert(json_header.find("\"format\":\"ELF\"") != std::string::npos);
+        assert(json_header.find("\"machine_id\":62") != std::string::npos);
         std::cout << "    [PASS] Parser OK." << std::endl;
 
         // Test Analyzer (Strings)
@@ -113,15 +118,17 @@ int main() {
         std::cout << "  [TEST] Menjalankan Advanced/CFG..." << std::endl;
         std::string dot_graph = generateCFG(file_name);
         assert(dot_graph.find("digraph G") != std::string::npos);
-        assert(dot_graph.find("belum dimigrasi") != std::string::npos);
-        std::cout << "    [PASS] Advanced/CFG (diharapkan gagal stub) OK." << std::endl;
+        assert(dot_graph.find("PUSH rbp") != std::string::npos);
+        assert(dot_graph.find("RET") != std::string::npos);
+        std::cout << "    [PASS] Advanced/CFG OK." << std::endl;
         
         // Test Advanced Tool (Binary Diff)
         std::cout << "  [TEST] Menjalankan Advanced/Diff..." << std::endl;
         std::vector<DiffResult> diff_results = diffBinary(file_name, file_name);
         assert(diff_results.size() > 0);
-        assert(diff_results[0].functionName == "[INFO]");
-        std::cout << "    [PASS] Advanced/Diff (diharapkan gagal stub) OK." << std::endl;
+        assert(diff_results[0].functionName == ".text");
+        assert(diff_results[0].status == DiffResult::MATCHED);
+        std::cout << "    [PASS] Advanced/Diff (fallback .text) OK." << std::endl;
 
     } catch (const std::exception& e) {
         std::cerr << "  [FAIL] Test gagal dengan exception: " << e.what() << std::endl;

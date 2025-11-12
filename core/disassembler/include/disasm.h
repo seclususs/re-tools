@@ -17,6 +17,15 @@ struct InstruksiDecoded {
 
 // C Interface
 extern "C" {
+    // Enum untuk arsitektur
+    typedef enum ArsitekturDisasm {
+        ARCH_UNKNOWN = 0,
+        ARCH_X86_32 = 1,
+        ARCH_X86_64 = 2,
+        ARCH_ARM_32 = 3,
+        ARCH_ARM_64 = 4
+    } ArsitekturDisasm;
+
     // Struct C-ABI
     struct C_Instruksi {
         char mnemonic_instruksi[32]; // Nama mnemonic
@@ -26,7 +35,12 @@ extern "C" {
     };
 
     // Deklarasi fungsi C-ABI
-    C_Instruksi c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset);
+    C_Instruksi c_decodeInstruksi(
+        const uint8_t* bytes, 
+        size_t len, 
+        size_t offset, 
+        ArsitekturDisasm arch
+    );
 }
 
 #endif // RETOOLS_DISASM_H
