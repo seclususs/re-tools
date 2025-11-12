@@ -15,7 +15,6 @@ struct ElfSection {
     uint32_t type;
 };
 
-
 // Helper
 void create_dummy_elf_file_cfg(const std::string& filename) {
     std::ofstream file(filename, std::ios::binary);
@@ -34,22 +33,25 @@ void create_dummy_elf_file_cfg(const std::string& filename) {
         0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Offset 128
         0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // Vaddr 0x400080
         0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // Paddr
-        0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Filesz (11 bytes)
-        0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Memsz (11 bytes)
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Filesz
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Memsz
         0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // Align
     };
     header.insert(header.end(), pheader.begin(), pheader.end());
     header.resize(128, 0); // Padding ke .text offset (128)
     
-    // .text section data: 
-    // 0x55       (PUSH RBP)
-    // 0x48 0x89 0xE5 (MOV RBP, RSP)
-    // 0x90       (NOP)
-    // 0xC3       (RET)
-    // 0x90       (NOP) - block 2
-    // 0x90       (NOP)
-    // 0xC3       (RET) - block 2
-    std::vector<uint8_t> text_data = { 0x55, 0x48, 0x89, 0xE5, 0x90, 0xC3, 0x90, 0x90, 0xC3 };
+    // .text section data: (TOTAL 8 bytes)
+    // 0x400080: 55          (PUSH RBP)
+    // 0x400081: 90          (NOP)
+    // 0x400082: 74 02       (JZ 0x400086) - JUMP +2 bytes (ke 0x82 + 2 + 2 = 0x86)
+    // -- Block 1 (0x400080) berakhir di sini --
+    // 0x400084: 90          (NOP) - Fall-through
+    // 0x400085: C3          (RET)
+    // -- Block 2 (0x400084) berakhir di sini --
+    // 0x400086: 90          (NOP) - Target Jump
+    // 0x400087: C3          (RET)
+    // -- Block 3 (0x400086) berakhir di sini --
+    std::vector<uint8_t> text_data = { 0x55, 0x90, 0x74, 0x02, 0x90, 0xC3, 0x90, 0xC3 };
     header.insert(header.end(), text_data.begin(), text_data.end());
     header.resize(224, 0); // Padding ke shoff (224)
 
@@ -96,13 +98,29 @@ int main() {
     
     std::string dot_output = generateCFG(test_file);
     
-    if (dot_output.find("belum dimigrasi") != std::string::npos) {
-         std::cout << "  [PASS] Output DOT berisi pesan stub yang diharapkan." << std::endl;
-    } else {
-         std::cout << "--- Output DOT ---\n" << dot_output << "\n------------------\n";
-         std::cout << "  [FAIL] Output DOT tidak berisi pesan stub." << std::endl;
-         assert(false);
-    }
+    // Debugging: Cetak output DOT
+    // std::cout << "--- Output DOT ---\n" << dot_output << "\n------------------\n";
+
+    // Cek dasar
+    assert(dot_output.find("digraph G") != std::string::npos);
+    assert(dot_output.find("belum dimigrasi") == std::string::npos);
+
+    // Cek Node (Blok)
+    assert(dot_output.find("\"BBlock_0x400080\"") != std::string::npos); // Blok 1 (Start)
+    assert(dot_output.find("\"BBlock_0x400084\"") != std::string::npos); // Blok 2 (Fall-through)
+    assert(dot_output.find("\"BBlock_0x400086\"") != std::string::npos); // Blok 3 (Jump Target)
+    std::cout << "  [PASS] Semua 3 node (blok) ditemukan." << std::endl;
+
+    // Cek Edge (Panah)
+    // Edge dari JZ (Blok 1 -> Blok 3)
+    bool edge1_found = dot_output.find("\"BBlock_0x400080\" -> \"BBlock_0x400086\"") != std::string::npos;
+    assert(edge1_found);
+    std::cout << "  [PASS] Edge JZ (0x80 -> 0x86) ditemukan." << std::endl;
+
+    // Edge Fall-through (Blok 1 -> Blok 2)
+    bool edge2_found = dot_output.find("\"BBlock_0x400080\" -> \"BBlock_0x400084\"") != std::string::npos;
+    assert(edge2_found);
+    std::cout << "  [PASS] Edge Fall-through (0x80 -> 0x84) ditemukan." << std::endl;
     
     std::remove(test_file.c_str());
     std::cout << "[TEST] testGenerateCFG SELESAI." << std::endl;

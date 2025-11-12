@@ -8,140 +8,226 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <map>
 
-// Definisi struct C++
-struct ElfSection {
-    std::string name;
-    uint64_t addr;
-    uint64_t offset;
-    uint64_t size;
-    uint32_t type;
+// Tipe data
+struct InstruksiLokal {
+    uint64_t address;
+    std::string mnemonic;
+    std::string op_str;
+    int size;
+    bool valid;
 };
 
-// Helper untuk membaca section .text
-std::vector<uint8_t> get_text_section(const std::string& filename, uint64_t& base_addr) {
-    std::vector<ElfSection> sections; // = parseSectionsElf(filename);
+/**
+ * @brief Helper "dirty" parser untuk ekstrak nilai dari string JSON.
+ */
+std::string extractJsonValue(const std::string& json_obj, const std::string& key_prefix, const std::string& suffix) {
+    size_t start_pos = json_obj.find(key_prefix);
+    if (start_pos == std::string::npos) return "";
+    
+    start_pos += key_prefix.length();
+    
+    size_t end_pos = json_obj.find_first_of(suffix, start_pos);
+    if (end_pos == std::string::npos) return "";
+    
+    return json_obj.substr(start_pos, end_pos - start_pos);
+}
 
-    for (const auto& s : sections) {
-        if (s.name == ".text") {
-            base_addr = s.addr;
-            std::ifstream file(filename, std::ios::binary);
-            if (!file) return {};
-            file.seekg(s.offset, std::ios::beg);
-            
-            std::vector<uint8_t> data(s.size);
-            file.read(reinterpret_cast<char*>(data.data()), s.size);
-            return data;
-        }
-    }
+// Helper untuk membaca section .text menggunakan C-ABI (parsing JSON)
+std::vector<uint8_t> get_text_section_data(const std::string& filename, uint64_t& base_addr) {
     base_addr = 0;
-    return {}; // Akan return kosong karena 'sections' kosong
+    char* json_string = c_parseSectionsElf(filename.c_str());
+    if (!json_string) {
+        return {}; // Gagal parse atau tidak ada seksyen
+    }
+    
+    std::string json_data(json_string);
+    c_freeJsonString(json_string); // Bebaskan memori
+
+    size_t pos = 0;
+    // Cari seksyen ".text"
+    while ((pos = json_data.find("\"name\":\".text\"", pos)) != std::string::npos) {
+        // Temukan awal objek JSON
+        size_t obj_start = json_data.rfind('{', pos);
+        if (obj_start == std::string::npos) break;
+
+        std::string obj_str = json_data.substr(obj_start);
+        std::string addr_str = extractJsonValue(obj_str, "\"addr\":", ",}");
+        std::string offset_str = extractJsonValue(obj_str, "\"offset\":", ",}");
+        std::string size_str = extractJsonValue(obj_str, "\"size\":", ",}");
+
+        if (!addr_str.empty() && !offset_str.empty() && !size_str.empty()) {
+            try {
+                base_addr = std::stoull(addr_str);
+                uint64_t offset = std::stoull(offset_str);
+                uint64_t size = std::stoull(size_str);
+                
+                // Baca data dari file
+                std::ifstream file(filename, std::ios::binary);
+                if (!file || size == 0) return {};
+                file.seekg(offset, std::ios::beg);
+                
+                std::vector<uint8_t> data(size);
+                file.read(reinterpret_cast<char*>(data.data()), size);
+                return data;
+
+            } catch (...) {
+                return {}; // Gagal konversi
+            }
+        }
+        pos++;
+    }
+    
+    return {}; // .text tidak ditemukan
 }
 
 // Helper format hex
 inline std::string to_hex_str(uint64_t val) {
     std::stringstream ss;
-    ss << "0x" << std::hex << std::uppercase << val;
+    ss << "0x" << std::hex << val;
     return ss.str();
 }
 
+// Helper parse target jump
+uint64_t parseTargetAlamat(const std::string& op_str) {
+    if (op_str.empty()) return 0;
+    try {
+        // std::stoull dengan base 0 bisa auto-deteksi "0x"
+        return std::stoull(op_str, nullptr, 0);
+    } catch (...) {
+        return 0; // Gagal parse
+    }
+}
+
+// Helper untuk decode C-ABI ke struct C++ lokal
+InstruksiLokal decodeInstruksiLokal(const uint8_t* data_ptr, size_t data_len, size_t offset, uint64_t base_addr) {
+    C_Instruksi c_instr = c_decodeInstruksi(data_ptr, data_len, offset);
+    
+    InstruksiLokal instr;
+    instr.address = base_addr + offset;
+    instr.valid = (c_instr.valid != 0);
+    instr.size = c_instr.ukuran;
+    instr.op_str = "";
+
+    if (instr.valid) {
+        // Konversi mnemonic ke UPPERCASE
+        std::string temp_mne(c_instr.mnemonic_instruksi);
+        std::transform(temp_mne.begin(), temp_mne.end(), std::back_inserter(instr.mnemonic), ::toupper);
+        
+        // Salin operand string (hanya operand pertama jika ada)
+        std::string ops(c_instr.str_operand);
+        if (!ops.empty()) {
+            instr.op_str = ops.substr(0, ops.find_first_of(','));
+            // Trim spasi
+            size_t first = instr.op_str.find_first_not_of(' ');
+            if (std::string::npos != first) {
+                 size_t last = instr.op_str.find_last_not_of(' ');
+                 instr.op_str = instr.op_str.substr(first, (last - first + 1));
+            }
+        }
+    } else {
+        instr.mnemonic = "(unknown)";
+        if (instr.size == 0) instr.size = 1; // Hindari infinite loop
+    }
+    return instr;
+}
+
 /**
- * Implementasi generateCFG.
- * Panggil Rust C-ABI c_decodeInstruksi.
+ * @brief Implementasi generateCFG.
  */
 std::string generateCFG(const std::string& filename) {
     uint64_t base_addr = 0;
-    std::vector<uint8_t> text_data = get_text_section(filename, base_addr);
+    std::vector<uint8_t> text_data = get_text_section_data(filename, base_addr);
     if (text_data.empty()) {
-        return "digraph G { error [label=\"File tidak valid atau .text kosong\"]; }";
+        return "digraph G { error [label=\"File tidak valid atau .text kosong/gagal parse\"]; }";
     }
-
-    std::stringstream dot;
-    dot << "digraph G {\n";
-    dot << "  node [shape=box, fontname=\"Courier\"];\n";
-
-    int offset = 0;
-    int bblock_count = 0;
-    std::string current_bblock_id;
-
-    std::stringstream bblock_content;
-    uint64_t bblock_start_addr = 0;
 
     const uint8_t* data_ptr = text_data.data();
     const size_t data_len = text_data.size();
 
+    // Peta untuk menyimpan label node DOT
+    // Key: Alamat awal blok
+    // Value: String label (konten)
+    std::map<uint64_t, std::string> petaBlokLabel;
+    
+    // List untuk menyimpan string edge DOT
+    std::vector<std::string> daftarEdge;
+
+    int offset = 0;
+    uint64_t alamatMulaiBlok = base_addr + offset;
+    std::stringstream kontenBlok;
+
     while (offset < static_cast<int>(data_len)) {
-        if (current_bblock_id.empty()) {
-            bblock_start_addr = base_addr + offset;
-            current_bblock_id = "BBlock_" + to_hex_str(bblock_start_addr);
-            bblock_content.str(""); // Clear content
-            bblock_content.clear();
+        InstruksiLokal instr = decodeInstruksiLokal(data_ptr, data_len, offset, base_addr);
+
+        // Tambahkan instruksi ke konten blok saat ini
+        kontenBlok << to_hex_str(instr.address) << ": " << instr.mnemonic;
+        if (!instr.op_str.empty()) {
+            kontenBlok << " " << instr.op_str;
         }
+        kontenBlok << "\\n"; // Newline untuk DOT
 
-        // Panggil C-ABI
-        C_Instruksi c_instr = c_decodeInstruksi(data_ptr, data_len, static_cast<size_t>(offset));
+        offset += instr.size; // Maju ke instruksi berikutnya
 
-        // Konversi C_Instruksi (C struct) ke InstruksiDecoded (C++ struct internal)
-        InstruksiDecoded instr;
-        instr.valid = (c_instr.valid != 0);
-        instr.size = c_instr.ukuran;
-
-        if (instr.valid) {
-            // Konversi mnemonic ke UPPERCASE
-            std::string temp_mne(c_instr.mnemonic_instruksi);
-            std::transform(temp_mne.begin(), temp_mne.end(), std::back_inserter(instr.mnemonic), ::toupper);
-
-            // Parsing string operand (Capstone format: "op1, op2")
-            std::string ops(c_instr.str_operand);
-            if (!ops.empty()) {
-                std::stringstream ss(ops);
-                std::string single_op;
-                while (std::getline(ss, single_op, ',')) {
-                    // Trim spasi
-                    size_t first = single_op.find_first_not_of(' ');
-                    if (std::string::npos == first) {
-                        if (!single_op.empty()) instr.operands.push_back(single_op);
-                    } else {
-                        size_t last = single_op.find_last_not_of(' ');
-                        instr.operands.push_back(single_op.substr(first, (last - first + 1)));
-                    }
-                }
-            }
-        } else {
-            instr.mnemonic = "(unknown)";
-            if (instr.size == 0) instr.size = 1; // Hindari infinite loop
-        }
+        // Cek apakah instruksi ini adalah akhir dari basic block
+        bool akhirBlok = false;
+        std::string mne = instr.mnemonic;
 
         if (!instr.valid) {
-            // Instruksi gak dikenal, anggap akhir block
-            bblock_content << to_hex_str(base_addr + offset) << ": (unknown)\\n";
-            offset += instr.size; // Maju sesuai ukuran (atau 1)
-        } else {
-             bblock_content << to_hex_str(base_addr + offset) << ": " << instr.mnemonic;
-             for(const auto& op : instr.operands) {
-                 bblock_content << " " << op;
-             }
-             bblock_content << "\\n";
-             offset += instr.size;
-        }
-
-        // Cek akhir basic block
-        bool is_block_end = (!instr.valid) || (instr.mnemonic == "RET");
-        
-        if (is_block_end || offset >= static_cast<int>(text_data.size())) {
-            // Tulis basic block ke DOT
-            dot << "  " << current_bblock_id << " [label=\"" << bblock_content.str() << "\"];\n";
+            akhirBlok = true;
+        } else if (mne == "RET") {
+            akhirBlok = true;
+        } else if (mne == "JMP" || mne == "JNE" || mne == "JZ" || mne == "CALL" || mne == "JNZ" || mne == "JE") {
+            akhirBlok = true;
+            uint64_t alamatTarget = parseTargetAlamat(instr.op_str);
             
-            // TODO: Tambahkan edges (panah)
-            // Karena disasm tidak tahu JUMP/CALL, hanya perlu buat linear
-            if (bblock_count > 0) {
-                 std::string prev_bblock_id = "BBlock_" + to_hex_str(bblock_start_addr - 1); // Ini salah, perlu logic lebih
-                 // dot << "  " << prev_bblock_id << " -> " << current_bblock_id << ";\n";
+            if (alamatTarget != 0) {
+                // Tambahkan edge ke target jump/call
+                std::string edge = "  \"BBlock_" + to_hex_str(alamatMulaiBlok) + "\" -> \"BBlock_" + to_hex_str(alamatTarget) + "\";";
+                daftarEdge.push_back(edge);
             }
 
-            current_bblock_id = "";
-            bblock_count++;
+            if (mne != "JMP") {
+                // JNE, JZ, CALL, dll. juga punya fall-through
+                uint64_t alamatFallthrough = base_addr + offset;
+                std::string edge = "  \"BBlock_" + to_hex_str(alamatMulaiBlok) + "\" -> \"BBlock_" + to_hex_str(alamatFallthrough) + "\";";
+                daftarEdge.push_back(edge);
+            }
         }
+        
+        // TODO: Deteksi jika offset berikutnya adalah target jump
+        // (memerlukan 2 pass, saat ini 1 pass)
+
+        if (akhirBlok || offset >= static_cast<int>(data_len)) {
+            // Simpan blok yang sudah selesai
+            petaBlokLabel[alamatMulaiBlok] = kontenBlok.str();
+            
+            // Siapkan untuk blok berikutnya
+            kontenBlok.str("");
+            kontenBlok.clear();
+            alamatMulaiBlok = base_addr + offset;
+        }
+    }
+
+    // Tulis sisa konten jika ada
+    if (!kontenBlok.str().empty()) {
+         petaBlokLabel[alamatMulaiBlok] = kontenBlok.str();
+    }
+
+    // Bangun string DOT final
+    std::stringstream dot;
+    dot << "digraph G {\n";
+    dot << "  node [shape=box, fontname=\"Courier\"];\n";
+
+    // Tulis semua node (blok)
+    for (auto const& [alamat, label] : petaBlokLabel) {
+        dot << "  \"BBlock_" << to_hex_str(alamat) << "\" [label=\"" << label << "\"];\n";
+    }
+
+    // Tulis semua edge
+    for (const auto& edge_str : daftarEdge) {
+        dot << edge_str << "\n";
     }
 
     dot << "}\n";
