@@ -85,6 +85,7 @@ pub struct C_HeaderInfo {
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct C_SectionInfo {
     pub name: [c_char; 128],
     pub addr: u64,
@@ -95,6 +96,7 @@ pub struct C_SectionInfo {
 
 #[allow(non_camel_case_types)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct C_SymbolInfo {
     pub name: [c_char; 128],
     pub addr: u64,
@@ -144,7 +146,7 @@ fn st_bind_to_str(st_bind: u8) -> &'static str {
 
 /// Implementasi c_getBinaryHeader
 #[allow(non_snake_case)]
-pub unsafe fn c_getBinaryHeader(
+pub unsafe fn c_get_binary_header(
     file_path_c: *const c_char,
     out_header: *mut C_HeaderInfo,
 ) -> c_int {
@@ -247,7 +249,7 @@ pub unsafe fn c_getBinaryHeader(
 
 /// Implementasi c_getDaftarSections
 #[allow(non_snake_case)]
-pub unsafe fn c_getDaftarSections(
+pub unsafe fn c_get_daftar_sections(
     file_path_c: *const c_char,
     out_buffer: *mut C_SectionInfo,
     max_count: c_int,
@@ -290,7 +292,7 @@ pub unsafe fn c_getDaftarSections(
 
 /// Implementasi c_getDaftarSimbol
 #[allow(non_snake_case)]
-pub unsafe fn c_getDaftarSimbol(
+pub unsafe fn c_get_daftar_simbol(
     file_path_c: *const c_char,
     out_buffer: *mut C_SymbolInfo,
     max_count: c_int,

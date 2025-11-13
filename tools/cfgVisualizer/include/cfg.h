@@ -21,6 +21,17 @@ extern "C" {
      * @return 0 jika sukses, -1 jika error (misal buffer terlalu kecil).
      */
     int c_generateCFG(const char* filename, char* out_buffer, int out_buffer_size);
+    
+    /**
+     * @brief Implementasi penuh generateCFG di Rust.
+     * @return Pointer ke C string (DOT). Harus dibebaskan dengan c_freeString.
+     */
+    char* c_generateCFG_rs(const char* filename);
+    
+    /**
+     * @brief Membebaskan string yang dikembalikan oleh Rust.
+     */
+    void c_freeString(char* ptr);
 }
 
 #endif // RETOOLS_CFG_H

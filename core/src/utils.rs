@@ -1,4 +1,5 @@
 use libc::c_char;
+use std::ffi::CString;
 use std::ptr;
 
 /// Helper strncpy Rust ke fixed-size C buffer
@@ -13,4 +14,14 @@ pub fn strncpy_rs(src: &str, dest: &mut [c_char]) {
     }
     // null-terminator
     dest[len] = 0;
+}
+
+/// Membebaskan string yang dialokasi (CString::into_raw)
+pub unsafe fn c_free_string(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = CString::from_raw(ptr);
+    }
 }

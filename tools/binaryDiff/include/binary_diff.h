@@ -47,6 +47,11 @@ extern "C" {
      * @return Jumlah hasil yang ditemukan, atau -1 jika buffer tidak cukup.
      */
     int c_diffBinary(const char* file1, const char* file2, C_DiffResult* out_results, int max_results);
+    
+    /**
+     * @brief Implementasi penuh diffBinary di Rust.
+     */
+    int c_diffBinary_rs(const char* file1, const char* file2, C_DiffResult* out_results, int max_results);
 }
 
 #endif // RETOOLS_BINARY_DIFF_H

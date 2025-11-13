@@ -45,6 +45,17 @@ extern "C" {
     // C-Wrapper untuk deteksiPattern
     // Sama seperti extractStrings, kita kembalikan sebagai JSON string
     int c_deteksiPattern(const char* filename, const char* regex_str, char* out_buffer, int out_buffer_size);
+    
+    /**
+     * @brief Mengambil string (ASCII & UTF-16) sebagai JSON string.
+     * @return Pointer ke C string (JSON). Harus dibebaskan dengan c_freeString.
+     */
+    char* c_getStringsList_rs(const char* filename, int minLength);
+
+    /**
+     * @brief Membebaskan string yang dikembalikan oleh Rust.
+     */
+    void c_freeString(char* ptr);
 }
 
 #endif // RETOOLS_ANALYZER_H
