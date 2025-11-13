@@ -5,6 +5,8 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <vector>
+#include <cstdint>
 
 #ifdef _WIN32
 const std::string CLI_PATH = "lib/retools_cli.exe";
@@ -17,12 +19,20 @@ const std::string CLI_PATH = "lib/retools_cli";
 std::string create_dummy_file_cli() {
     std::string filename = "cli_test_dummy.bin";
     std::ofstream f(filename, std::ios::binary);
-    // Data palsu: Magic ELF dan string
-    f.write("\x7F\x45\x4C\x46\x02\x01\x01\x00", 8); // ELF64
-    f.write("\x00\x00\x00\x00\x00\x00\x00\x00", 8);
-    f.write("\x02\x00\x3E\x00", 4); // EXEC, AMD64
-    f.write("\x01\x00\x00\x00", 4);
-    f.write("\x40\x00\x40\x00\x00\x00\x00\x00", 8); // Entry 0x400040
+
+    std::vector<uint8_t> header = {
+        0x7F, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00, // Magic, 64-bit, LE, ver
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Pad
+        0x02, 0x00, // Type: EXEC
+        0x3E, 0x00, // Machine: x86-64 (62)
+        0x01, 0x00, 0x00, 0x00, // Version
+        0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // Entry point: 0x400040
+    };
+    header.resize(64, 0); // Pastikan 64 bytes
+    
+    f.write(reinterpret_cast<const char*>(header.data()), header.size());
+
+    // Data string
     f.write("ini_string_cli_satu", 20);
     f.write("ini_string_cli_dua", 19);
     f.close();
@@ -66,8 +76,8 @@ void test_cli_parse(const std::string& dummy_file) {
     std::string output = exec(cmd);
     
     assert(output.find("COMMAND_FAILED") == std::string::npos);
-    assert(output.find("Magic: ELF") != std::string::npos);
-    assert(output.find("Entry: 0x400040") != std::string::npos);
+    assert(output.find("\"format\": \"ELF\"") != std::string::npos);
+    assert(output.find("\"entry_point\": 4194368") != std::string::npos); // 0x400040
     std::cout << "  [PASS] parse header" << std::endl;
 }
 

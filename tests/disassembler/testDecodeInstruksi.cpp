@@ -11,11 +11,15 @@
  */
 InstruksiDecoded panggilDanKonversi(const std::vector<uint8_t>& bytes, int offset, ArsitekturDisasm arch) {
     
+    // Tentukan base VA.
+    uint64_t base_va = static_cast<uint64_t>(offset);
+
     // Panggil C-ABI Rust
     C_Instruksi c_instr = c_decodeInstruksi(
         bytes.data(),
         bytes.size(),
         static_cast<size_t>(offset),
+        base_va, // Teruskan VA
         arch // Teruskan arsitektur
     );
 

@@ -1,17 +1,16 @@
 use goblin::elf::Elf;
 use goblin::mach::Mach;
 use goblin::Object;
-use libc::c_char;
-use serde::Serialize;
-use serde_json;
-use std::ffi::{CStr, CString};
+use libc::{c_char, c_int};
+use std::ffi::CStr;
 use std::fs;
 use std::path::Path;
-use std::ptr;
+use std::slice;
 
-// Struct Generik
-#[derive(Serialize)]
-struct GenericHeaderInfo {
+use super::utils::strncpy_rs;
+
+// Struct Generik internal
+struct InternalHeaderInfo {
     valid: bool,
     format: &'static str,
     arch: &'static str,
@@ -22,10 +21,9 @@ struct GenericHeaderInfo {
     file_size: u64,
 }
 
-impl GenericHeaderInfo {
-    /// Header yang invalid
+impl InternalHeaderInfo {
     fn invalid() -> Self {
-        GenericHeaderInfo {
+        InternalHeaderInfo {
             valid: false,
             format: "Unknown",
             arch: "Unknown",
@@ -36,8 +34,6 @@ impl GenericHeaderInfo {
             file_size: 0,
         }
     }
-
-    /// Helper untuk map ELF machine ID ke string
     fn arch_from_elf_machine(machine: u16) -> &'static str {
         match machine {
             goblin::elf::header::EM_X86_64 => "x86-64",
@@ -47,8 +43,6 @@ impl GenericHeaderInfo {
             _ => "Unknown",
         }
     }
-
-    /// Helper untuk map PE machine ID ke string
     fn arch_from_pe_machine(machine: u16) -> &'static str {
         match machine {
             goblin::pe::header::COFF_MACHINE_X86_64 => "x86-64",
@@ -58,8 +52,6 @@ impl GenericHeaderInfo {
             _ => "Unknown",
         }
     }
-
-    /// Helper untuk map Mach-O cputype ke string
     fn arch_from_macho_cputype(cputype: u32) -> &'static str {
         match cputype {
             c if c == goblin::mach::cputype::CPU_TYPE_X86_64
@@ -77,234 +69,56 @@ impl GenericHeaderInfo {
     }
 }
 
-/// Logika internal untuk parse header (ELF, PE, Mach-O)
-pub fn logic_parse_binary_header(file_path_c: *const c_char) -> *mut c_char {
-    let path_cstr = unsafe {
-        if file_path_c.is_null() {
-            return ptr::null_mut();
-        }
-        CStr::from_ptr(file_path_c)
-    };
-    let path_str = match path_cstr.to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
-    let buffer_bytes = match fs::read(Path::new(path_str)) {
-        Ok(bytes) => bytes,
-        Err(_) => return ptr::null_mut(),
-    };
-    let file_size_actual = buffer_bytes.len() as u64;
+// Definisi Struct C-ABI
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct C_HeaderInfo {
+    pub valid: i32,
+    pub format: [c_char; 64],
+    pub arch: [c_char; 64],
+    pub bits: u16,
+    pub entry_point: u64,
+    pub machine_id: u64,
+    pub is_lib: i32,
+    pub file_size: u64,
+}
 
-    // Goblin auto-deteksi format
-    let header_info = match Object::parse(&buffer_bytes) {
-        Ok(Object::Elf(elf)) => {
-            let machine_id = elf.header.e_machine;
-            GenericHeaderInfo {
-                valid: true,
-                format: "ELF",
-                arch: GenericHeaderInfo::arch_from_elf_machine(machine_id),
-                bits: if elf.is_64 { 64 } else { 32 },
-                entry_point: elf.entry,
-                machine_id: machine_id as u64,
-                is_lib: elf.header.e_type == goblin::elf::header::ET_DYN,
-                file_size: file_size_actual,
-            }
-        }
-        Ok(Object::PE(pe)) => {
-            let machine_id = pe.header.coff_header.machine;
-            GenericHeaderInfo {
-                valid: true,
-                format: "PE",
-                arch: GenericHeaderInfo::arch_from_pe_machine(machine_id),
-                bits: if pe.is_64 { 64 } else { 32 },
-                entry_point: pe.entry as u64,
-                machine_id: machine_id as u64,
-                is_lib: pe.is_lib,
-                file_size: file_size_actual,
-            }
-        }
-        Ok(Object::Mach(mach)) => {
-            // Mach bisa multi-arsitektur (Fat binary)
-            let (format_str, bits, machine_id, entry, is_lib) = match mach {
-                Mach::Binary(macho) => (
-                    "Mach-O",
-                    if macho.is_64 { 64 } else { 32 },
-                    macho.header.cputype() as u64,
-                    macho.entry,
-                    macho.header.filetype == goblin::mach::header::MH_DYLIB,
-                ),
-                Mach::Fat(multiarch) => {
-                    if let Ok(goblin::mach::SingleArch::MachO(macho)) = multiarch.get(0) {
-                        (
-                            "Mach-O (Fat)",
-                            if macho.is_64 { 64 } else { 32 },
-                            macho.header.cputype() as u64,
-                            macho.entry,
-                            macho.header.filetype == goblin::mach::header::MH_DYLIB,
-                        )
-                    } else {
-                        ("Mach-O (Fat-Empty/Archive)", 0, 0, 0, false)
-                    }
-                }
-            };
-            GenericHeaderInfo {
-                valid: true,
-                format: format_str,
-                arch: GenericHeaderInfo::arch_from_macho_cputype(machine_id as u32),
-                bits,
-                entry_point: entry,
-                machine_id,
-                is_lib,
-                file_size: file_size_actual,
-            }
-        }
-        Ok(Object::Archive(_)) => GenericHeaderInfo {
-            valid: true,
-            format: "Archive (.a/.lib)",
-            ..GenericHeaderInfo::invalid()
-        },
-        _ => GenericHeaderInfo {
-            file_size: file_size_actual,
-            ..GenericHeaderInfo::invalid()
-        },
-    };
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct C_SectionInfo {
+    pub name: [c_char; 128],
+    pub addr: u64,
+    pub size: u64,
+    pub offset: u64,
+    pub tipe: u32,
+}
 
-    // Serialize ke JSON
-    let json_string = serde_json::to_string(&header_info).unwrap_or_else(|_| "{}".to_string());
-    match CString::new(json_string) {
-        Ok(c_str) => c_str.into_raw(),
-        Err(_) => ptr::null_mut(),
+#[allow(non_camel_case_types)]
+#[repr(C)]
+pub struct C_SymbolInfo {
+    pub name: [c_char; 128],
+    pub addr: u64,
+    pub size: u64,
+    pub symbol_type: [c_char; 64],
+    pub bind: [c_char; 64],
+}
+
+/// Helper untuk baca file
+fn read_file_bytes(file_path_c: *const c_char) -> Option<Vec<u8>> {
+    // Operasi FFI (deref pointer)
+    unsafe {
+        let path_cstr = {
+            if file_path_c.is_null() {
+                return None;
+            }
+            CStr::from_ptr(file_path_c)
+        };
+        let path_str = path_cstr.to_str().ok()?;
+        fs::read(Path::new(path_str)).ok()
     }
 }
 
-// Fungsi Parser Section & Simbol
-#[derive(Serialize)]
-struct InfoSection<'a> {
-    name: &'a str,
-    addr: u64,
-    size: u64,
-    offset: u64,
-    tipe: u32,
-}
-
-#[derive(Serialize)]
-struct InfoSimbol<'a> {
-    name: &'a str,
-    addr: u64,
-    size: u64,
-    symbol_type: &'a str,
-    bind: &'a str,
-}
-
-/// Logika internal untuk parse sections
-pub fn logic_parse_sections_elf(file_path_c: *const c_char) -> *mut c_char {
-    let path_cstr = unsafe {
-        if file_path_c.is_null() {
-            return ptr::null_mut();
-        }
-        CStr::from_ptr(file_path_c)
-    };
-    let path_str = match path_cstr.to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
-    let buffer_bytes = match fs::read(Path::new(path_str)) {
-        Ok(bytes) => bytes,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    match Elf::parse(&buffer_bytes) {
-        Ok(elf) => {
-            let mut sections_vec = Vec::new();
-            for section in &elf.section_headers {
-                let section_name = elf.shdr_strtab.get_at(section.sh_name).unwrap_or("(unknown)");
-                sections_vec.push(InfoSection {
-                    name: section_name,
-                    addr: section.sh_addr,
-                    size: section.sh_size,
-                    offset: section.sh_offset,
-                    tipe: section.sh_type,
-                });
-            }
-            let json_string =
-                serde_json::to_string(&sections_vec).unwrap_or_else(|_| "[]".to_string());
-            match CString::new(json_string) {
-                Ok(c_str) => c_str.into_raw(),
-                Err(_) => ptr::null_mut(),
-            }
-        }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Logika internal untuk parse symbols
-pub fn logic_parse_symbols_elf(file_path_c: *const c_char) -> *mut c_char {
-    let path_cstr = unsafe {
-        if file_path_c.is_null() {
-            return ptr::null_mut();
-        }
-        CStr::from_ptr(file_path_c)
-    };
-    let path_str = match path_cstr.to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
-    let buffer_bytes = match fs::read(Path::new(path_str)) {
-        Ok(bytes) => bytes,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    match Elf::parse(&buffer_bytes) {
-        Ok(elf) => {
-            let mut symbols_vec = Vec::new();
-
-            // Simbol statis
-            for sym in &elf.syms {
-                let symbol_name = elf.strtab.get_at(sym.st_name).unwrap_or("(unknown_static)");
-                if symbol_name.is_empty() {
-                    continue;
-                } // Skip empty names
-
-                symbols_vec.push(InfoSimbol {
-                    name: symbol_name,
-                    addr: sym.st_value,
-                    size: sym.st_size,
-                    symbol_type: st_type_to_str(sym.st_type()),
-                    bind: st_bind_to_str(sym.st_bind()),
-                });
-            }
-
-            // Simbol dinamis
-            for sym in &elf.dynsyms {
-                let symbol_name = elf
-                    .dynstrtab
-                    .get_at(sym.st_name)
-                    .unwrap_or("(unknown_dynamic)");
-                if symbol_name.is_empty() {
-                    continue;
-                } // Skip empty names
-
-                symbols_vec.push(InfoSimbol {
-                    name: symbol_name,
-                    addr: sym.st_value,
-                    size: sym.st_size,
-                    symbol_type: st_type_to_str(sym.st_type()),
-                    bind: st_bind_to_str(sym.st_bind()),
-                });
-            }
-            
-            let json_string =
-                serde_json::to_string(&symbols_vec).unwrap_or_else(|_| "[]".to_string());
-            match CString::new(json_string) {
-                Ok(c_str) => c_str.into_raw(),
-                Err(_) => ptr::null_mut(),
-            }
-        }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-// Helper untuk konversi Tipe Simbol Goblin ke string
+/// Helper untuk konversi Tipe Simbol Goblin ke string
 fn st_type_to_str(st_type: u8) -> &'static str {
     match st_type {
         goblin::elf::sym::STT_NOTYPE => "NOTYPE",
@@ -318,12 +132,217 @@ fn st_type_to_str(st_type: u8) -> &'static str {
     }
 }
 
-// Helper untuk konversi Binding Simbol Goblin ke string
+/// Helper untuk konversi Binding Simbol Goblin ke string
 fn st_bind_to_str(st_bind: u8) -> &'static str {
     match st_bind {
         goblin::elf::sym::STB_LOCAL => "LOCAL",
         goblin::elf::sym::STB_GLOBAL => "GLOBAL",
         goblin::elf::sym::STB_WEAK => "WEAK",
         _ => "OTHER_BIND",
+    }
+}
+
+/// Implementasi c_getBinaryHeader
+#[allow(non_snake_case)]
+pub unsafe fn c_getBinaryHeader(
+    file_path_c: *const c_char,
+    out_header: *mut C_HeaderInfo,
+) -> c_int {
+    unsafe {
+        if out_header.is_null() {
+            return -1;
+        }
+
+        let Some(buffer_bytes) = read_file_bytes(file_path_c) else {
+            return -1;
+        };
+        let file_size_actual = buffer_bytes.len() as u64;
+
+        let header_info = match Object::parse(&buffer_bytes) {
+            Ok(Object::Elf(elf)) => {
+                let machine_id = elf.header.e_machine;
+                InternalHeaderInfo {
+                    valid: true,
+                    format: "ELF",
+                    arch: InternalHeaderInfo::arch_from_elf_machine(machine_id),
+                    bits: if elf.is_64 { 64 } else { 32 },
+                    entry_point: elf.entry,
+                    machine_id: machine_id as u64,
+                    is_lib: elf.header.e_type == goblin::elf::header::ET_DYN,
+                    file_size: file_size_actual,
+                }
+            }
+            Ok(Object::PE(pe)) => {
+                let machine_id = pe.header.coff_header.machine;
+                InternalHeaderInfo {
+                    valid: true,
+                    format: "PE",
+                    arch: InternalHeaderInfo::arch_from_pe_machine(machine_id),
+                    bits: if pe.is_64 { 64 } else { 32 },
+                    entry_point: pe.entry as u64,
+                    machine_id: machine_id as u64,
+                    is_lib: pe.is_lib,
+                    file_size: file_size_actual,
+                }
+            }
+            Ok(Object::Mach(mach)) => {
+                let (format_str, bits, machine_id, entry, is_lib) = match mach {
+                    Mach::Binary(macho) => (
+                        "Mach-O",
+                        if macho.is_64 { 64 } else { 32 },
+                        macho.header.cputype() as u64,
+                        macho.entry,
+                        macho.header.filetype == goblin::mach::header::MH_DYLIB,
+                    ),
+                    Mach::Fat(multiarch) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = multiarch.get(0) {
+                            (
+                                "Mach-O (Fat)",
+                                if macho.is_64 { 64 } else { 32 },
+                                macho.header.cputype() as u64,
+                                macho.entry,
+                                macho.header.filetype == goblin::mach::header::MH_DYLIB,
+                            )
+                        } else {
+                            ("Mach-O (Fat-Empty/Archive)", 0, 0, 0, false)
+                        }
+                    }
+                };
+                InternalHeaderInfo {
+                    valid: true,
+                    format: format_str,
+                    arch: InternalHeaderInfo::arch_from_macho_cputype(machine_id as u32),
+                    bits,
+                    entry_point: entry,
+                    machine_id,
+                    is_lib,
+                    file_size: file_size_actual,
+                }
+            }
+            Ok(Object::Archive(_)) => InternalHeaderInfo {
+                valid: true,
+                format: "Archive (.a/.lib)",
+                ..InternalHeaderInfo::invalid()
+            },
+            _ => InternalHeaderInfo {
+                file_size: file_size_actual,
+                ..InternalHeaderInfo::invalid()
+            },
+        };
+
+        // Isi struct C_HeaderInfo
+        let out = &mut *out_header;
+        out.valid = if header_info.valid { 1 } else { 0 };
+        strncpy_rs(header_info.format, &mut out.format);
+        strncpy_rs(header_info.arch, &mut out.arch);
+        out.bits = header_info.bits;
+        out.entry_point = header_info.entry_point;
+        out.machine_id = header_info.machine_id;
+        out.is_lib = if header_info.is_lib { 1 } else { 0 };
+        out.file_size = header_info.file_size;
+
+        0 // Sukses
+    }
+}
+
+/// Implementasi c_getDaftarSections
+#[allow(non_snake_case)]
+pub unsafe fn c_getDaftarSections(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_SectionInfo,
+    max_count: c_int,
+) -> c_int {
+    unsafe {
+        if out_buffer.is_null() || max_count <= 0 {
+            return -1;
+        }
+
+        let Some(buffer_bytes) = read_file_bytes(file_path_c) else {
+            return -1;
+        };
+
+        match Elf::parse(&buffer_bytes) {
+            Ok(elf) => {
+                let sections = &elf.section_headers;
+                if sections.len() > max_count as usize {
+                    return -1; // Buffer tidak cukup
+                }
+
+                // Buat slice C dari buffer C++
+                let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
+
+                for (i, section) in sections.iter().enumerate() {
+                    let section_name = elf.shdr_strtab.get_at(section.sh_name).unwrap_or("(unknown)");
+                    let out_item = &mut out_slice[i];
+
+                    strncpy_rs(section_name, &mut out_item.name);
+                    out_item.addr = section.sh_addr;
+                    out_item.size = section.sh_size;
+                    out_item.offset = section.sh_offset;
+                    out_item.tipe = section.sh_type;
+                }
+                sections.len() as c_int // Kembalikan jumlah section yang diisi
+            }
+            Err(_) => -1, // Gagal parse ELF
+        }
+    }
+}
+
+/// Implementasi c_getDaftarSimbol
+#[allow(non_snake_case)]
+pub unsafe fn c_getDaftarSimbol(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_SymbolInfo,
+    max_count: c_int,
+) -> c_int {
+    // Tambahkan blok unsafe
+    unsafe {
+        if out_buffer.is_null() || max_count <= 0 {
+            return -1;
+        }
+
+        let Some(buffer_bytes) = read_file_bytes(file_path_c) else {
+            return -1;
+        };
+
+        match Elf::parse(&buffer_bytes) {
+            Ok(elf) => {
+                // Gabungkan simbol statis dan dinamis
+                let mut all_symbols = Vec::new();
+                for sym in &elf.syms {
+                    let symbol_name = elf.strtab.get_at(sym.st_name).unwrap_or("(unknown_static)");
+                    if !symbol_name.is_empty() {
+                        all_symbols.push((symbol_name, sym));
+                    }
+                }
+                for sym in &elf.dynsyms {
+                    let symbol_name = elf
+                        .dynstrtab
+                        .get_at(sym.st_name)
+                        .unwrap_or("(unknown_dynamic)");
+                    if !symbol_name.is_empty() {
+                        all_symbols.push((symbol_name, sym));
+                    }
+                }
+
+                if all_symbols.len() > max_count as usize {
+                    return -1; // Buffer tidak cukup
+                }
+
+                // Buat slice C dari buffer C++ (Operasi unsafe)
+                let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
+
+                for (i, (symbol_name, sym)) in all_symbols.iter().enumerate() {
+                    let out_item = &mut out_slice[i];
+                    strncpy_rs(symbol_name, &mut out_item.name);
+                    out_item.addr = sym.st_value;
+                    out_item.size = sym.st_size;
+                    strncpy_rs(st_type_to_str(sym.st_type()), &mut out_item.symbol_type);
+                    strncpy_rs(st_bind_to_str(sym.st_bind()), &mut out_item.bind);
+                }
+                all_symbols.len() as c_int // Kembalikan jumlah simbol
+            }
+            Err(_) => -1, // Gagal parse ELF
+        }
     }
 }

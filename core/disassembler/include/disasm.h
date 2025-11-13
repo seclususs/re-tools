@@ -39,6 +39,7 @@ extern "C" {
         const uint8_t* bytes, 
         size_t len, 
         size_t offset, 
+        uint64_t instruction_base_va,
         ArsitekturDisasm arch
     );
 }

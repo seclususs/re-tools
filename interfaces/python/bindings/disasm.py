@@ -17,16 +17,26 @@ class C_Instruksi(ctypes.Structure):
     ]
 
 if _lib:
-    # c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset
+    # c_decodeInstruksi(const uint8_t* bytes, size_t len, size_t offset, uint64_t instruction_base_va, int arch)
     _lib.c_decodeInstruksi.argtypes = [
         ctypes.POINTER(ctypes.c_ubyte), 
         ctypes.c_size_t, 
         ctypes.c_size_t,
+        ctypes.c_uint64,
         ctypes.c_int
     ]
     _lib.c_decodeInstruksi.restype = C_Instruksi
 
-def decodeInstruksi(byte_data: bytes, offset: int, arch: int) -> tuple:
+def decodeInstruksi(byte_data: bytes, offset: int, arch: int, base_va: int = 0) -> tuple:
+    """
+    Mendekode satu instruksi.
+    
+    Args:
+        byte_data (bytes): Seluruh buffer bytes.
+        offset (int): Offset di dalam buffer untuk mulai decode.
+        arch (int): Enum arsitektur.
+        base_va (int, optional): Virtual Address dari byte_data[0]. Default ke 0.
+    """
     if not _lib:
         raise RuntimeError("Library re-tools core tidak termuat")
     
@@ -38,7 +48,9 @@ def decodeInstruksi(byte_data: bytes, offset: int, arch: int) -> tuple:
     ByteArr = ctypes.c_ubyte * len(byte_data)
     c_bytes = ByteArr.from_buffer_copy(byte_data)
 
-    c_instr = _lib.c_decodeInstruksi(c_bytes, len(byte_data), offset, arch)
+    # Teruskan VA instruksi (base_va + offset)
+    instruction_va = base_va + offset
+    c_instr = _lib.c_decodeInstruksi(c_bytes, len(byte_data), offset, instruction_va, arch)
 
     if not c_instr.valid:
         size = c_instr.ukuran if c_instr.ukuran > 0 else 1

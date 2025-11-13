@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 #include <iomanip>
+#include <sstream>
+#include <cstring>
 
 #include "parser.h"
 #include "analyzer.h"
@@ -32,6 +34,19 @@ void printUsage(const char* progName) {
     std::cerr << std::endl;
 }
 
+// Helper escape JSON
+std::string escapeJson(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        else if (c < 32 || c == 127) out += " ";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+
 // Implementasi
 int handleParse(const std::vector<std::string>& args) {
     if (args.size() < 3) return -1;
@@ -39,29 +54,57 @@ int handleParse(const std::vector<std::string>& args) {
     std::string file_path = args[2];
 
     if (command == "header") {
-        // Panggil C-ABI (return JSON)
-        char* json_string = c_parseBinaryHeader(file_path.c_str());
+        // Panggil C-ABI
+        C_HeaderInfo header_info;
+        std::memset(&header_info, 0, sizeof(C_HeaderInfo));
         
-        if (json_string == nullptr) {
-            std::cerr << "Error: Gagal parse header (pointer null)." << std::endl;
+        int32_t result = c_getBinaryHeader(file_path.c_str(), &header_info);
+        
+        if (result != 0 || header_info.valid == 0) {
+            std::cerr << "Error: Gagal parse header." << std::endl;
             return 1;
         }
         
+        // Format output sebagai JSON secara manual
         std::cout << "Binary Header (JSON):" << std::endl;
-        std::cout << json_string << std::endl;
-        
-        // Bebaskan string
-        c_freeJsonString(json_string);
-    
+        std::cout << "{" << std::endl;
+        std::cout << "  \"valid\": " << (header_info.valid ? "true" : "false") << "," << std::endl;
+        std::cout << "  \"format\": " << escapeJson(header_info.format) << "," << std::endl;
+        std::cout << "  \"arch\": " << escapeJson(header_info.arch) << "," << std::endl;
+        std::cout << "  \"bits\": " << header_info.bits << "," << std::endl;
+        std::cout << "  \"entry_point\": " << header_info.entry_point << "," << std::endl;
+        std::cout << "  \"machine_id\": " << header_info.machine_id << "," << std::endl;
+        std::cout << "  \"is_lib\": " << (header_info.is_lib ? "true" : "false") << "," << std::endl;
+        std::cout << "  \"file_size\": " << header_info.file_size << std::endl;
+        std::cout << "}" << std::endl;
+
     } else if (command == "sections") {
-         char* json_string = c_parseSectionsElf(file_path.c_str());
-         if (json_string == nullptr) {
-             std::cerr << "Error: Gagal parse sections (hanya support ELF)." << std::endl;
+         const int MAX_SECTIONS = 256;
+         std::vector<C_SectionInfo> sections_buffer(MAX_SECTIONS);
+
+         // Panggil C-ABI
+         int32_t count = c_getDaftarSections(file_path.c_str(), sections_buffer.data(), MAX_SECTIONS);
+
+         if (count < 0) {
+             std::cerr << "Error: Gagal parse sections (hanya support ELF atau buffer tidak cukup)." << std::endl;
              return 1;
          }
+         
+         // Format output sebagai JSON array
          std::cout << "ELF Sections (JSON):" << std::endl;
-         std::cout << json_string << std::endl;
-         c_freeJsonString(json_string);
+         std::cout << "[" << std::endl;
+         for (int i = 0; i < count; ++i) {
+             const auto& sec = sections_buffer[i];
+             std::cout << "  {" << std::endl;
+             std::cout << "    \"name\": " << escapeJson(sec.name) << "," << std::endl;
+             std::cout << "    \"addr\": " << sec.addr << "," << std::endl;
+             std::cout << "    \"size\": " << sec.size << "," << std::endl;
+             std::cout << "    \"offset\": " << sec.offset << "," << std::endl;
+             std::cout << "    \"tipe\": " << sec.tipe << std::endl;
+             std::cout << "  }" << (i < count - 1 ? "," : "") << std::endl;
+         }
+         std::cout << "]" << std::endl;
+         
     } else {
         return -1;
     }
@@ -109,18 +152,6 @@ int handleHex(const std::vector<std::string>& args) {
     return 0;
 }
 
-// Helper escape JSON
-std::string escapeJson(const std::string& s) {
-    std::string out = "\"";
-    for (char c : s) {
-        if (c == '"' || c == '\\') out += '\\';
-        else if (c < 32 || c == 127) out += " ";
-        else out += c;
-    }
-    out += "\"";
-    return out;
-}
-
 int handlePipeline(const std::vector<std::string>& args) {
     if (args.size() < 2) return -1;
     std::string file_path = args[1];
@@ -129,10 +160,23 @@ int handlePipeline(const std::vector<std::string>& args) {
     std::cout << "  \"file\": " << escapeJson(file_path) << "," << std::endl;
 
     // Parse
-    char* json_header_ptr = c_parseBinaryHeader(file_path.c_str());
-    if (json_header_ptr) {
-        std::cout << "  \"header\": " << json_header_ptr << "," << std::endl;
-        c_freeJsonString(json_header_ptr);
+    C_HeaderInfo header_info;
+    std::memset(&header_info, 0, sizeof(C_HeaderInfo));
+    int32_t result = c_getBinaryHeader(file_path.c_str(), &header_info);
+
+    if (result == 0 && header_info.valid) {
+        std::stringstream ss;
+        ss << "{" << std::endl;
+        ss << "    \"valid\": true," << std::endl;
+        ss << "    \"format\": " << escapeJson(header_info.format) << "," << std::endl;
+        ss << "    \"arch\": " << escapeJson(header_info.arch) << "," << std::endl;
+        ss << "    \"bits\": " << header_info.bits << "," << std::endl;
+        ss << "    \"entry_point\": " << header_info.entry_point << "," << std::endl;
+        ss << "    \"machine_id\": " << header_info.machine_id << "," << std::endl;
+        ss << "    \"is_lib\": " << (header_info.is_lib ? "true" : "false") << "," << std::endl;
+        ss << "    \"file_size\": " << header_info.file_size << std::endl;
+        ss << "  }";
+        std::cout << "  \"header\": " << ss.str() << "," << std::endl;
     } else {
         std::cout << "  \"header\": {\"valid\": false, \"error\": \"parse failed\"}," << std::endl;
     }

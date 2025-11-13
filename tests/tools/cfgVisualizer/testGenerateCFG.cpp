@@ -60,7 +60,7 @@ void create_dummy_elf_file_cfg(const std::string& filename) {
     std::vector<uint8_t> sh_str(64, 0); 
     std::vector<uint8_t> sh_text(64, 0);
     
-    // String table data (\0.text\0)
+    // String table data. ".text" harus di index 1
     std::vector<uint8_t> str_data = { 0x00, '.', 't', 'e', 'x', 't', 0x00 };
     uint64_t str_data_offset = 224 + (64 * 3); // shoff + sh_null + sh_str + sh_text
 
@@ -71,6 +71,7 @@ void create_dummy_elf_file_cfg(const std::string& filename) {
     *(uint64_t*)&sh_str[24] = str_data_offset; // sh_offset
     *(uint64_t*)&sh_str[32] = str_data.size(); // sh_size
 
+    // sh_name harus 1
     *(uint32_t*)&sh_text[0] = 1; // sh_name (offset 1 di strtab -> ".text")
     *(uint32_t*)&sh_text[4] = 1; // sh_type (PROGBITS)
     *(uint64_t*)&sh_text[8] = 0x6; // sh_flags (ALLOC|EXEC)
@@ -103,7 +104,7 @@ int main() {
 
     // Cek dasar
     assert(dot_output.find("digraph G") != std::string::npos);
-    assert(dot_output.find("belum dimigrasi") == std::string::npos);
+    assert(dot_output.find("error") == std::string::npos);
 
     // Cek Node (Blok)
     assert(dot_output.find("\"BBlock_0x400080\"") != std::string::npos); // Blok 1 (Start)

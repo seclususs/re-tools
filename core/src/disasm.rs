@@ -85,6 +85,7 @@ pub fn logic_decode_instruksi(
     ptr_data: *const u8, // Pointer mentah ke data bytes
     len_data: usize, // Panjang total data
     offset: usize, // Offset saat ini
+    instruction_base_va: u64, // VA dari instruksi
     arch: ArsitekturDisasm, // Arsitektur yang diminta
 ) -> C_Instruksi {
     // Bounds check dulu
@@ -109,7 +110,7 @@ pub fn logic_decode_instruksi(
     };
 
     // Disassemble SATU instruksi
-    let insns_result = cs_instance.disasm_count(code_slice, 0x0, 1);
+    let insns_result = cs_instance.disasm_count(code_slice, instruction_base_va, 1);
 
     match insns_result {
         Ok(insns) => {

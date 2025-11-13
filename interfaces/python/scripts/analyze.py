@@ -60,6 +60,7 @@ def lakukanAnalisisLengkap(file_path):
     }
     
     arch_id_disasm = disasm.ARCH_UNKNOWN
+    base_va = 0 # Base VA dari file (entry point sering dipakai)
 
     print("  [1] Menjalankan Parse...")
     # Parse
@@ -70,6 +71,7 @@ def lakukanAnalisisLengkap(file_path):
         
         if hdr_dict.get("valid"):
             machine_id = hdr_dict.get("machine_id", 0)
+            base_va = hdr_dict.get("entry_point", 0)
             # Tentukan arsitektur dari header
             arch_id_disasm = tentukanArsitektur(machine_id)
             print(f"    [Info] Format: {hdr_dict.get('format')}, Arch: {hdr_dict.get('arch')}, (ID: {machine_id})")
@@ -94,19 +96,23 @@ def lakukanAnalisisLengkap(file_path):
         # Coba skip header jika format diketahui
         if hdr_dict.get("format") == "ELF" and hdr_dict.get("bits") == 64:
              offset = 0x40 # Ukuran header ELF64
+             if base_va > offset:
+                 offset = 64
         elif hdr_dict.get("format") == "PE":
-             offset = 0 # PE disasm mulai dari entry point, tapi kita baca dari awal
+             offset = 0 
              pass # TODO: Cari offset .text
+        
+        file_base_va = 0
         
         max_offset = offset + 30 # Batasi disasm 30 bytes dari offset
         
         while offset < max_offset and offset < len(bytes_awal):
-            # Teruskan arch_id_disasm yang sudah ditentukan
-            mnemonic, operands, size = disasm.decodeInstruksi(bytes_awal, offset, arch_id_disasm)
+            mnemonic, operands, size = disasm.decodeInstruksi(bytes_awal, offset, arch_id_disasm, file_base_va)
             if size == 0:
                 break # Gagal decode
             hasil_analisis["disassembly_awal"].append({
                 "offset": hex(offset),
+                "va": hex(file_base_va + offset), # Tampilkan VA
                 "mnemonic": mnemonic,
                 "operands": operands,
                 "size": size
@@ -143,10 +149,17 @@ if __name__ == "__main__":
     dummy_file = "dummy_test_file.bin"
     if not os.path.exists(dummy_file):
         with open(dummy_file, "wb") as f:
-            # ELF 64-bit (Machine 62)
-            f.write(b"\x7FELF\x02\x01\x01\x00" + b"\x00"*8 + b"\x02\x00\x3E\x00") 
-            f.write(b"\x00" * 8) # padding
-            f.write(b"\x90\x90\x90\xC3") # NOPs, RET
+            # ELF 64-bit (Machine 62), 64 bytes
+            elf_header = (
+                b"\x7FELF\x02\x01\x01\x00" + b"\x00" * 8 +  # 16 bytes
+                b"\x02\x00" +  # e_type (EXEC)
+                b"\x3E\x00" +  # e_machine (X86_64 / 62)
+                b"\x01\x00\x00\x00" +  # e_version
+                b"\x40\x00\x00\x00\x00\x00\x00\x00" +  # e_entry (0x40)
+                b"\x00" * (64 - 32) # Pad sisanya sampai 64 bytes
+            )
+            f.write(elf_header) 
+            f.write(b"\x90\x90\x90\xC3") # NOPs, RET (di offset 64)
             f.write(b"Ini adalah string tes... kernel32... dan string lain.")
     
     if os.path.exists(dummy_file):

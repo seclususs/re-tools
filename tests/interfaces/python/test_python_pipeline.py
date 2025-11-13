@@ -31,10 +31,19 @@ class TestPythonPipeline(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Data palsu: Magic ELF, 3 NOP, 1 RET, dan beberapa string
+        elf_header = (
+            b"\x7FELF\x02\x01\x01\x00" + b"\x00" * 8 +  # 16 bytes
+            b"\x02\x00" +  # e_type (EXEC)
+            b"\x3E\x00" +  # e_machine (X86_64 / 62)
+            b"\x01\x00\x00\x00" +  # e_version
+            b"\x80\x00\x00\x00\x00\x00\x00\x00" +  # e_entry (asal 0x80)
+            b"\x00" * (64 - 32) # Pad sisanya sampai 64 bytes
+        )
+
+        # Data palsu: Header ELF, 3 NOP, 1 RET, dan beberapa string
         dummy_content = (
-            b"\x7FELF\x02\x01\x01\x00" + b"\x00" * 8 +  # ELF Header (16 bytes)
-            b"\x90\x90\x90" +  # NOP (di offset 16)
+            elf_header +  # 64 bytes header
+            b"\x90\x90\x90" +  # NOP (di offset 64)
             b"\xC3" +  # RET
             b"\x00" * 20 +
             b"Ini string pertama (test1)\x00" +
@@ -69,7 +78,8 @@ class TestPythonPipeline(unittest.TestCase):
         self.assertIsNone(hasil["header"].get("error"), 
                           f"Analisis header gagal: {hasil['header'].get('error')}")
         self.assertTrue(hasil["header"].get("valid"), "Header seharusnya valid")
-        self.assertEqual(hasil["header"].get("magic"), "ELF")
+        self.assertEqual(hasil["header"].get("format"), "ELF") # Diubah dari 'magic'
+        self.assertEqual(hasil["header"].get("machine_id"), 62) # Cek machine_id x86-64
         
         # Cek strings
         self.assertIn("strings", hasil)
@@ -81,7 +91,7 @@ class TestPythonPipeline(unittest.TestCase):
         self.assertIn("disassembly_awal", hasil)
         self.assertGreater(len(hasil["disassembly_awal"]), 0) 
         
-        # Cari NOP pertama (harus ada setelah 16 byte "INVALID")
+        # Cari NOP (setelah 64 byte header)
         found_nop = any(instr.get("mnemonic") == "NOP" for instr in hasil["disassembly_awal"])
         self.assertTrue(found_nop, "Seharusnya menemukan instruksi NOP setelah header")
 
@@ -120,23 +130,28 @@ class TestPythonPipeline(unittest.TestCase):
         ]
         
         test_env = os.environ.copy()
+        # Path ke build/lib
         lib_path = os.path.join(_PROJECT_ROOT, 'build', 'lib')
-        path_var = test_env.get('Path', '')
+        
+        # Pastikan lib_path ada di Path (Windows) atau LD_LIBRARY_PATH (Linux)
+        path_var_name = 'Path' if os.name == 'nt' else 'LD_LIBRARY_PATH'
+        current_path = test_env.get(path_var_name, '')
         
         norm_lib_path = os.path.normpath(lib_path)
-        path_parts = [os.path.normpath(p) for p in path_var.split(os.pathsep)]
-        
+        path_parts = [os.path.normpath(p) for p in current_path.split(os.pathsep)]
+
         if norm_lib_path not in path_parts:
-            test_env['Path'] = f"{lib_path}{os.pathsep}{path_var}"
+            test_env[path_var_name] = f"{lib_path}{os.pathsep}{current_path}"
             
+        # Pastikan PYTHONPATH menyertakan 'interfaces/python'
         py_path = test_env.get('PYTHONPATH', '')
-        
         norm_pkg_path = os.path.normpath(_PACKAGE_ROOT)
         py_path_parts = [os.path.normpath(p) for p in py_path.split(os.pathsep)]
         
         if norm_pkg_path not in py_path_parts:
             test_env['PYTHONPATH'] = f"{_PACKAGE_ROOT}{os.pathsep}{py_path}"
         
+        # CWD harus di 'build/lib' agar lib_loader.py menemukan DLL
         cwd_path = lib_path
 
         result = subprocess.run(command, 
@@ -152,10 +167,11 @@ class TestPythonPipeline(unittest.TestCase):
         self.assertIn("[+] Laporan berhasil dibuat: pipeline_test_output.json", result.stdout)
         
         # Cek file output
-        self.assertTrue(os.path.exists("pipeline_test_output.json"))
+        output_file_path = os.path.join(cwd_path, "pipeline_test_output.json")
+        self.assertTrue(os.path.exists(output_file_path))
         
-        if os.path.exists("pipeline_test_output.json"):
-            os.remove("pipeline_test_output.json")
+        if os.path.exists(output_file_path):
+            os.remove(output_file_path)
 
 if __name__ == "__main__":
     unittest.main()
