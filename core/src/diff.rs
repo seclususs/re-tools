@@ -154,6 +154,63 @@ fn va_to_offset(va: u64, sections: &HashMap<String, InternalSection>) -> Option<
     None
 }
 
+/// Helper untuk membandingkan dua buffer byte
+fn compare_bytes(bytes1: Option<Vec<u8>>, bytes2: Option<Vec<u8>>) -> c_int {
+     match (bytes1, bytes2) {
+        (Some(b1), Some(b2)) => {
+            if b1 == b2 { STATUS_MATCHED } else { STATUS_MODIFIED }
+        },
+        _ => STATUS_MODIFIED
+    }
+}
+
+/// Logika fallback jika tidak ada simbol
+unsafe fn diff_fallback_by_section(
+    file1_c: *const c_char,
+    file2_c: *const c_char,
+    sections1: &HashMap<String, InternalSection>,
+    sections2: &HashMap<String, InternalSection>,
+    section_name: &str,
+) -> Option<C_DiffResult> {
+    
+    let sec1 = sections1.get(section_name);
+    let sec2 = sections2.get(section_name);
+
+    let mut result = C_DiffResult {
+        function_name: [0; 128],
+        address_file1: 0,
+        address_file2: 0,
+        status: STATUS_MODIFIED,
+    };
+    strncpy_rs(section_name, &mut result.function_name);
+
+    match (sec1, sec2) {
+        (Some(s1), Some(s2)) => {
+            // Ada di kedua file
+            result.address_file1 = s1.addr;
+            result.address_file2 = s2.addr;
+            let bytes1 = read_bytes_at_internal(file1_c, s1.offset, s1.size);
+            let bytes2 = read_bytes_at_internal(file2_c, s2.offset, s2.size);
+            result.status = compare_bytes(bytes1, bytes2);
+            Some(result)
+        },
+        (Some(s1), None) => {
+             // Hanya di file 1
+            result.address_file1 = s1.addr;
+            result.status = STATUS_REMOVED;
+            Some(result)
+        },
+        (None, Some(s2)) => {
+            // Hanya di file 2
+            result.address_file2 = s2.addr;
+            result.status = STATUS_ADDED;
+            Some(result)
+        },
+        (None, None) => None, // Tidak ada di keduanya
+    }
+}
+
+
 /// C-ABI: c_diffBinary_rs
 pub unsafe fn c_diff_binary_rs(
     file1_c: *const c_char,
@@ -161,23 +218,16 @@ pub unsafe fn c_diff_binary_rs(
     out_results: *mut C_DiffResult,
     max_results: c_int,
 ) -> c_int {
+    // Selalu pastikan buffer C valid
+    if out_results.is_null() || max_results <= 0 { return -1; }
+    
     unsafe {
-        let symbols1 = match get_symbols_internal(file1_c) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let symbols2 = match get_symbols_internal(file2_c) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let sections1 = match get_sections_internal(file1_c) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        let sections2 = match get_sections_internal(file2_c) {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
+        let out_slice = slice::from_raw_parts_mut(out_results, max_results as usize);
+        
+        let symbols1 = match get_symbols_internal(file1_c) { Ok(s) => s, Err(_) => return -1 };
+        let symbols2 = match get_symbols_internal(file2_c) { Ok(s) => s, Err(_) => return -1 };
+        let sections1 = match get_sections_internal(file1_c) { Ok(s) => s, Err(_) => return -1 };
+        let sections2 = match get_sections_internal(file2_c) { Ok(s) => s, Err(_) => return -1 };
 
         let mut results: Vec<C_DiffResult> = Vec::new();
         let mut processed_names: HashMap<String, bool> = HashMap::new();
@@ -199,18 +249,10 @@ pub unsafe fn c_diff_binary_rs(
                 let offset1 = va_to_offset(sym1.addr, &sections1);
                 let offset2 = va_to_offset(sym2.addr, &sections2);
 
-                if let (Some(off1), Some(off2)) = (offset1, offset2) {
-                    let bytes1 = read_bytes_at_internal(file1_c, off1, sym1.size);
-                    let bytes2 = read_bytes_at_internal(file2_c, off2, sym2.size);
-
-                    if bytes1 == bytes2 {
-                        result_entry.status = STATUS_MATCHED;
-                    } else {
-                        result_entry.status = STATUS_MODIFIED;
-                    }
-                } else {
-                    result_entry.status = STATUS_MODIFIED; // Gagal map offset
-                }
+                let bytes1 = offset1.and_then(|off| read_bytes_at_internal(file1_c, off, sym1.size));
+                let bytes2 = offset2.and_then(|off| read_bytes_at_internal(file2_c, off, sym2.size));
+                
+                result_entry.status = compare_bytes(bytes1, bytes2);
             }
             results.push(result_entry);
         }
@@ -230,11 +272,21 @@ pub unsafe fn c_diff_binary_rs(
             }
         }
 
+        // FALLBACK: Jika tidak ada hasil (tidak ada simbol),
+        // jalankan perbandingan fallback pada .text
+        if results.is_empty() {
+             if let Some(fallback_result) = diff_fallback_by_section(
+                file1_c, file2_c, &sections1, &sections2, ".text"
+             ) {
+                results.push(fallback_result);
+             }
+        }
+
         // Salin hasil ke buffer C
         if results.len() > max_results as usize {
-            return -1; // Buffer tidak cukup
+            return -1;
         }
-        let out_slice = slice::from_raw_parts_mut(out_results, max_results as usize);
+        
         for (i, res) in results.iter().enumerate() {
             out_slice[i] = *res;
         }

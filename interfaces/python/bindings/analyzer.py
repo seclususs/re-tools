@@ -1,5 +1,6 @@
 import ctypes
 import json
+import sys
 from utils.lib_loader import _lib
 
 # Setup prototype fungsi C
@@ -17,27 +18,40 @@ if _lib:
     _lib.c_deteksiPattern.restype = ctypes.c_int
 
 # Wrapper Python
-def _get_json_from_c(c_func, *args) -> list:
-    # Alokasi buffer output yang sangat besar
+def _get_json_from_c_buffer(c_func, *args) -> list:
     BUFFER_SIZE = 10 * 1024 * 1024 # 10MB
     out_buffer = ctypes.create_string_buffer(BUFFER_SIZE)
-    
     all_args = list(args) + [out_buffer, BUFFER_SIZE]
-    
     res = c_func(*all_args)
     if res == -1:
         raise RuntimeError("Buffer output C terlalu kecil untuk menampung hasil JSON")
-    
     json_str = out_buffer.value.decode('utf-8')
     return json.loads(json_str)
-
 
 def extractStrings(filename: str, minLength: int = 4) -> list[str]:
     if not _lib:
         raise RuntimeError("Library re-tools core tidak termuat")
     
     c_filename = filename.encode('utf-8')
-    return _get_json_from_c(_lib.c_extractStrings, c_filename, minLength)
+    
+    try:
+        data_objek = _get_json_from_c_buffer(
+            _lib.c_extractStrings, 
+            c_filename, 
+            minLength
+        )
+        
+        # Ekstrak hanya 'content'
+        list_string_polos = [item.get("content", "") for item in data_objek]
+        return list_string_polos
+        
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from c_extractStrings: {e}", file=sys.stderr)
+        return []
+    except Exception as e:
+        print(f"Error in extractStrings: {e}", file=sys.stderr)
+        return []
+
 
 def deteksiPattern(filename: str, regex: str) -> list[str]:
     if not _lib:
@@ -45,7 +59,7 @@ def deteksiPattern(filename: str, regex: str) -> list[str]:
         
     c_filename = filename.encode('utf-8')
     c_regex = regex.encode('utf-8')
-    return _get_json_from_c(_lib.c_deteksiPattern, c_filename, c_regex)
+    return _get_json_from_c_buffer(_lib.c_deteksiPattern, c_filename, c_regex)
 
 def hitungEntropy(filename: str, blockSize: int) -> list[float]:
     if not _lib:

@@ -9,7 +9,7 @@ std::vector<std::string> deteksiPattern(const std::string& filename, const std::
     std::vector<std::string> matches;
     
     // Baca seluruh file ke string (hati-hati untuk file besar)
-    std::ifstream file(filename);
+    std::ifstream file(filename, std::ios::binary); 
     if (!file) return matches;
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -48,7 +48,10 @@ extern "C" {
             for (char c : s) {
                 if (c == '"') escaped_s += "\\\"";
                 else if (c == '\\') escaped_s += "\\\\";
-                else if (c >= 0 && c < 32) escaped_s += " "; 
+                else if (c == '\n') escaped_s += "\\n";
+                else if (c == '\r') escaped_s += "\\r";
+                else if (c == '\t') escaped_s += "\\t";
+                else if (c < 32 || c == 127) escaped_s += " "; 
                 else escaped_s += c;
             }
 

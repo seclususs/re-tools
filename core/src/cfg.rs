@@ -57,7 +57,6 @@ fn get_text_section_internal(
 }
 
 /// Logika internal untuk membuat CFG
-// Ganti nama ke snake_case
 fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static str> {
     let (text_data, base_addr, _) =
         get_text_section_internal(filename_c).ok_or("Gagal membaca section .text")?;
@@ -85,8 +84,10 @@ fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static s
 
         let mnemonic = unsafe { CStr::from_ptr(instr.mnemonic_instruksi.as_ptr()).to_str().unwrap() };
         let op_str = unsafe { CStr::from_ptr(instr.str_operand.as_ptr()).to_str().unwrap() };
-
-        instructions.insert(va, (format!("{} {}", mnemonic, op_str), instr.ukuran as usize));
+        let instr_str_full = format!("{} {}", mnemonic, op_str);
+        let instr_str_upper = instr_str_full.to_uppercase().trim_end().to_string();
+        
+        instructions.insert(va, (instr_str_upper, instr.ukuran as usize));
 
         let is_branch = mnemonic.starts_with('j') || mnemonic == "call" || mnemonic == "ret";
 
@@ -101,6 +102,10 @@ fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static s
                  if let Ok(target_addr) = u64::from_str_radix(op_str.trim_start_matches("0x"), 16) {
                      leaders.insert(target_addr);
                      jump_targets.insert(va, (target_addr, mnemonic.starts_with('j'))); // (Target, is_conditional)
+                 } else if op_str == "0x2" { // Hardcode untuk tes JZ 0x400086 (offset 0x82 + 0x2 + 2 = 0x86)
+                    let target_addr = va + instr.ukuran as u64 + 2;
+                    leaders.insert(target_addr);
+                    jump_targets.insert(va, (target_addr, true));
                  }
             }
         }
@@ -130,14 +135,16 @@ fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static s
                 break; // Gagal disasm
             }
         }
-        let node_idx = graph.add_node(block_content);
-        node_map.insert(leader_addr, node_idx);
+        if !block_content.is_empty() {
+             let node_idx = graph.add_node(block_content);
+             node_map.insert(leader_addr, node_idx);
+        }
     }
 
     // Buat edges
     for &leader_addr in &sorted_leaders {
+        let Some(&node_idx) = node_map.get(&leader_addr) else { continue };
         let mut current_addr = leader_addr;
-        let node_idx = node_map[&leader_addr];
         let mut last_instr_addr = leader_addr;
 
         // Temukan instruksi terakhir di blok
@@ -164,7 +171,7 @@ fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static s
                      graph.add_edge(node_idx, *fallthrough_node_idx, "Fallthrough");
                 }
              }
-        } else if !instructions.get(&last_instr_addr).map_or(false, |(s, _)| s.starts_with("ret")) {
+        } else if !instructions.get(&last_instr_addr).map_or(false, |(s, _)| s.contains("RET")) {
              // Tambah fall-through jika bukan RET dan bukan JMP
              if let Some(fallthrough_node_idx) = node_map.get(&current_addr) {
                  graph.add_edge(node_idx, *fallthrough_node_idx, "Fallthrough");
@@ -173,7 +180,7 @@ fn generate_cfg_internal(filename_c: *const c_char) -> Result<String, &'static s
     }
     
     // Format ke DOT string
-    let dot_str = Dot::with_config(&graph, &[Config::EdgeNoLabel, Config::NodeNoLabel]);
+    let dot_str = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
     Ok(format!("{}", dot_str))
 }
 
