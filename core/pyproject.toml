@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
+
+[project]
+name = "re_tools"
+version = "0.1.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: implementation :: CPython",
+    "Programming Language :: Python :: implementation :: PyPy",
+]
+requires-python = ">=3.8"
+
+[tool.maturin]
+features = ["python-bindings"]
