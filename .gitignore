@@ -95,6 +95,9 @@ desktop.ini
 
 # Environment
 .env
+.venv
+venv/
+env/
 
 # Python
 __pycache__
