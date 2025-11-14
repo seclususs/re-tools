@@ -1,7 +1,9 @@
+use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::ffi::CStr;
 
+use crate::error::ReToolsError;
 use crate::logic::static_analysis::analyzer::{
     deteksi_pattern_internal, ekstrak_strings_internal, hitung_entropy_internal,
 };
@@ -12,9 +14,25 @@ use crate::logic::static_analysis::hexeditor::{
     cari_pattern_internal, lihat_bytes_internal, ubah_bytes_internal,
 };
 use crate::logic::static_analysis::parser::parse_header_info_internal;
+use log::{error, info};
+
+
+fn map_err_to_py(err: ReToolsError) -> PyErr {
+    error!("Error pada boundary Python API: {}", err);
+    match err {
+        ReToolsError::IoError(e) => PyIOError::new_err(e.to_string()),
+        ReToolsError::ParseError(s) => PyValueError::new_err(s),
+        ReToolsError::NulError(e) => PyValueError::new_err(e.to_string()),
+        ReToolsError::Utf8Error(e) => PyValueError::new_err(e.to_string()),
+        ReToolsError::RegexError(e) => PyValueError::new_err(e.to_string()),
+        ReToolsError::CapstoneError(e) => PyValueError::new_err(e.to_string()),
+        ReToolsError::Generic(s) => PyValueError::new_err(s),
+    }
+}
 
 #[pyfunction(name = "parseHeaderInfo")]
 fn parse_header_info_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseHeaderInfo dipanggil untuk: {}", file_path);
     match parse_header_info_internal(file_path) {
         Ok(header_info) => {
             let dict = PyDict::new_bound(py);
@@ -28,34 +46,37 @@ fn parse_header_info_py(py: Python, file_path: &str) -> PyResult<PyObject> {
             dict.set_item("file_size", header_info.file_size)?;
             Ok(dict.to_object(py))
         }
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e)),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
 #[pyfunction(name = "ekstrakStrings")]
 fn ekstrak_strings_py(py: Python, file_path: &str, min_length: usize) -> PyResult<PyObject> {
+    info!("py: ekstrakStrings dipanggil untuk: {}", file_path);
     match ekstrak_strings_internal(file_path, min_length) {
         Ok(strings_info) => {
             let py_strings: Vec<String> = strings_info.into_iter().map(|s| s.content).collect();
             Ok(py_strings.to_object(py))
         }
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
 #[pyfunction(name = "hitungEntropy")]
 fn hitung_entropy_py(_py: Python, file_path: &str, block_size: usize) -> PyResult<Vec<f64>> {
+    info!("py: hitungEntropy dipanggil untuk: {}", file_path);
     match hitung_entropy_internal(file_path, block_size) {
         Ok(results) => Ok(results),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
 #[pyfunction(name = "deteksiPattern")]
 fn deteksi_pattern_py(_py: Python, file_path: &str, regex_str: &str) -> PyResult<Vec<String>> {
+    info!("py: deteksiPattern dipanggil untuk: {}", file_path);
     match deteksi_pattern_internal(file_path, regex_str) {
         Ok(matches) => Ok(matches),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
@@ -97,14 +118,16 @@ fn decode_instruksi_py(
 
 #[pyfunction(name = "generateCFG")]
 fn generate_cfg_py(_py: Python, file_path: &str) -> PyResult<String> {
+    info!("py: generateCFG dipanggil untuk: {}", file_path);
     match generate_cfg_internal(file_path) {
         Ok(dot_str) => Ok(dot_str),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
 #[pyfunction(name = "diffBinary")]
 fn diff_binary_py(py: Python, file1: &str, file2: &str) -> PyResult<Vec<PyObject>> {
+    info!("py: diffBinary dipanggil untuk: {} vs {}", file1, file2);
     match diff_binary_internal(file1, file2) {
         Ok(results) => {
             let mut py_results: Vec<PyObject> = Vec::new();
@@ -118,15 +141,16 @@ fn diff_binary_py(py: Python, file1: &str, file2: &str) -> PyResult<Vec<PyObject
             }
             Ok(py_results)
         }
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e)),
+        Err(e) => Err(PyValueError::new_err(e)),
     }
 }
 
 #[pyfunction(name = "lihatBytes")]
 fn lihat_bytes_py(_py: Python, filename: &str, offset: u64, length: usize) -> PyResult<String> {
+    info!("py: lihatBytes dipanggil untuk: {}", filename);
     match lihat_bytes_internal(filename, offset, length) {
         Ok(s) => Ok(s),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
@@ -137,19 +161,21 @@ fn ubah_bytes_py(
     offset: u64,
     data: &Bound<'_, PyBytes>,
 ) -> PyResult<bool> {
+    info!("py: ubahBytes dipanggil untuk: {}", filename);
     let data_slice = data.as_bytes();
     match ubah_bytes_internal(filename, offset, data_slice) {
         Ok(b) => Ok(b),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 
 #[pyfunction(name = "cariPattern")]
 fn cari_pattern_py(_py: Python, filename: &str, pattern: &Bound<'_, PyBytes>) -> PyResult<Vec<u64>> {
+    info!("py: cariPattern dipanggil untuk: {}", filename);
     let pattern_slice = pattern.as_bytes();
     match cari_pattern_internal(filename, pattern_slice) {
         Ok(v) => Ok(v),
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())),
+        Err(e) => Err(map_err_to_py(e)),
     }
 }
 

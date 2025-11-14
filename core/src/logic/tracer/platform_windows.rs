@@ -1,14 +1,13 @@
 use super::state::StateDebuggerInternal;
 use super::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
 use libc::{c_int, c_void};
+use log::{debug, error, info, warn};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FALSE, HANDLE, LUID};
+use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, LUID};
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    ContinueDebugEvent, DebugActiveProcess, DebugActiveProcessStop, WaitForDebugEvent,
-    CONTEXT,
+    ContinueDebugEvent, DebugActiveProcess, DebugActiveProcessStop, GetThreadContext,
+    ReadProcessMemory, SetThreadContext, WaitForDebugEvent, WriteProcessMemory, CONTEXT,
     DEBUG_EVENT, EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
-    GetThreadContext, SetThreadContext,
-    ReadProcessMemory, WriteProcessMemory,
 };
 use windows_sys::Win32::Foundation::{
     DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP,
@@ -16,22 +15,21 @@ use windows_sys::Win32::Foundation::{
 
 #[cfg(target_arch = "x86_64")]
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CONTEXT_CONTROL_AMD64 as CONTEXT_CONTROL,
-    CONTEXT_FULL_AMD64 as CONTEXT_FULL,
+    CONTEXT_CONTROL_AMD64 as CONTEXT_CONTROL, CONTEXT_FULL_AMD64 as CONTEXT_FULL,
 };
 #[cfg(target_arch = "x86")]
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CONTEXT_CONTROL_X86 as CONTEXT_CONTROL,
-    CONTEXT_FULL_X86 as CONTEXT_FULL,
+    CONTEXT_CONTROL_X86 as CONTEXT_CONTROL, CONTEXT_FULL_X86 as CONTEXT_FULL,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, OpenThread, THREAD_GET_CONTEXT,
-    THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME, PROCESS_ALL_ACCESS,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, OpenThread, PROCESS_ALL_ACCESS,
+    THREAD_GET_CONTEXT, THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
 };
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueA, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
     TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
+
 
 #[allow(non_snake_case)]
 unsafe fn impl_EnableDebugPrivilege_windows() -> bool {
@@ -43,11 +41,19 @@ unsafe fn impl_EnableDebugPrivilege_windows() -> bool {
             &mut handle_token,
         ) == 0
         {
+            warn!(
+                "WinAPI: OpenProcessToken gagal: {}",
+                std::io::Error::last_os_error()
+            );
             return false;
         }
         let mut luid_debug: LUID = std::mem::zeroed();
         let debug_name = b"SeDebugPrivilege\0";
         if LookupPrivilegeValueA(null(), debug_name.as_ptr(), &mut luid_debug) == 0 {
+            warn!(
+                "WinAPI: LookupPrivilegeValueA gagal: {}",
+                std::io::Error::last_os_error()
+            );
             CloseHandle(handle_token);
             return false;
         }
@@ -64,7 +70,15 @@ unsafe fn impl_EnableDebugPrivilege_windows() -> bool {
             null_mut(),
         );
         CloseHandle(handle_token);
-        b_ok != 0
+        if b_ok == 0 {
+            warn!(
+                "WinAPI: AdjustTokenPrivileges gagal: {}",
+                std::io::Error::last_os_error()
+            );
+            return false;
+        }
+        info!("WinAPI: SeDebugPrivilege diaktifkan");
+        true
     }
 }
 
@@ -78,25 +92,35 @@ pub unsafe fn impl_platform_attach(state_data: &mut StateDebuggerInternal) -> bo
             state_data.pid_target as u32,
         );
         if handle_proses == 0 {
-            eprintln!("WinAPI: OpenProcess gagal, error: {}", GetLastError());
+            error!(
+                "WinAPI: OpenProcess gagal, error: {}",
+                std::io::Error::last_os_error()
+            );
             return false;
         }
         state_data.handle_proses = handle_proses;
         if DebugActiveProcess(state_data.pid_target as u32) == 0 {
-            eprintln!("WinAPI: DebugActiveProcess gagal, error: {}", GetLastError());
+            error!(
+                "WinAPI: DebugActiveProcess gagal, error: {}",
+                std::io::Error::last_os_error()
+            );
             CloseHandle(handle_proses);
             return false;
         }
         let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
         if WaitForDebugEvent(&mut debug_event, 5000) == 0 {
-            eprintln!(
+            error!(
                 "WinAPI: Timeout menunggu event attach awal, error: {}",
-                GetLastError()
+                std::io::Error::last_os_error()
             );
             DebugActiveProcessStop(state_data.pid_target as u32);
             CloseHandle(handle_proses);
             return false;
         }
+        info!(
+            "WinAPI: Attach berhasil, event awal diterima dari thread {}",
+            debug_event.dwThreadId
+        );
         state_data.last_event_thread_id = debug_event.dwThreadId;
         ContinueDebugEvent(
             debug_event.dwProcessId,
@@ -112,9 +136,14 @@ pub unsafe fn impl_platform_detach(state_data: &mut StateDebuggerInternal) {
     unsafe {
         if state_data.handle_proses != 0 {
             if DebugActiveProcessStop(state_data.pid_target as u32) == 0 {
-                eprintln!(
+                error!(
                     "WinAPI: DebugActiveProcessStop gagal, error: {}",
-                    GetLastError()
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                info!(
+                    "WinAPI: DebugActiveProcessStop berhasil untuk PID {}",
+                    state_data.pid_target
                 );
             }
             CloseHandle(state_data.handle_proses);
@@ -142,6 +171,11 @@ pub unsafe fn impl_platform_bacaMemory(
         {
             bytes_dibaca as c_int
         } else {
+            warn!(
+                "WinAPI: ReadProcessMemory gagal pada 0x{:x}, error: {}",
+                addr,
+                std::io::Error::last_os_error()
+            );
             -1
         }
     }
@@ -166,6 +200,11 @@ pub unsafe fn impl_platform_tulisMemory(
         {
             bytes_ditulis as c_int
         } else {
+            warn!(
+                "WinAPI: WriteProcessMemory gagal pada 0x{:x}, error: {}",
+                addr,
+                std::io::Error::last_os_error()
+            );
             -1
         }
     }
@@ -180,11 +219,19 @@ unsafe fn set_single_step_flag(thread_id: u32, enable: bool) -> bool {
             thread_id,
         );
         if h_thread == 0 {
+            warn!(
+                "WinAPI: OpenThread gagal untuk set_single_step: {}",
+                std::io::Error::last_os_error()
+            );
             return false;
         }
         let mut context: CONTEXT = std::mem::zeroed();
         context.ContextFlags = CONTEXT_FULL;
         if GetThreadContext(h_thread, &mut context) == 0 {
+            warn!(
+                "WinAPI: GetThreadContext gagal untuk set_single_step: {}",
+                std::io::Error::last_os_error()
+            );
             CloseHandle(h_thread);
             return false;
         }
@@ -194,6 +241,12 @@ unsafe fn set_single_step_flag(thread_id: u32, enable: bool) -> bool {
             context.EFlags &= !0x100;
         }
         let success = SetThreadContext(h_thread, &context);
+        if success == 0 {
+            warn!(
+                "WinAPI: SetThreadContext gagal untuk set_single_step: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         CloseHandle(h_thread);
         success != 0
     }
@@ -203,22 +256,30 @@ unsafe fn set_single_step_flag(thread_id: u32, enable: bool) -> bool {
 pub unsafe fn impl_platform_singleStep(state_data: &StateDebuggerInternal) -> c_int {
     unsafe {
         if state_data.last_event_thread_id == 0 {
+            error!("WinAPI: singleStep gagal, last_event_thread_id adalah 0");
             return -1;
         }
         if !set_single_step_flag(state_data.last_event_thread_id, true) {
+            error!("WinAPI: singleStep gagal, set_single_step_flag gagal");
             return -1;
         }
         if impl_platform_continueProses(state_data) != 0 {
+            error!("WinAPI: singleStep gagal, continueProses gagal");
             return -1;
         }
         let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
         loop {
             if WaitForDebugEvent(&mut debug_event, u32::MAX) == 0 {
+                error!(
+                    "WinAPI: WaitForDebugEvent gagal saat single step: {}",
+                    std::io::Error::last_os_error()
+                );
                 return -1;
             }
             if debug_event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
                 && debug_event.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_SINGLE_STEP
             {
+                debug!("WinAPI: EXCEPTION_SINGLE_STEP diterima");
                 ContinueDebugEvent(
                     debug_event.dwProcessId,
                     debug_event.dwThreadId,
@@ -226,7 +287,10 @@ pub unsafe fn impl_platform_singleStep(state_data: &StateDebuggerInternal) -> c_
                 );
                 return 0;
             }
-
+            debug!(
+                "WinAPI: Menerima event lain saat single step: {}, melanjutkan...",
+                debug_event.dwDebugEventCode
+            );
             ContinueDebugEvent(
                 debug_event.dwProcessId,
                 debug_event.dwThreadId,
@@ -243,15 +307,24 @@ pub unsafe fn impl_platform_getRegisters(
 ) -> c_int {
     unsafe {
         if state_data.last_event_thread_id == 0 {
+            error!("WinAPI: getRegisters gagal, last_event_thread_id adalah 0");
             return -1;
         }
         let h_thread = OpenThread(THREAD_GET_CONTEXT, FALSE, state_data.last_event_thread_id);
         if h_thread == 0 {
+            error!(
+                "WinAPI: OpenThread (get) gagal: {}",
+                std::io::Error::last_os_error()
+            );
             return -1;
         }
         let mut context: CONTEXT = std::mem::zeroed();
         context.ContextFlags = CONTEXT_FULL;
         if GetThreadContext(h_thread, &mut context) == 0 {
+            error!(
+                "WinAPI: GetThreadContext gagal: {}",
+                std::io::Error::last_os_error()
+            );
             CloseHandle(h_thread);
             return -1;
         }
@@ -290,10 +363,15 @@ pub unsafe fn impl_platform_setRegisters(
 ) -> c_int {
     unsafe {
         if state_data.last_event_thread_id == 0 {
+            error!("WinAPI: setRegisters gagal, last_event_thread_id adalah 0");
             return -1;
         }
         let h_thread = OpenThread(THREAD_SET_CONTEXT, FALSE, state_data.last_event_thread_id);
         if h_thread == 0 {
+            error!(
+                "WinAPI: OpenThread (set) gagal: {}",
+                std::io::Error::last_os_error()
+            );
             return -1;
         }
         let mut context: CONTEXT = std::mem::zeroed();
@@ -321,6 +399,10 @@ pub unsafe fn impl_platform_setRegisters(
             context.EFlags = c_regs.eflags as u32;
         }
         if SetThreadContext(h_thread, &context) == 0 {
+            error!(
+                "WinAPI: SetThreadContext gagal: {}",
+                std::io::Error::last_os_error()
+            );
             CloseHandle(h_thread);
             return -1;
         }
@@ -333,6 +415,7 @@ pub unsafe fn impl_platform_setRegisters(
 pub unsafe fn impl_platform_continueProses(state_data: &StateDebuggerInternal) -> c_int {
     unsafe {
         if state_data.last_event_thread_id == 0 {
+            error!("WinAPI: continueProses gagal, last_event_thread_id adalah 0");
             return -1;
         }
         if ContinueDebugEvent(
@@ -343,6 +426,10 @@ pub unsafe fn impl_platform_continueProses(state_data: &StateDebuggerInternal) -
         {
             0
         } else {
+            error!(
+                "WinAPI: ContinueDebugEvent gagal: {}",
+                std::io::Error::last_os_error()
+            );
             -1
         }
     }
@@ -355,18 +442,24 @@ unsafe fn internal_handle_breakpoint_pre_step(
     alamat_bp: u64,
 ) -> bool {
     unsafe {
-        let Some(&byte_asli) = state_data.breakpoints_map.get(&alamat_bp) else { return false };
+        let Some(&byte_asli) = state_data.breakpoints_map.get(&alamat_bp) else {
+            warn!("WinAPI: Breakpoint 0x{:x} tidak ada di map", alamat_bp);
+            return false;
+        };
         if impl_platform_tulisMemory(state_data, alamat_bp, &byte_asli, 1) != 1 {
+            error!("WinAPI: Gagal restore byte asli pada 0x{:x}", alamat_bp);
             return false;
         }
         let thread_id = debug_event.dwThreadId;
         let h_thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, thread_id);
         if h_thread == 0 {
+            error!("WinAPI: Gagal OpenThread (pre-step)");
             return false;
         }
         let mut context: CONTEXT = std::mem::zeroed();
         context.ContextFlags = CONTEXT_CONTROL;
         if GetThreadContext(h_thread, &mut context) == 0 {
+            error!("WinAPI: Gagal GetThreadContext (control)");
             CloseHandle(h_thread);
             return false;
         }
@@ -379,16 +472,19 @@ unsafe fn internal_handle_breakpoint_pre_step(
             context.Eip = alamat_bp as u32;
         }
         if SetThreadContext(h_thread, &context) == 0 {
+            error!("WinAPI: Gagal SetThreadContext (control)");
             CloseHandle(h_thread);
             return false;
         }
         context.ContextFlags = CONTEXT_FULL;
         if GetThreadContext(h_thread, &mut context) == 0 {
+            error!("WinAPI: Gagal GetThreadContext (full)");
             CloseHandle(h_thread);
             return false;
         }
         context.EFlags |= 0x100;
         if SetThreadContext(h_thread, &context) == 0 {
+            error!("WinAPI: Gagal SetThreadContext (TF bit)");
             CloseHandle(h_thread);
             return false;
         }
@@ -406,6 +502,7 @@ unsafe fn internal_handle_breakpoint_post_step(
     unsafe {
         let int3_byte: u8 = 0xCC;
         if impl_platform_tulisMemory(state_data, alamat_bp, &int3_byte, 1) != 1 {
+            error!("WinAPI: Gagal re-set breakpoint pada 0x{:x}", alamat_bp);
             return false;
         }
         state_data.handling_breakpoint_alamat = None;
@@ -422,9 +519,9 @@ pub unsafe fn impl_platform_tungguEvent(
         let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
         loop {
             if WaitForDebugEvent(&mut debug_event, u32::MAX) == 0 {
-                eprintln!(
+                error!(
                     "WinAPI: WaitForDebugEvent gagal, error: {}",
-                    GetLastError()
+                    std::io::Error::last_os_error()
                 );
                 return -1;
             }
@@ -434,8 +531,13 @@ pub unsafe fn impl_platform_tungguEvent(
                 EXCEPTION_DEBUG_EVENT => {
                     let exception_record = &debug_event.u.Exception.ExceptionRecord;
                     let alamat_exception = exception_record.ExceptionAddress as u64;
+                    debug!(
+                        "WinAPI: EXCEPTION_DEBUG_EVENT diterima: 0x{:x} pada 0x{:x}",
+                        exception_record.ExceptionCode, alamat_exception
+                    );
                     if exception_record.ExceptionCode == EXCEPTION_BREAKPOINT {
                         if state_data.breakpoints_map.contains_key(&alamat_exception) {
+                            debug!("WinAPI: Menangani breakpoint internal pada 0x{:x}", alamat_exception);
                             if internal_handle_breakpoint_pre_step(
                                 state_data,
                                 &debug_event,
@@ -448,25 +550,30 @@ pub unsafe fn impl_platform_tungguEvent(
                                 );
                                 continue;
                             } else {
+                                error!("Gagal menangani pre-step breakpoint, tidak melanjutkan");
                                 continue_status = DBG_EXCEPTION_NOT_HANDLED;
                             }
                         } else {
+                            debug!("WinAPI: Breakpoint eksternal, tidak ditangani");
                             continue_status = DBG_EXCEPTION_NOT_HANDLED;
                         }
                     } else if exception_record.ExceptionCode == EXCEPTION_SINGLE_STEP {
                         if let Some(alamat_bp_ditangani) = state_data.handling_breakpoint_alamat {
+                            debug!("WinAPI: Menangani post-step breakpoint pada 0x{:x}", alamat_bp_ditangani);
                             internal_handle_breakpoint_post_step(state_data, alamat_bp_ditangani);
                             (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
                             (*event_out).pid_thread = debug_event.dwThreadId as c_int;
                             (*event_out).info_alamat = alamat_bp_ditangani;
                             return 0;
                         } else {
+                            debug!("WinAPI: Single step eksternal");
                             (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
                             (*event_out).pid_thread = debug_event.dwThreadId as c_int;
                             (*event_out).info_alamat = alamat_exception;
                             return 0;
                         }
                     } else {
+                        debug!("WinAPI: Eksepsi lain, tidak ditangani");
                         (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
                         (*event_out).pid_thread = debug_event.dwThreadId as c_int;
                         (*event_out).info_alamat = alamat_exception;
@@ -474,6 +581,10 @@ pub unsafe fn impl_platform_tungguEvent(
                     }
                 }
                 EXIT_PROCESS_DEBUG_EVENT => {
+                    info!(
+                        "WinAPI: EXIT_PROCESS_DEBUG_EVENT, status: {}",
+                        debug_event.u.ExitProcess.dwExitCode
+                    );
                     (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
                     (*event_out).pid_thread = debug_event.dwThreadId as c_int;
                     (*event_out).info_alamat = debug_event.u.ExitProcess.dwExitCode as u64;
@@ -481,6 +592,10 @@ pub unsafe fn impl_platform_tungguEvent(
                     return 0;
                 }
                 _ => {
+                    debug!(
+                        "WinAPI: Menerima event debug: {}",
+                        debug_event.dwDebugEventCode
+                    );
                 }
             }
             ContinueDebugEvent(

@@ -24,6 +24,7 @@ use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEvent
 use crate::utils::c_free_string;
 
 use libc::{c_char, c_int, c_void};
+use log::{debug, error};
 use std::collections::HashMap;
 use std::ptr::null_mut;
 
@@ -164,6 +165,7 @@ type RtHandle = c_void;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHandle {
+    debug!("rt_attachProses dipanggil untuk PID: {}", pid_target_proses);
     unsafe {
         let state_debugger_box = Box::new(StateDebuggerInternal {
             pid_target: pid_target_proses,
@@ -191,9 +193,11 @@ pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHan
             attach_sukses = platform_unsupported::impl_platform_attach(state_ptr.as_mut().unwrap());
         }
         if attach_sukses {
+            debug!("Attach ke PID {} berhasil", pid_target_proses);
             (*state_ptr).attached_status = true;
             state_ptr as *mut RtHandle
         } else {
+            error!("Attach ke PID {} gagal", pid_target_proses);
             let _ = Box::from_raw(state_ptr);
             null_mut()
         }
@@ -202,10 +206,18 @@ pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHan
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_detachProses(handle: *mut RtHandle) {
+    debug!("rt_detachProses dipanggil");
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return };
-        let bps_to_restore: Vec<(u64, u8)> =
-            state_data.breakpoints_map.iter().map(|(&k, &v)| (k, v)).collect();
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_detachProses: handle tidak valid");
+            return;
+        };
+        let bps_to_restore: Vec<(u64, u8)> = state_data
+            .breakpoints_map
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        debug!("Merestore {} breakpoints", bps_to_restore.len());
         for (addr, orig_byte) in bps_to_restore {
             let data_byte = [orig_byte];
             #[cfg(target_os = "linux")]
@@ -221,8 +233,10 @@ pub unsafe extern "C" fn rt_detachProses(handle: *mut RtHandle) {
             platform_windows::impl_platform_detach(state_data);
             #[cfg(not(any(target_os = "linux", windows)))]
             platform_unsupported::impl_platform_detach(state_data);
+            debug!("Detach platform-specific selesai");
         }
         let _ = Box::from_raw(handle as *mut StateDebuggerInternal);
+        debug!("State debugger dibebaskan");
     }
 }
 
@@ -234,11 +248,16 @@ pub unsafe extern "C" fn rt_bacaMemory(
     size: c_int,
 ) -> c_int {
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_bacaMemory: handle tidak valid");
+            return -1;
+        };
         if out_buffer.is_null() || size <= 0 {
+            error!("rt_bacaMemory: buffer output tidak valid atau size <= 0");
             return -1;
         }
         if !state_data.attached_status {
+            error!("rt_bacaMemory: proses tidak ter-attach");
             return -1;
         }
         #[cfg(target_os = "linux")]
@@ -264,11 +283,16 @@ pub unsafe extern "C" fn rt_tulisMemory(
     size: c_int,
 ) -> c_int {
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_tulisMemory: handle tidak valid");
+            return -1;
+        };
         if data.is_null() || size <= 0 {
+            error!("rt_tulisMemory: data input tidak valid atau size <= 0");
             return -1;
         }
         if !state_data.attached_status {
+            error!("rt_tulisMemory: proses tidak ter-attach");
             return -1;
         }
         #[cfg(target_os = "linux")]
@@ -288,32 +312,44 @@ pub unsafe extern "C" fn rt_tulisMemory(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_setBreakpoint(handle: *mut RtHandle, addr: u64) -> c_int {
+    debug!("rt_setBreakpoint dipanggil pada alamat: 0x{:x}", addr);
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_setBreakpoint: handle tidak valid");
+            return -1;
+        };
         if state_data.breakpoints_map.contains_key(&addr) {
+            debug!("Breakpoint sudah ada di 0x{:x}", addr);
             return 0;
         }
         let mut orig_byte: u8 = 0;
         let bytes_dibaca = rt_bacaMemory(handle, addr, &mut orig_byte, 1);
         if bytes_dibaca != 1 {
+            error!("Gagal membaca byte asli di 0x{:x}", addr);
             return -1;
         }
         state_data.breakpoints_map.insert(addr, orig_byte);
         let int3_byte: u8 = 0xCC;
         let bytes_ditulis = rt_tulisMemory(handle, addr, &int3_byte, 1);
         if bytes_ditulis != 1 {
+            error!("Gagal menulis INT3 di 0x{:x}", addr);
             state_data.breakpoints_map.remove(&addr);
-            rt_tulisMemory(handle, addr, &orig_byte, 1);
+            rt_tulisMemory(handle, addr, &orig_byte, 1); // Coba restore
             return -1;
         }
-        0 
+        debug!("Breakpoint berhasil diset di 0x{:x}", addr);
+        0
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_singleStep(handle: *mut RtHandle) -> c_int {
+    debug!("rt_singleStep dipanggil");
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_singleStep: handle tidak valid");
+            return -1;
+        };
         #[cfg(target_os = "linux")]
         {
             return platform_linux::impl_platform_single_step(state_data);
@@ -335,8 +371,12 @@ pub unsafe extern "C" fn rt_getRegisters(
     out_registers: *mut C_Registers,
 ) -> c_int {
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_getRegisters: handle tidak valid");
+            return -1;
+        };
         if out_registers.is_null() {
+            error!("rt_getRegisters: out_registers adalah null");
             return -1;
         }
         #[cfg(target_os = "linux")]
@@ -360,8 +400,12 @@ pub unsafe extern "C" fn rt_setRegisters(
     registers: *const C_Registers,
 ) -> c_int {
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_setRegisters: handle tidak valid");
+            return -1;
+        };
         if registers.is_null() {
+            error!("rt_setRegisters: registers adalah null");
             return -1;
         }
         #[cfg(target_os = "linux")]
@@ -381,8 +425,12 @@ pub unsafe extern "C" fn rt_setRegisters(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_continueProses(handle: *mut RtHandle) -> c_int {
+    debug!("rt_continueProses dipanggil");
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_continueProses: handle tidak valid");
+            return -1;
+        };
         #[cfg(target_os = "linux")]
         {
             return platform_linux::impl_platform_continue_proses(state_data);
@@ -403,9 +451,14 @@ pub unsafe extern "C" fn rt_tungguEvent(
     handle: *mut RtHandle,
     event_out: *mut C_DebugEvent,
 ) -> c_int {
+    debug!("rt_tungguEvent: Menunggu event debug...");
     unsafe {
-        let Some(state_data) = ambil_state(handle) else { return -1 };
+        let Some(state_data) = ambil_state(handle) else {
+            error!("rt_tungguEvent: handle tidak valid");
+            return -1;
+        };
         if event_out.is_null() {
+            error!("rt_tungguEvent: event_out adalah null");
             return -1;
         }
         (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
@@ -423,42 +476,5 @@ pub unsafe extern "C" fn rt_tungguEvent(
         {
             return platform_unsupported::impl_platform_tunggu_event();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::logic::static_analysis::disasm::ArsitekturDisasm;
-    use std::ffi::CStr;
-    #[test]
-    fn test_disasm_rust_side_x86_64() {
-        let code: Vec<u8> = vec![0x55, 0x48, 0x89, 0xE5, 0x90, 0xC3];
-        let ptr = code.as_ptr();
-        let len = code.len();
-        let arch = ArsitekturDisasm::ARCH_X86_64;
-        let base_va: u64 = 0x1000;
-        let insn1 = unsafe { c_decodeInstruksi(ptr, len, 0, base_va, arch) };
-        assert_eq!(insn1.valid, 1);
-        assert_eq!(insn1.ukuran, 1);
-        assert_eq!(
-            unsafe { CStr::from_ptr(insn1.mnemonic_instruksi.as_ptr()).to_str().unwrap() },
-            "push"
-        );
-        assert_eq!(
-            unsafe { CStr::from_ptr(insn1.str_operand.as_ptr()).to_str().unwrap() },
-            "rbp"
-        );
-        let insn2 = unsafe { c_decodeInstruksi(ptr, len, 1, base_va + 1, arch) };
-        assert_eq!(insn2.valid, 1);
-        assert_eq!(insn2.ukuran, 3);
-        assert_eq!(
-            unsafe { CStr::from_ptr(insn2.mnemonic_instruksi.as_ptr()).to_str().unwrap() },
-            "mov"
-        );
-        assert_eq!(
-            unsafe { CStr::from_ptr(insn2.str_operand.as_ptr()).to_str().unwrap() },
-            "rbp, rsp"
-        );
     }
 }

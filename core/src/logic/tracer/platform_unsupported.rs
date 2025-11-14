@@ -1,7 +1,8 @@
 use libc::{c_int, c_void};
+use log::error;
 
 fn print_unsupported() {
-    eprintln!("PERINGATAN (Rust): Fungsi tracer tidak didukung di OS ini.");
+    error!("PERINGATAN: Fungsi tracer tidak didukung di OS ini.");
 }
 pub unsafe fn impl_platform_attach(_state_data: *mut c_void) -> bool {
     print_unsupported();

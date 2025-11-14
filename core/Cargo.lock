@@ -328,6 +328,7 @@ dependencies = [
  "encoding_rs",
  "goblin",
  "libc",
+ "log",
  "memchr",
  "nix",
  "petgraph",

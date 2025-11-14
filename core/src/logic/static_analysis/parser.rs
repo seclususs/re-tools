@@ -7,7 +7,9 @@ use std::fs;
 use std::path::Path;
 use std::slice;
 
+use crate::error::ReToolsError;
 use crate::utils::strncpy_rs;
+use log::{debug, error, info, warn};
 
 
 #[derive(Debug, Clone, Copy)]
@@ -70,15 +72,15 @@ impl InternalHeaderInfo {
     }
 }
 
-pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo, String> {
-    let buffer_bytes = match fs::read(file_path) {
-        Ok(bytes) => bytes,
-        Err(e) => return Err(e.to_string()),
-    };
+pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo, ReToolsError> {
+    info!("Mulai parse header untuk: {}", file_path);
+    let buffer_bytes = fs::read(file_path)?;
     let file_size_actual = buffer_bytes.len() as u64;
+    debug!("Ukuran file dibaca: {} bytes", file_size_actual);
     let header_info = match Object::parse(&buffer_bytes) {
         Ok(Object::Elf(elf)) => {
             let machine_id = elf.header.e_machine;
+            info!("Format file terdeteksi: ELF");
             InternalHeaderInfo {
                 valid: true,
                 format: "ELF",
@@ -92,6 +94,7 @@ pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo,
         }
         Ok(Object::PE(pe)) => {
             let machine_id = pe.header.coff_header.machine;
+            info!("Format file terdeteksi: PE");
             InternalHeaderInfo {
                 valid: true,
                 format: "PE",
@@ -104,6 +107,7 @@ pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo,
             }
         }
         Ok(Object::Mach(mach)) => {
+            info!("Format file terdeteksi: Mach-O");
             let (format_str, bits, machine_id, entry, is_lib) = match mach {
                 Mach::Binary(macho) => (
                     "Mach-O",
@@ -122,6 +126,7 @@ pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo,
                             macho.header.filetype == goblin::mach::header::MH_DYLIB,
                         )
                     } else {
+                        warn!("Mach-O (Fat) tidak berisi-arsitektur MachO yang valid");
                         ("Mach-O (Fat-Empty/Archive)", 0, 0, 0, false)
                     }
                 }
@@ -137,15 +142,25 @@ pub fn parse_header_info_internal(file_path: &str) -> Result<InternalHeaderInfo,
                 file_size: file_size_actual,
             }
         }
-        Ok(Object::Archive(_)) => InternalHeaderInfo {
-            valid: true,
-            format: "Archive (.a/.lib)",
-            ..InternalHeaderInfo::invalid()
-        },
-        _ => InternalHeaderInfo {
-            file_size: file_size_actual,
-            ..InternalHeaderInfo::invalid()
-        },
+        Ok(Object::Archive(_)) => {
+            info!("Format file terdeteksi: Archive");
+            InternalHeaderInfo {
+                valid: true,
+                format: "Archive (.a/.lib)",
+                ..InternalHeaderInfo::invalid()
+            }
+        }
+        Err(e) => {
+            warn!("Goblin parse gagal: {}", e);
+            Err(ReToolsError::ParseError(e.to_string()))?
+        }
+        _ => {
+            warn!("Format file tidak diketahui atau tidak didukung");
+            InternalHeaderInfo {
+                file_size: file_size_actual,
+                ..InternalHeaderInfo::invalid()
+            }
+        }
     };
     Ok(header_info)
 }
@@ -185,16 +200,18 @@ pub struct C_SymbolInfo {
     pub bind: [c_char; 64],
 }
 
-pub fn read_file_bytes(file_path_c: *const c_char) -> Option<Vec<u8>> {
+pub fn read_file_bytes(file_path_c: *const c_char) -> Result<Vec<u8>, ReToolsError> {
     unsafe {
         let path_cstr = {
             if file_path_c.is_null() {
-                return None;
+                error!("file_path_c adalah null");
+                return Err(ReToolsError::Generic("Path is null".to_string()));
             }
             CStr::from_ptr(file_path_c)
         };
-        let path_str = path_cstr.to_str().ok()?;
-        fs::read(Path::new(path_str)).ok()
+        let path_str = path_cstr.to_str()?;
+        debug!("Membaca file bytes dari: {}", path_str);
+        Ok(fs::read(Path::new(path_str))?)
     }
 }
 
@@ -225,9 +242,10 @@ pub unsafe fn c_get_binary_header(
     file_path_c: *const c_char,
     out_header: *mut C_HeaderInfo,
 ) -> c_int {
-    let internal_result = match CStr::from_ptr(file_path_c).to_str() {
+    let path_str_result = CStr::from_ptr(file_path_c).to_str();
+    let internal_result = match path_str_result {
         Ok(path_str) => parse_header_info_internal(path_str),
-        Err(_) => Err("Invalid file path string".to_string()),
+        Err(e) => Err(ReToolsError::from(e)),
     };
     match internal_result {
         Ok(header_info) => {
@@ -242,7 +260,10 @@ pub unsafe fn c_get_binary_header(
             out.file_size = header_info.file_size;
             0
         }
-        Err(_) => -1,
+        Err(e) => {
+            error!("c_get_binary_header gagal: {}", e);
+            -1
+        }
     }
 }
 
@@ -254,17 +275,28 @@ pub unsafe fn c_get_daftar_sections(
 ) -> c_int {
     unsafe {
         if out_buffer.is_null() || max_count <= 0 {
+            error!("Buffer output invalid atau max_count <= 0");
             return -1;
         }
-        let Some(buffer_bytes) = read_file_bytes(file_path_c) else {
-            return -1;
+        let buffer_bytes = match read_file_bytes(file_path_c) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                error!("Gagal membaca file bytes: {}", e);
+                return -1;
+            }
         };
         match Elf::parse(&buffer_bytes) {
             Ok(elf) => {
                 let sections = &elf.section_headers;
                 if sections.len() > max_count as usize {
+                    warn!(
+                        "Jumlah sections ({}) melebihi max_count ({})",
+                        sections.len(),
+                        max_count
+                    );
                     return -1;
                 }
+                info!("Ditemukan {} sections", sections.len());
                 let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
                 for (i, section) in sections.iter().enumerate() {
                     let section_name = elf.shdr_strtab.get_at(section.sh_name).unwrap_or("(unknown)");
@@ -277,7 +309,10 @@ pub unsafe fn c_get_daftar_sections(
                 }
                 sections.len() as c_int
             }
-            Err(_) => -1,
+            Err(e) => {
+                error!("Gagal parse ELF: {}", e);
+                -1
+            }
         }
     }
 }
@@ -290,10 +325,15 @@ pub unsafe fn c_get_daftar_simbol(
 ) -> c_int {
     unsafe {
         if out_buffer.is_null() || max_count <= 0 {
+            error!("Buffer output invalid atau max_count <= 0");
             return -1;
         }
-        let Some(buffer_bytes) = read_file_bytes(file_path_c) else {
-            return -1;
+        let buffer_bytes = match read_file_bytes(file_path_c) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                error!("Gagal membaca file bytes: {}", e);
+                return -1;
+            }
         };
         match Elf::parse(&buffer_bytes) {
             Ok(elf) => {
@@ -304,6 +344,7 @@ pub unsafe fn c_get_daftar_simbol(
                         all_symbols.push((symbol_name, sym));
                     }
                 }
+                debug!("Ditemukan {} static symbols", elf.syms.len());
                 for sym in &elf.dynsyms {
                     let symbol_name = elf
                         .dynstrtab
@@ -313,9 +354,16 @@ pub unsafe fn c_get_daftar_simbol(
                         all_symbols.push((symbol_name, sym));
                     }
                 }
+                debug!("Ditemukan {} dynamic symbols", elf.dynsyms.len());
                 if all_symbols.len() > max_count as usize {
+                    warn!(
+                        "Jumlah total simbol ({}) melebihi max_count ({})",
+                        all_symbols.len(),
+                        max_count
+                    );
                     return -1;
                 }
+                info!("Total simbol yang diproses: {}", all_symbols.len());
                 let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
                 for (i, (symbol_name, sym)) in all_symbols.iter().enumerate() {
                     let out_item = &mut out_slice[i];
@@ -327,7 +375,64 @@ pub unsafe fn c_get_daftar_simbol(
                 }
                 all_symbols.len() as c_int
             }
-            Err(_) => -1,
+            Err(e) => {
+                error!("Gagal parse ELF: {}", e);
+                -1
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    fn create_dummy_elf(path: &str) -> std::io::Result<()> {
+        let mut file = File::create(path)?;
+        let elf_header: [u8; 64] = [
+            0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x40, 0x00, 0x40, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        file.write_all(&elf_header)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_header_info_internal_success() {
+        let test_file = "test_elf_parser.bin";
+        create_dummy_elf(test_file).unwrap();
+        let result = parse_header_info_internal(test_file);
+        assert!(result.is_ok());
+        let header = result.unwrap();
+        assert!(header.valid);
+        assert_eq!(header.format, "ELF");
+        assert_eq!(header.arch, "x86-64");
+        assert_eq!(header.bits, 64);
+        std::fs::remove_file(test_file).unwrap();
+    }
+
+    #[test]
+    fn test_parse_header_info_internal_not_found() {
+        let result = parse_header_info_internal("file_tidak_ada.bin");
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            ReToolsError::IoError(_) => (),
+            _ => panic!("Expected IoError"),
+        }
+    }
+
+    #[test]
+    fn test_read_file_bytes_c_invalid_path() {
+        let s = std::ffi::CString::new("file_tidak_ada.bin").unwrap();
+        let result = read_file_bytes(s.as_ptr());
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            ReToolsError::IoError(_) => (),
+            _ => panic!("Expected IoError"),
         }
     }
 }

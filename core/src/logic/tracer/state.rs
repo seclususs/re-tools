@@ -1,7 +1,9 @@
 use super::types::{u64, u8};
 use libc::c_int;
+use log::error;
 use std::collections::HashMap;
 use std::ffi::c_void as RtHandle;
+
 
 #[repr(C)]
 pub struct StateDebuggerInternal {
@@ -18,6 +20,7 @@ pub struct StateDebuggerInternal {
 
 pub unsafe fn ambil_state<'a>(handle: *mut RtHandle) -> Option<&'a mut StateDebuggerInternal> {
     if handle.is_null() {
+        error!("Handle state debugger adalah null");
         return None;
     }
     unsafe { (handle as *mut StateDebuggerInternal).as_mut() }
