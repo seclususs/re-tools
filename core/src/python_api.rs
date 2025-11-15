@@ -7,13 +7,14 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::analyzer::{
     deteksi_pattern_internal, ekstrak_strings_internal, hitung_entropy_internal,
 };
+use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::cfg::generate_cfg_internal;
 use crate::logic::static_analysis::diff::diff_binary_internal;
 use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm};
 use crate::logic::static_analysis::hexeditor::{
     cari_pattern_internal, lihat_bytes_internal, ubah_bytes_internal,
 };
-use crate::logic::static_analysis::parser::parse_header_info_internal;
+
 use log::{error, info};
 
 
@@ -33,27 +34,25 @@ fn map_err_to_py(err: ReToolsError) -> PyErr {
 #[pyfunction(name = "parseHeaderInfo")]
 fn parse_header_info_py(py: Python, file_path: &str) -> PyResult<PyObject> {
     info!("py: parseHeaderInfo dipanggil untuk: {}", file_path);
-    match parse_header_info_internal(file_path) {
-        Ok(header_info) => {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("valid", header_info.valid)?;
-            dict.set_item("format", header_info.format)?;
-            dict.set_item("arch", header_info.arch)?;
-            dict.set_item("bits", header_info.bits)?;
-            dict.set_item("entry_point", header_info.entry_point)?;
-            dict.set_item("machine_id", header_info.machine_id)?;
-            dict.set_item("is_lib", header_info.is_lib)?;
-            dict.set_item("file_size", header_info.file_size)?;
-            Ok(dict.to_object(py))
-        }
-        Err(e) => Err(map_err_to_py(e)),
-    }
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let header_info = &binary.header;
+    let dict = PyDict::new_bound(py);
+    dict.set_item("valid", header_info.valid)?;
+    dict.set_item("format", header_info.format)?;
+    dict.set_item("arch", header_info.arch)?;
+    dict.set_item("bits", header_info.bits)?;
+    dict.set_item("entry_point", header_info.entry_point)?;
+    dict.set_item("machine_id", header_info.machine_id)?;
+    dict.set_item("is_lib", header_info.is_lib)?;
+    dict.set_item("file_size", header_info.file_size)?;
+    Ok(dict.to_object(py))
 }
 
 #[pyfunction(name = "ekstrakStrings")]
 fn ekstrak_strings_py(py: Python, file_path: &str, min_length: usize) -> PyResult<PyObject> {
     info!("py: ekstrakStrings dipanggil untuk: {}", file_path);
-    match ekstrak_strings_internal(file_path, min_length) {
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match ekstrak_strings_internal(&binary, min_length) {
         Ok(strings_info) => {
             let py_strings: Vec<String> = strings_info.into_iter().map(|s| s.content).collect();
             Ok(py_strings.to_object(py))
@@ -65,7 +64,8 @@ fn ekstrak_strings_py(py: Python, file_path: &str, min_length: usize) -> PyResul
 #[pyfunction(name = "hitungEntropy")]
 fn hitung_entropy_py(_py: Python, file_path: &str, block_size: usize) -> PyResult<Vec<f64>> {
     info!("py: hitungEntropy dipanggil untuk: {}", file_path);
-    match hitung_entropy_internal(file_path, block_size) {
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match hitung_entropy_internal(&binary, block_size) {
         Ok(results) => Ok(results),
         Err(e) => Err(map_err_to_py(e)),
     }
@@ -74,7 +74,8 @@ fn hitung_entropy_py(_py: Python, file_path: &str, block_size: usize) -> PyResul
 #[pyfunction(name = "deteksiPattern")]
 fn deteksi_pattern_py(_py: Python, file_path: &str, regex_str: &str) -> PyResult<Vec<String>> {
     info!("py: deteksiPattern dipanggil untuk: {}", file_path);
-    match deteksi_pattern_internal(file_path, regex_str) {
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match deteksi_pattern_internal(&binary, regex_str) {
         Ok(matches) => Ok(matches),
         Err(e) => Err(map_err_to_py(e)),
     }
@@ -119,7 +120,8 @@ fn decode_instruksi_py(
 #[pyfunction(name = "generateCFG")]
 fn generate_cfg_py(_py: Python, file_path: &str) -> PyResult<String> {
     info!("py: generateCFG dipanggil untuk: {}", file_path);
-    match generate_cfg_internal(file_path) {
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match generate_cfg_internal(&binary) {
         Ok(dot_str) => Ok(dot_str),
         Err(e) => Err(map_err_to_py(e)),
     }

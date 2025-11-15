@@ -1,17 +1,5 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::logic::static_analysis::analyzer::{
-    c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs,
-};
-use crate::logic::static_analysis::cfg::c_generate_cfg_rs;
-use crate::logic::static_analysis::diff::{c_diff_binary_rs, C_DiffResult};
-use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm, C_Instruksi};
-use crate::logic::static_analysis::hexeditor::{c_cari_pattern, c_lihat_bytes, c_ubah_bytes};
-use crate::logic::static_analysis::parser::{
-    c_get_binary_header, c_get_daftar_sections, c_get_daftar_simbol, C_HeaderInfo, C_SectionInfo,
-    C_SymbolInfo,
-};
-
 #[cfg(target_os = "linux")]
 use crate::logic::tracer::platform_linux;
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -19,6 +7,17 @@ use crate::logic::tracer::platform_unsupported;
 #[cfg(windows)]
 use crate::logic::tracer::platform_windows;
 
+use crate::logic::static_analysis::analyzer::{
+    c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs,
+};
+use crate::logic::static_analysis::cfg::c_generate_cfg_rs;
+use crate::logic::static_analysis::diff::c_diff_binary_rs;
+use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm, C_Instruksi};
+use crate::logic::static_analysis::hexeditor::{c_cari_pattern, c_lihat_bytes, c_ubah_bytes};
+use crate::logic::static_analysis::parser::{
+    c_get_binary_header, c_get_daftar_sections, c_get_daftar_simbol, C_DiffResult, C_HeaderInfo,
+    C_SectionInfo, C_SymbolInfo,
+};
 use crate::logic::tracer::state::{ambil_state, StateDebuggerInternal};
 use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
 use crate::utils::c_free_string;
@@ -334,7 +333,7 @@ pub unsafe extern "C" fn rt_setBreakpoint(handle: *mut RtHandle, addr: u64) -> c
         if bytes_ditulis != 1 {
             error!("Gagal menulis INT3 di 0x{:x}", addr);
             state_data.breakpoints_map.remove(&addr);
-            rt_tulisMemory(handle, addr, &orig_byte, 1); // Coba restore
+            rt_tulisMemory(handle, addr, &orig_byte, 1);
             return -1;
         }
         debug!("Breakpoint berhasil diset di 0x{:x}", addr);

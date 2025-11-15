@@ -1,72 +1,50 @@
 use crate::error::ReToolsError;
+use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm};
-use crate::logic::static_analysis::parser::C_SectionInfo;
-use libc::{c_char, c_int};
+use libc::c_char;
 use log::{debug, error, info, warn};
 use petgraph::dot::{Config, Dot};
 use petgraph::graph::DiGraph;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
-use std::fs;
-use std::path::Path;
-
-use crate::c_api::c_getDaftarSections;
 
 
-fn get_text_section_internal(
-    filename: &str,
-) -> Result<(Vec<u8>, u64, u64), ReToolsError> {
-    info!("Mencari section .text di {}", filename);
-    let filename_c = CString::new(filename)?;
-    let mut buffer: Vec<C_SectionInfo> = vec![
-        C_SectionInfo {
-            name: [0; 128],
-            addr: 0,
-            size: 0,
-            offset: 0,
-            tipe: 0,
-        };
-        256
-    ];
-    let count = unsafe {
-        c_getDaftarSections(
-            filename_c.as_ptr(),
-            buffer.as_mut_ptr(),
-            buffer.len() as c_int,
-        )
-    };
-    if count < 0 {
-        warn!("c_getDaftarSections gagal (count: {})", count);
-        return Err(ReToolsError::ParseError(
-            "Gagal mendapatkan daftar sections".to_string(),
-        ));
-    }
-    let text_section = buffer[..count as usize].iter().find(|s| {
-        let name = unsafe { CStr::from_ptr(s.name.as_ptr()).to_str().unwrap_or("") };
-        name == ".text"
-    });
-    if let Some(section) = text_section {
+pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
+    info!("Mulai generate CFG untuk: {}", binary.file_path);
+    let text_section = binary.sections.iter().find(|s| s.name == ".text");
+    let (text_data, base_addr) = if let Some(section) = text_section {
         info!(
             "Section .text ditemukan: addr=0x{:x}, size=0x{:x}",
             section.addr, section.size
         );
-        let mut file = fs::File::open(Path::new(filename))?;
-        use std::io::{Read, Seek, SeekFrom};
-        file.seek(SeekFrom::Start(section.offset))?;
-        let mut data = vec![0; section.size as usize];
-        file.read_exact(&mut data)?;
-        Ok((data, section.addr, section.offset))
+        let text_data_offset = section.offset as usize;
+        let text_data_size = section.size as usize;
+        if text_data_offset
+            .saturating_add(text_data_size)
+            > binary.file_bytes.len()
+        {
+            return Err(ReToolsError::ParseError(
+                "Section .text di luar batas file".to_string(),
+            ));
+        }
+        let data_slice = &binary.file_bytes[text_data_offset..(text_data_offset + text_data_size)];
+        (data_slice, section.addr)
     } else {
         warn!("Section .text tidak ditemukan");
-        Err(ReToolsError::ParseError(
+        return Err(ReToolsError::ParseError(
             "Section .text tidak ditemukan".to_string(),
-        ))
-    }
-}
-
-pub fn generate_cfg_internal(filename: &str) -> Result<String, ReToolsError> {
-    info!("Mulai generate CFG untuk: {}", filename);
-    let (text_data, base_addr, _) = get_text_section_internal(filename)?;
+        ));
+    };
+    let arch_disasm = match (binary.header.arch, binary.header.bits) {
+        ("x86-64", 64) => ArsitekturDisasm::ARCH_X86_64,
+        ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
+        ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
+        ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
+        _ => {
+            warn!("Arsitektur header tidak diketahui, menggunakan default x86-64");
+            ArsitekturDisasm::ARCH_X86_64
+        }
+    };
     let mut leaders = HashSet::new();
     let mut jump_targets = HashMap::new();
     let mut instructions = HashMap::new();
@@ -80,7 +58,7 @@ pub fn generate_cfg_internal(filename: &str) -> Result<String, ReToolsError> {
             text_data.len(),
             offset,
             va,
-            ArsitekturDisasm::ARCH_X86_64,
+            arch_disasm,
         );
         if instr.valid == 0 {
             offset += 1;
@@ -192,10 +170,17 @@ pub unsafe fn c_generate_cfg_rs(filename_c: *const c_char) -> *mut c_char {
                 .into_raw();
         }
     };
-    let dot_result = match generate_cfg_internal(path_str) {
-        Ok(dot) => dot,
+    let binary_result = Binary::load(path_str);
+    let dot_result = match binary_result {
+        Ok(binary) => match generate_cfg_internal(&binary) {
+            Ok(dot) => dot,
+            Err(e) => {
+                error!("generate_cfg_internal gagal: {}", e);
+                format!("digraph G {{ error [label=\"{}\"]; }}", e)
+            }
+        },
         Err(e) => {
-            error!("generate_cfg_internal gagal: {}", e);
+            error!("Binary::load gagal: {}", e);
             format!("digraph G {{ error [label=\"{}\"]; }}", e)
         }
     };

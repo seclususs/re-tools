@@ -3,11 +3,10 @@ use libc::{c_char, c_int};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::fs;
-use std::io::Read;
-use std::path::Path;
+use std::io::{Cursor, Read};
 
 use crate::error::ReToolsError;
+use crate::logic::static_analysis::binary::Binary;
 use crate::utils::strncpy_rs_from_bytes;
 use log::{debug, error, info, warn};
 use regex::bytes::Regex;
@@ -21,16 +20,16 @@ pub struct StringInfo {
 }
 
 pub fn ekstrak_strings_internal(
-    file_path: &str,
+    binary: &Binary,
     min_length: usize,
 ) -> Result<Vec<StringInfo>, ReToolsError> {
     info!(
         "Mulai ekstrak strings dari: {} (min_length: {})",
-        file_path, min_length
+        binary.file_path, min_length
     );
-    let buffer_bytes = fs::read(file_path)?;
+    let buffer_bytes = &binary.file_bytes;
     debug!("Ukuran file dibaca: {} bytes", buffer_bytes.len());
-    let strings_info = extract_all_strings(&buffer_bytes, min_length);
+    let strings_info = extract_all_strings(buffer_bytes, min_length);
     info!("Selesai ekstrak strings, ditemukan: {}", strings_info.len());
     Ok(strings_info)
 }
@@ -127,7 +126,14 @@ pub unsafe fn c_get_strings_list(
             return CString::new("[]").unwrap().into_raw();
         }
     };
-    let strings = match ekstrak_strings_internal(path_str, min_length as usize) {
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Binary::load gagal: {}", e);
+            return CString::new("[]").unwrap().into_raw();
+        }
+    };
+    let strings = match ekstrak_strings_internal(&binary, min_length as usize) {
         Ok(s) => s,
         Err(e) => {
             error!("ekstrak_strings_internal gagal: {}", e);
@@ -164,23 +170,22 @@ fn calculate_entropy_for_block(data: &[u8]) -> f64 {
 }
 
 pub fn hitung_entropy_internal(
-    file_path: &str,
+    binary: &Binary,
     block_size: usize,
 ) -> Result<Vec<f64>, ReToolsError> {
     info!(
         "Mulai hitung entropy untuk: {} (block_size: {})",
-        file_path, block_size
+        binary.file_path, block_size
     );
     let mut entropies = Vec::new();
     if block_size == 0 {
         warn!("Block size adalah 0, mengembalikan vector kosong");
         return Ok(entropies);
     }
-    let path = Path::new(file_path);
-    let mut file = fs::File::open(path)?;
+    let mut cursor = Cursor::new(&binary.file_bytes);
     let mut buffer = vec![0; block_size];
     loop {
-        match file.read(&mut buffer) {
+        match cursor.read(&mut buffer) {
             Ok(0) => break,
             Ok(bytes_read) => {
                 let block_data = &buffer[..bytes_read];
@@ -218,7 +223,14 @@ pub unsafe fn c_hitung_entropy_rs(
             return -1;
         }
     };
-    let results = match hitung_entropy_internal(path_str, block_size as usize) {
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Binary::load gagal: {}", e);
+            return -1;
+        }
+    };
+    let results = match hitung_entropy_internal(&binary, block_size as usize) {
         Ok(res) => res,
         Err(e) => {
             error!("hitung_entropy_internal gagal: {}", e);
@@ -241,18 +253,18 @@ pub unsafe fn c_hitung_entropy_rs(
 }
 
 pub fn deteksi_pattern_internal(
-    file_path: &str,
+    binary: &Binary,
     regex_str: &str,
 ) -> Result<Vec<String>, ReToolsError> {
     info!(
         "Mulai deteksi pattern regex: '{}' di file: {}",
-        regex_str, file_path
+        regex_str, binary.file_path
     );
-    let file_bytes = fs::read(file_path)?;
+    let file_bytes = &binary.file_bytes;
     debug!("Ukuran file dibaca: {} bytes", file_bytes.len());
     let re = Regex::new(regex_str)?;
     let matches: Vec<String> = re
-        .find_iter(&file_bytes)
+        .find_iter(file_bytes)
         .map(|m| String::from_utf8_lossy(m.as_bytes()).to_string())
         .collect();
     info!("Ditemukan {} matches", matches.len());
@@ -287,7 +299,14 @@ pub unsafe fn c_deteksi_pattern_rs(
             return -1;
         }
     };
-    let results = deteksi_pattern_internal(path_str, regex_str);
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Binary::load gagal: {}", e);
+            return -1;
+        }
+    };
+    let results = deteksi_pattern_internal(&binary, regex_str);
     let json_result_string = match results {
         Ok(matches) => {
             serde_json::to_string(&matches).unwrap_or_else(|e| format!("[\"Error serialisasi: {}\"]", e))
@@ -301,7 +320,6 @@ pub unsafe fn c_deteksi_pattern_rs(
     }
     let out_slice = std::slice::from_raw_parts_mut(out_buffer, out_buffer_size as usize);
     strncpy_rs_from_bytes(json_bytes, out_slice);
-
     0
 }
 
@@ -321,7 +339,8 @@ mod tests {
         let test_file = "test_strings.bin";
         let content = b"This is ASCII\x00\x01\x02\x57\x00\x4F\x00\x52\x00\x44\x00\x00\x00Another ASCII";
         create_test_file(test_file, content).unwrap();
-        let result = ekstrak_strings_internal(test_file, 4);
+        let binary = Binary::load(test_file).unwrap();
+        let result = ekstrak_strings_internal(&binary, 4);
         assert!(result.is_ok());
         let strings = result.unwrap();
         let contents: Vec<String> = strings.iter().map(|s| s.content.clone()).collect();
@@ -336,7 +355,8 @@ mod tests {
         let test_file = "test_entropy.bin";
         let content = vec![0x00; 1024];
         create_test_file(test_file, &content).unwrap();
-        let result = hitung_entropy_internal(test_file, 512);
+        let binary = Binary::load(test_file).unwrap();
+        let result = hitung_entropy_internal(&binary, 512);
         assert!(result.is_ok());
         let entropies = result.unwrap();
         assert_eq!(entropies.len(), 2);
@@ -350,7 +370,8 @@ mod tests {
         let test_file = "test_pattern.bin";
         let content = b"Some data here 12345 and more data 67890.";
         create_test_file(test_file, content).unwrap();
-        let result = deteksi_pattern_internal(test_file, r"\d{5}");
+        let binary = Binary::load(test_file).unwrap();
+        let result = deteksi_pattern_internal(&binary, r"\d{5}");
         assert!(result.is_ok());
         let matches = result.unwrap();
         assert_eq!(matches.len(), 2);
@@ -363,7 +384,8 @@ mod tests {
     fn test_deteksi_pattern_internal_invalid_regex() {
         let test_file = "test_pattern_invalid.bin";
         create_test_file(test_file, b"data").unwrap();
-        let result = deteksi_pattern_internal(test_file, r"[");
+        let binary = Binary::load(test_file).unwrap();
+        let result = deteksi_pattern_internal(&binary, r"[");
         assert!(result.is_err());
         match result.err().unwrap() {
             ReToolsError::RegexError(_) => (),
