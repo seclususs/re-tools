@@ -8,7 +8,7 @@ use crate::logic::tracer::platform_unsupported;
 use crate::logic::tracer::platform_windows;
 
 use crate::logic::static_analysis::analyzer::{
-    c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs,
+    c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs, c_scan_yara_rs,
 };
 use crate::logic::static_analysis::cfg::c_generate_cfg_rs;
 use crate::logic::static_analysis::diff::c_diff_binary_rs;
@@ -21,11 +21,14 @@ use crate::logic::static_analysis::parser::{
 use crate::logic::tracer::state::{ambil_state, StateDebuggerInternal};
 use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
 use crate::utils::c_free_string;
+use crate::logic::ir::lifter::angkat_blok_instruksi;
 
 use libc::{c_char, c_int, c_void};
 use log::{debug, error};
 use std::collections::HashMap;
 use std::ptr::null_mut;
+use std::ffi::CString;
+use std::slice;
 
 
 #[allow(non_snake_case)]
@@ -38,6 +41,30 @@ pub unsafe extern "C" fn c_decodeInstruksi(
     arch: ArsitekturDisasm,
 ) -> C_Instruksi {
     logic_decode_instruksi(ptr_data, len_data, offset, instruction_base_va, arch)
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getIrForInstruksi(
+    ptr_data: *const u8,
+    len_data: usize,
+    offset: usize,
+    instruction_base_va: u64,
+    arch: ArsitekturDisasm,
+) -> *mut c_char {
+    if offset >= len_data {
+        return CString::new("[]").unwrap().into_raw();
+    }
+    let data_slice = unsafe { slice::from_raw_parts(ptr_data, len_data) };
+    let code_slice = &data_slice[offset..];
+    let ir_result = angkat_blok_instruksi(code_slice, instruction_base_va, arch);
+    let json_result = match ir_result {
+        Ok((_size, ir_vec)) => {
+            serde_json::to_string(&ir_vec).unwrap_or_else(|e| format!("Error: {}", e))
+        },
+        Err(e) => format!("Error: {}", e)
+    };
+    CString::new(json_result).unwrap_or_default().into_raw()
 }
 
 #[allow(non_snake_case)]
@@ -98,6 +125,15 @@ pub unsafe extern "C" fn c_deteksiPattern_rs(
     out_buffer_size: c_int,
 ) -> c_int {
     unsafe { c_deteksi_pattern_rs(file_path_c, regex_str_c, out_buffer, out_buffer_size) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_scanYara_rs(
+    file_path_c: *const c_char,
+    yara_rules_c: *const c_char,
+) -> *mut c_char {
+    unsafe { c_scan_yara_rs(file_path_c, yara_rules_c) }
 }
 
 #[allow(non_snake_case)]

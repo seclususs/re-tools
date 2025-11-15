@@ -17,3 +17,4 @@ extern crate petgraph;
 extern crate regex;
 extern crate serde;
 extern crate serde_json;
+extern crate yara;

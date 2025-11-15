@@ -21,6 +21,7 @@ regex = "1.10.5"
 memchr = "2.7.4"
 pyo3 = { version = "0.21.2", features = ["extension-module"], optional = true }
 log = "0.4.28"
+yara = { version = "0.22.0", features = ["vendored"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.28.0", features = ["ptrace"] }

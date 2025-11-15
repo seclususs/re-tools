@@ -1,16 +1,39 @@
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::binary::Binary;
-use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm};
+use crate::logic::static_analysis::disasm::ArsitekturDisasm;
+use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
+
 use libc::c_char;
 use log::{debug, error, info, warn};
 use petgraph::dot::{Config, Dot};
-use petgraph::graph::DiGraph;
+use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 
 
+#[derive(Debug, Clone)]
+struct BasicBlock {
+    va_start: u64,
+    va_end: u64,
+    instructions: Vec<(u64, Vec<IrInstruction>)>,
+    size: usize,
+}
+
+fn get_target_va_from_expr(expr: &IrExpression) -> Option<u66> {
+    if let IrExpression::Operand(IrOperand::Immediate(imm)) = expr {
+        Some(*imm)
+    } else {
+        None
+    }
+}
+
+fn is_ir_branch(ir: &IrInstruction) -> bool {
+    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret)
+}
+
 pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
-    info!("Mulai generate CFG untuk: {}", binary.file_path);
+    info!("Mulai generate CFG (IR-based) untuk: {}", binary.file_path);
     let text_section = binary.sections.iter().find(|s| s.name == ".text");
     let (text_data, base_addr) = if let Some(section) = text_section {
         info!(
@@ -40,123 +63,142 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
         ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
         ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
-        _ => {
-            warn!("Arsitektur header tidak diketahui, menggunakan default x86-64");
-            ArsitekturDisasm::ARCH_X86_64
-        }
+        _ => ArsitekturDisasm::ARCH_X86_64,
     };
     let mut leaders = HashSet::new();
-    let mut jump_targets = HashMap::new();
-    let mut instructions = HashMap::new();
+    let mut lifted_instructions = HashMap::new();
     leaders.insert(base_addr);
+    debug!("Pass 1: Identifikasi leaders dan angkat IR");
     let mut offset: usize = 0;
-    debug!("Pass 1: Identifikasi leaders dan instruksi");
     while offset < text_data.len() {
         let va = base_addr + offset as u64;
-        let instr = logic_decode_instruksi(
-            text_data.as_ptr(),
-            text_data.len(),
-            offset,
-            va,
-            arch_disasm,
-        );
-        if instr.valid == 0 {
-            offset += 1;
-            continue;
-        }
-        let mnemonic =
-            unsafe { CStr::from_ptr(instr.mnemonic_instruksi.as_ptr()).to_str().unwrap() };
-        let op_str = unsafe { CStr::from_ptr(instr.str_operand.as_ptr()).to_str().unwrap() };
-        let instr_str_full = format!("{} {}", mnemonic, op_str);
-        let instr_str_upper = instr_str_full.to_uppercase().trim_end().to_string();
-        instructions.insert(va, (instr_str_upper, instr.ukuran as usize));
-        let is_branch = mnemonic.starts_with('j') || mnemonic == "call" || mnemonic == "ret";
-        if is_branch {
-            let fallthrough_addr = va + instr.ukuran as u64;
-            if fallthrough_addr <= base_addr + text_data.len() as u64 {
-                leaders.insert(fallthrough_addr);
-            }
-            if mnemonic != "ret" {
-                if let Ok(target_addr) = u64::from_str_radix(op_str.trim_start_matches("0x"), 16) {
-                    leaders.insert(target_addr);
-                    jump_targets.insert(va, (target_addr, mnemonic.starts_with('j')));
+        let (size, irs) = match angkat_blok_instruksi(&text_data[offset..], va, arch_disasm) {
+            Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
+            _ => (1, vec![IrInstruction::Undefined]),
+        };
+        lifted_instructions.insert(va, (irs.clone(), size));
+        if let Some(last_ir) = irs.last() {
+            if is_ir_branch(last_ir) {
+                let fallthrough_addr = va + size as u64;
+                if fallthrough_addr <= base_addr + text_data.len() as u64 {
+                    leaders.insert(fallthrough_addr);
+                }
+                let target_addr_opt = match last_ir {
+                    IrInstruction::Jmp(expr) | IrInstruction::JmpCond(_, expr) | IrInstruction::Call(expr) => {
+                        get_target_va_from_expr(expr)
+                    }
+                    _ => None
+                };
+                if let Some(target_addr) = target_addr_opt {
+                    if target_addr != 0 {
+                       leaders.insert(target_addr);
+                    }
                 }
             }
         }
-        offset += instr.ukuran as usize;
+        offset += size;
     }
     info!("Pass 1 selesai. Ditemukan {} leaders", leaders.len());
-    let mut graph = DiGraph::<String, &'static str>::new();
-    let mut node_map = HashMap::new();
+    let mut graph = DiGraph::<BasicBlock, &'static str>::new();
+    let mut node_map = HashMap::<u64, NodeIndex>::new();
     let mut sorted_leaders: Vec<u64> = leaders.into_iter().collect();
     sorted_leaders.sort();
     debug!("Pass 2: Membuat basic blocks");
-    for &leader_addr in &sorted_leaders {
-        let mut block_content = String::new();
-        let mut current_addr = leader_addr;
-        while current_addr < base_addr + text_data.len() as u64 {
-            if let Some((instr_str, size)) = instructions.get(&current_addr) {
-                block_content.push_str(&format!("{:#x}: {}\n", current_addr, instr_str));
-                current_addr += *size as u64;
-
-                if jump_targets.contains_key(&(current_addr - *size as u64))
-                    || sorted_leaders.binary_search(&current_addr).is_ok()
-                {
+    for &leader_va in &sorted_leaders {
+        if node_map.contains_key(&leader_va) {
+            continue;
+        }
+        let mut block_instrs: Vec<(u64, Vec<IrInstruction>)> = Vec::new();
+        let mut current_addr = leader_va;
+        let mut block_size: usize = 0;
+        loop {
+            let (irs, size) = match lifted_instructions.get(&current_addr) {
+                Some((irs, size)) => (irs.clone(), *size),
+                None => (vec![IrInstruction::Undefined], 1),
+            };
+            if size == 0 {
+                 break;
+            }
+            let last_ir = irs.last().cloned();
+            block_instrs.push((current_addr, irs));
+            block_size += size;
+            current_addr += size;
+            if let Some(ir) = last_ir {
+                if is_ir_branch(&ir) {
                     break;
                 }
-            } else {
+            }
+            if leaders.contains(&current_addr) || current_addr >= (base_addr + text_data.len() as u64) {
                 break;
             }
         }
-        if !block_content.is_empty() {
-            let node_idx = graph.add_node(block_content);
-            node_map.insert(leader_addr, node_idx);
-        }
+        let block = BasicBlock {
+            va_start: leader_va,
+            va_end: current_addr,
+            instructions: block_instrs,
+            size: block_size,
+        };
+        let node_idx = graph.add_node(block);
+        node_map.insert(leader_va, node_idx);
     }
     info!("Pass 2 selesai. Dibuat {} nodes", graph.node_count());
     debug!("Pass 3: Menghubungkan edges");
-    for &leader_addr in &sorted_leaders {
-        let Some(&node_idx) = node_map.get(&leader_addr) else {
-            continue;
+    for (&va, &node_idx) in &node_map {
+        let block = match graph.node_weight(node_idx) {
+            Some(b) => b,
+            None => continue,
         };
-        let mut current_addr = leader_addr;
-        let mut last_instr_addr = leader_addr;
-        while current_addr < base_addr + text_data.len() as u64 {
-            if let Some((_, size)) = instructions.get(&current_addr) {
-                last_instr_addr = current_addr;
-                current_addr += *size as u64;
-                if sorted_leaders.binary_search(&current_addr).is_ok()
-                    || jump_targets.contains_key(&last_instr_addr)
-                {
-                    break;
-                }
-            } else {
-                break;
-            }
+        let last_ir_instruction_group = block.instructions.last();
+        if last_ir_instruction_group.is_none() {
+            continue;
         }
-        if let Some((target_addr, is_conditional)) = jump_targets.get(&last_instr_addr) {
-            if let Some(target_node_idx) = node_map.get(target_addr) {
-                graph.add_edge(node_idx, *target_node_idx, "Jump");
-            }
-            if *is_conditional {
-                if let Some(fallthrough_node_idx) = node_map.get(&current_addr) {
-                    graph.add_edge(node_idx, *fallthrough_node_idx, "Fallthrough");
+        let last_ir = last_ir_instruction_group.unwrap().1.last();
+        if last_ir.is_none() {
+            continue;
+        }
+        match last_ir.unwrap() {
+            IrInstruction::Jmp(target_expr) => {
+                if let Some(target_va) = get_target_va_from_expr(target_expr) {
+                    if let Some(target_idx) = node_map.get(&target_va) {
+                        graph.add_edge(node_idx, *target_idx, "Jump");
+                    }
                 }
             }
-        } else if !instructions
-            .get(&last_instr_addr)
-            .map_or(false, |(s, _)| s.contains("RET"))
-        {
-            if let Some(fallthrough_node_idx) = node_map.get(&current_addr) {
-                graph.add_edge(node_idx, *fallthrough_node_idx, "Fallthrough");
+            IrInstruction::JmpCond(_, target_expr) => {
+                if let Some(target_va) = get_target_va_from_expr(target_expr) {
+                    if let Some(target_idx) = node_map.get(&target_va) {
+                        graph.add_edge(node_idx, *target_idx, "Jump (True)");
+                    }
+                }
+                let fallthrough_va = block.va_end;
+                if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
+                    graph.add_edge(node_idx, *fallthrough_idx, "Fallthrough (False)");
+                }
+            }
+            IrInstruction::Ret => {
+            }
+            _ => {
+                let fallthrough_va = block.va_end;
+                if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
+                    graph.add_edge(node_idx, *fallthrough_idx, "Fallthrough");
+                }
             }
         }
     }
-    info!(
-        "Pass 3 selesai. Dibuat {} edges",
-        graph.edge_count()
-    );
-    let dot_str = Dot::with_config(&graph, &[Config::EdgeNoLabel]);
+    info!("Pass 3 selesai. Dibuat {} edges", graph.edge_count());
+    let dot_str = Dot::with_config(
+        &graph, 
+        &[Config::EdgeNoLabel], 
+        |_, edge| format!("label=\"{}\"", edge.weight()), 
+        |_, (_idx, node)| {
+            let mut label = format!("0x{:x}:\\n", node.va_start);
+            for (va, irs) in &node.instructions {
+                for ir in irs {
+                     label.push_str(&format!("  0x{:x}: {:?}\\n", va, ir));
+                }
+            }
+            format!("label={:?}", label)
+        });
     Ok(format!("{}", dot_str))
 }
 

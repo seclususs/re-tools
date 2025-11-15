@@ -9,6 +9,7 @@ pub enum ReToolsError {
     Utf8Error(std::str::Utf8Error),
     RegexError(regex::Error),
     CapstoneError(capstone::Error),
+    YaraError(yara::Error),
     Generic(String),
 }
 
@@ -21,6 +22,7 @@ impl fmt::Display for ReToolsError {
             ReToolsError::Utf8Error(e) => write!(f, "UTF-8 Error: {}", e),
             ReToolsError::RegexError(e) => write!(f, "Regex Error: {}", e),
             ReToolsError::CapstoneError(e) => write!(f, "Capstone Error: {}", e),
+            ReToolsError::YaraError(e) => write!(f, "YARA Error: {}", e),
             ReToolsError::Generic(s) => write!(f, "Generic Error: {}", s),
         }
     }
@@ -55,5 +57,11 @@ impl From<regex::Error> for ReToolsError {
 impl From<capstone::Error> for ReToolsError {
     fn from(err: capstone::Error) -> ReToolsError {
         ReToolsError::CapstoneError(err)
+    }
+}
+
+impl From<yara::Error> for ReToolsError {
+    fn from(err: yara::Error) -> ReToolsError {
+        ReToolsError::YaraError(err)
     }
 }

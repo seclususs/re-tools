@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Cursor, Read};
+use yara::{Compiler, Rules};
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::binary::Binary;
@@ -18,6 +19,19 @@ pub struct StringInfo {
     pub content: String,
     pub encoding: &'static str,
 }
+
+#[derive(Serialize)]
+pub struct YaraStringMatch {
+    pub identifier: String,
+    pub offset: u64,
+}
+
+#[derive(Serialize)]
+pub struct YaraMatch {
+    pub rule_name: String,
+    pub strings: Vec<YaraStringMatch>,
+}
+
 
 pub fn ekstrak_strings_internal(
     binary: &Binary,
@@ -323,6 +337,72 @@ pub unsafe fn c_deteksi_pattern_rs(
     0
 }
 
+pub fn scan_yara_internal(
+    binary: &Binary,
+    yara_rules: &str,
+) -> Result<Vec<YaraMatch>, ReToolsError> {
+    info!("Mulai scan YARA di file: {}", binary.file_path);
+    let mut compiler = Compiler::new()?;
+    compiler.add_rules_str(yara_rules)?;
+    let rules = compiler.compile_rules()?;
+    let matches = rules.scan_mem(&binary.file_bytes, 10)?;
+    let results: Vec<YaraMatch> = matches.iter().map(|m| {
+        YaraMatch {
+            rule_name: m.identifier.to_string(),
+            strings: m.strings.iter().map(|s| {
+                YaraStringMatch {
+                    identifier: s.identifier.to_string(),
+                    offset: s.offset as u64,
+                }
+            }).collect(),
+        }
+    }).collect();
+    info!("Scan YARA selesai, {} rules matched", results.len());
+    Ok(results)
+}
+
+pub unsafe fn c_scan_yara_rs(
+    file_path_c: *const c_char,
+    yara_rules_c: *const c_char,
+) -> *mut c_char {
+    let path_str = match CStr::from_ptr(file_path_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Path tidak valid UTF-8: {}", e);
+            return CString::new("[]").unwrap().into_raw();
+        }
+    };
+    let yara_rules_str = match CStr::from_ptr(yara_rules_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Rules YARA tidak valid UTF-8: {}", e);
+            return CString::new("[]").unwrap().into_raw();
+        }
+    };
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Binary::load gagal: {}", e);
+            return CString::new("[]").unwrap().into_raw();
+        }
+    };
+    let results = match scan_yara_internal(&binary, yara_rules_str) {
+        Ok(matches) => matches,
+        Err(e) => {
+            error!("scan_yara_internal gagal: {}", e);
+            return CString::new("[]").unwrap().into_raw();
+        }
+    };
+    let json_result = match serde_json::to_string(&results) {
+        Ok(json) => json,
+        Err(e) => {
+            error!("Serialisasi JSON gagal untuk YARA: {}", e);
+            "[]".to_string()
+        }
+    };
+    CString::new(json_result).unwrap_or_default().into_raw()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +470,46 @@ mod tests {
         match result.err().unwrap() {
             ReToolsError::RegexError(_) => (),
             _ => panic!("Expected RegexError"),
+        }
+        std::fs::remove_file(test_file).unwrap();
+    }
+
+    #[test]
+    fn test_scan_yara_internal_success() {
+        let test_file = "test_yara.bin";
+        let content = b"This file contains a test string HELLO_YARA.";
+        create_test_file(test_file, content).unwrap();
+        let binary = Binary::load(test_file).unwrap();
+        let test_rule = r#"
+        rule HelloWorld {
+            strings:
+                $a = "HELLO_YARA"
+            condition:
+                $a
+        }
+        "#;
+        let result = scan_yara_internal(&binary, test_rule);
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_name, "HelloWorld");
+        assert_eq!(matches[0].strings.len(), 1);
+        assert_eq!(matches[0].strings[0].identifier, "$a");
+        assert_eq!(matches[0].strings[0].offset, 28);
+        std::fs::remove_file(test_file).unwrap();
+    }
+
+    #[test]
+    fn test_scan_yara_internal_invalid_rule() {
+        let test_file = "test_yara_invalid_rule.bin";
+        create_test_file(test_file, b"data").unwrap();
+        let binary = Binary::load(test_file).unwrap();
+        let invalid_rule = "rule Invalid { condition: false }";
+        let result = scan_yara_internal(&binary, invalid_rule);
+        assert!(result.is_err()); 
+        match result.err().unwrap() {
+            ReToolsError::YaraError(_) => (),
+            _ => panic!("Expected YaraError"),
         }
         std::fs::remove_file(test_file).unwrap();
     }

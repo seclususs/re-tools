@@ -1,11 +1,11 @@
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::ffi::CStr;
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::analyzer::{
-    deteksi_pattern_internal, ekstrak_strings_internal, hitung_entropy_internal,
+    deteksi_pattern_internal, ekstrak_strings_internal, hitung_entropy_internal, scan_yara_internal,
 };
 use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::cfg::generate_cfg_internal;
@@ -14,6 +14,7 @@ use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDi
 use crate::logic::static_analysis::hexeditor::{
     cari_pattern_internal, lihat_bytes_internal, ubah_bytes_internal,
 };
+use crate::logic::ir::lifter::angkat_blok_instruksi;
 
 use log::{error, info};
 
@@ -27,6 +28,7 @@ fn map_err_to_py(err: ReToolsError) -> PyErr {
         ReToolsError::Utf8Error(e) => PyValueError::new_err(e.to_string()),
         ReToolsError::RegexError(e) => PyValueError::new_err(e.to_string()),
         ReToolsError::CapstoneError(e) => PyValueError::new_err(e.to_string()),
+        ReToolsError::YaraError(e) => PyValueError::new_err(e.to_string()),
         ReToolsError::Generic(s) => PyValueError::new_err(s),
     }
 }
@@ -81,6 +83,32 @@ fn deteksi_pattern_py(_py: Python, file_path: &str, regex_str: &str) -> PyResult
     }
 }
 
+#[pyfunction(name = "scanYara")]
+fn scan_yara_py(py: Python, file_path: &str, yara_rules: &str) -> PyResult<PyObject> {
+    info!("py: scanYara dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match scan_yara_internal(&binary, yara_rules) {
+        Ok(results) => {
+            let py_results = PyList::new_bound(py);
+            for m in results {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("rule_name", m.rule_name)?;
+                let py_strings = PyList::new_bound(py);
+                for s in m.strings {
+                    let string_dict = PyDict::new_bound(py);
+                    string_dict.set_item("identifier", s.identifier)?;
+                    string_dict.set_item("offset", s.offset)?;
+                    py_strings.append(string_dict)?;
+                }
+                dict.set_item("strings", py_strings)?;
+                py_results.append(dict)?;
+            }
+            Ok(py_results.to_object(py))
+        }
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
 #[pyfunction(name = "decodeInstruksi")]
 fn decode_instruksi_py(
     py: Python,
@@ -115,6 +143,38 @@ fn decode_instruksi_py(
         dict.set_item("operands", "")?;
     }
     Ok(dict.to_object(py))
+}
+
+#[pyfunction(name = "getIrForInstruksi")]
+fn get_ir_for_instruksi_py(
+    py: Python,
+    byte_data: &Bound<'_, PyBytes>,
+    offset: usize,
+    arch_int: u32,
+    base_va: u64,
+) -> PyResult<PyObject> {
+    let bytes_slice = byte_data.as_bytes();
+    if offset >= bytes_slice.len() {
+        return Err(PyValueError::new_err("Offset di luar batas"));
+    }
+    let code_slice = &bytes_slice[offset..];
+    let arch = match arch_int {
+        1 => ArsitekturDisasm::ARCH_X86_32,
+        2 => ArsitekturDisasm::ARCH_X86_64,
+        3 => ArsitekturDisasm::ARCH_ARM_32,
+        4 => ArsitekturDisasm::ARCH_ARM_64,
+        _ => ArsitekturDisasm::ARCH_UNKNOWN,
+    };
+    match angkat_blok_instruksi(code_slice, base_va, arch) {
+        Ok((_size, ir_vec)) => {
+            let json_str = serde_json::to_string(&ir_vec)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let json_module = PyModule::import_bound(py, "json")?;
+            let py_json = json_module.getattr("loads")?.call1((json_str,))?;
+            Ok(py_json.to_object(py))
+        }
+        Err(e) => Err(map_err_to_py(e)),
+    }
 }
 
 #[pyfunction(name = "generateCFG")]
@@ -187,7 +247,9 @@ fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ekstrak_strings_py, m)?)?;
     m.add_function(wrap_pyfunction!(hitung_entropy_py, m)?)?;
     m.add_function(wrap_pyfunction!(deteksi_pattern_py, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_yara_py, m)?)?;
     m.add_function(wrap_pyfunction!(decode_instruksi_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_ir_for_instruksi_py, m)?)?;
     m.add("ARCH_UNKNOWN", ArsitekturDisasm::ARCH_UNKNOWN as u32)?;
     m.add("ARCH_X86_32", ArsitekturDisasm::ARCH_X86_32 as u32)?;
     m.add("ARCH_X86_64", ArsitekturDisasm::ARCH_X86_64 as u32)?;
