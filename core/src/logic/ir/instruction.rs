@@ -36,5 +36,7 @@ pub enum IrInstruction {
     Ret,
     Nop,
     Syscall,
+    Cmp(IrExpression, IrExpression),
+    Test(IrExpression, IrExpression),
     Undefined,
 }

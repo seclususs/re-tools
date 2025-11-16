@@ -3,7 +3,9 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use capstone::prelude::*;
 use capstone::arch::{
-    x86::{X86InsnDetail, X86Operand, X86OperandType}, 
+    arm::ArmInsnDetail,
+    arm64::Arm64InsnDetail,
+    x86::{X86InsnDetail, X86Operand, X86OperandType},
     ArchDetail,
 };
 
@@ -67,6 +69,8 @@ fn angkat_dari_detail(
         ArsitekturDisasm::ARCH_X86_64 | ArsitekturDisasm::ARCH_X86_32 => {
             lift_x86(insn, detail.x86().unwrap(), cs)
         }
+        ArsitekturDisasm::ARCH_ARM_32 => lift_arm(insn, detail.arm().unwrap(), cs),
+        ArsitekturDisasm::ARCH_ARM_64 => lift_aarch64(insn, detail.arm64().unwrap(), cs),
         _ => vec![IrInstruction::Undefined],
     }
 }
@@ -145,6 +149,19 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
+        "lea" => {
+            if operands.len() == 2 {
+                let dest = map_x86_operand(&operands[0], cs);
+                let src_op = map_x86_operand(&operands[1], cs);
+                if let IrOperand::Memory(expr) = src_op {
+                    vec![IrInstruction::Set(dest, *expr)]
+                } else {
+                    vec![IrInstruction::Undefined]
+                }
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
         "push" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Push(IrExpression::Operand(
@@ -193,6 +210,30 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
+        "cmp" => {
+            if operands.len() == 2 {
+                let op1 = map_x86_operand(&operands[0], cs);
+                let op2 = map_x86_operand(&operands[1], cs);
+                vec![IrInstruction::Cmp(
+                    IrExpression::Operand(op1),
+                    IrExpression::Operand(op2),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "test" => {
+            if operands.len() == 2 {
+                let op1 = map_x86_operand(&operands[0], cs);
+                let op2 = map_x86_operand(&operands[1], cs);
+                vec![IrInstruction::Test(
+                    IrExpression::Operand(op1),
+                    IrExpression::Operand(op2),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
         "jmp" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Jmp(IrExpression::Operand(
@@ -225,6 +266,25 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         "ret" => vec![IrInstruction::Ret],
         "nop" => vec![IrInstruction::Nop],
         "syscall" => vec![IrInstruction::Syscall],
+        "addsd" | "subsd" | "movsd" | "movaps" | "pxor" => {
+            vec![IrInstruction::Undefined]
+        }
         _ => vec![IrInstruction::Undefined],
     }
+}
+
+fn lift_arm(
+    _insn: &capstone::Insn,
+    _detail: &ArmInsnDetail,
+    _cs: &Capstone,
+) -> Vec<IrInstruction> {
+    vec![IrInstruction::Undefined]
+}
+
+fn lift_aarch64(
+    _insn: &capstone::Insn,
+    _detail: &Arm64InsnDetail,
+    _cs: &Capstone,
+) -> Vec<IrInstruction> {
+    vec![IrInstruction::Undefined]
 }
