@@ -2,7 +2,9 @@
 
 #[cfg(target_os = "linux")]
 use crate::logic::tracer::platform_linux;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+use crate::logic::tracer::platform_macos;
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
 use crate::logic::tracer::platform_unsupported;
 #[cfg(windows)]
 use crate::logic::tracer::platform_windows;
@@ -266,19 +268,24 @@ pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHan
             handling_breakpoint_alamat: None,
         });
         let state_ptr = Box::into_raw(state_debugger_box);
-        let attach_sukses: bool;
-        #[cfg(target_os = "linux")]
-        {
-            attach_sukses = platform_linux::impl_platform_attach(state_ptr.as_mut().unwrap());
-        }
-        #[cfg(windows)]
-        {
-            attach_sukses = platform_windows::impl_platform_attach(state_ptr.as_mut().unwrap());
-        }
-        #[cfg(not(any(target_os = "linux", windows)))]
-        {
-            attach_sukses = platform_unsupported::impl_platform_attach(state_ptr.as_mut().unwrap());
-        }
+        let attach_sukses: bool = {
+            #[cfg(target_os = "linux")]
+            {
+                platform_linux::impl_platform_attach(state_ptr.as_mut().unwrap())
+            }
+            #[cfg(target_os = "macos")]
+            {
+                platform_macos::impl_platform_attach(state_ptr.as_mut().unwrap())
+            }
+            #[cfg(windows)]
+            {
+                platform_windows::impl_platform_attach(state_ptr.as_mut().unwrap())
+            }
+            #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+            {
+                platform_unsupported::impl_platform_attach(state_ptr.as_mut().unwrap())
+            }
+        };
         if attach_sukses {
             debug!("Attach ke PID {} berhasil", pid_target_proses);
             (*state_ptr).attached_status = true;
@@ -309,6 +316,8 @@ pub unsafe extern "C" fn rt_detachProses(handle: *mut RtHandle) {
             let data_byte = [orig_byte];
             #[cfg(target_os = "linux")]
             platform_linux::impl_platform_tulis_memory(state_data, addr, data_byte.as_ptr(), 1);
+            #[cfg(target_os = "macos")]
+            platform_macos::impl_platform_tulis_memory(state_data, addr, data_byte.as_ptr(), 1);
             #[cfg(windows)]
             platform_windows::impl_platform_tulisMemory(state_data, addr, data_byte.as_ptr(), 1);
         }
@@ -316,9 +325,11 @@ pub unsafe extern "C" fn rt_detachProses(handle: *mut RtHandle) {
         if state_data.attached_status {
             #[cfg(target_os = "linux")]
             platform_linux::impl_platform_detach(state_data);
+            #[cfg(target_os = "macos")]
+            platform_macos::impl_platform_detach(state_data);
             #[cfg(windows)]
             platform_windows::impl_platform_detach(state_data);
-            #[cfg(not(any(target_os = "linux", windows)))]
+            #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
             platform_unsupported::impl_platform_detach(state_data);
             debug!("Detach platform-specific selesai");
         }
@@ -351,11 +362,15 @@ pub unsafe extern "C" fn rt_bacaMemory(
         {
             return platform_linux::impl_platform_baca_memory(state_data, addr, out_buffer, size);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_baca_memory(state_data, addr, out_buffer, size);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_bacaMemory(state_data, addr, out_buffer, size);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_baca_memory();
         }
@@ -386,11 +401,15 @@ pub unsafe extern "C" fn rt_tulisMemory(
         {
             return platform_linux::impl_platform_tulis_memory(state_data, addr, data, size);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_tulis_memory(state_data, addr, data, size);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_tulisMemory(state_data, addr, data, size);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_tulis_memory();
         }
@@ -441,11 +460,15 @@ pub unsafe extern "C" fn rt_singleStep(handle: *mut RtHandle) -> c_int {
         {
             return platform_linux::impl_platform_single_step(state_data);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_single_step(state_data);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_singleStep(state_data);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_single_step();
         }
@@ -470,11 +493,15 @@ pub unsafe extern "C" fn rt_getRegisters(
         {
             return platform_linux::impl_platform_get_registers(state_data, out_registers);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_get_registers(state_data, out_registers);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_getRegisters(state_data, out_registers);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_get_registers();
         }
@@ -499,11 +526,15 @@ pub unsafe extern "C" fn rt_setRegisters(
         {
             return platform_linux::impl_platform_set_registers(state_data, registers);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_set_registers(state_data, registers);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_setRegisters(state_data, registers);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_set_registers();
         }
@@ -522,11 +553,15 @@ pub unsafe extern "C" fn rt_continueProses(handle: *mut RtHandle) -> c_int {
         {
             return platform_linux::impl_platform_continue_proses(state_data);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_continue_proses(state_data);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_continueProses(state_data);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_continue_proses();
         }
@@ -555,11 +590,15 @@ pub unsafe extern "C" fn rt_tungguEvent(
         {
             return platform_linux::impl_platform_tunggu_event(state_data, event_out);
         }
+        #[cfg(target_os = "macos")]
+        {
+            return platform_macos::impl_platform_tunggu_event(state_data, event_out);
+        }
         #[cfg(windows)]
         {
             return platform_windows::impl_platform_tungguEvent(state_data, event_out);
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
             return platform_unsupported::impl_platform_tunggu_event();
         }
