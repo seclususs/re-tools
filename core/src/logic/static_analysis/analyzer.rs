@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Cursor, Read};
 
-use crate::error::ReToolsError;
+use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::binary::Binary;
 use crate::utils::strncpy_rs_from_bytes;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use regex::bytes::Regex;
 
 
@@ -30,7 +30,6 @@ pub struct YaraMatch {
     pub rule_name: String,
     pub strings: Vec<YaraStringMatch>,
 }
-
 
 pub fn ekstrak_strings_internal(
     binary: &Binary,
@@ -132,31 +131,32 @@ pub unsafe fn c_get_strings_list(
     file_path_c: *const c_char,
     min_length: c_int,
 ) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
     let path_str = match CStr::from_ptr(file_path_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e.into());
+            return error_json;
         }
     };
     let binary = match Binary::load(path_str) {
         Ok(b) => b,
         Err(e) => {
-            error!("Binary::load gagal: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e);
+            return error_json;
         }
     };
     let strings = match ekstrak_strings_internal(&binary, min_length as usize) {
         Ok(s) => s,
         Err(e) => {
-            error!("ekstrak_strings_internal gagal: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e);
+            return error_json;
         }
     };
     let json_result = match serde_json::to_string(&strings) {
         Ok(json) => json,
         Err(e) => {
-            error!("Serialisasi JSON gagal: {}", e);
+            set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal: {}", e)));
             "[]".to_string()
         }
     };
@@ -226,36 +226,36 @@ pub unsafe fn c_hitung_entropy_rs(
         || max_entropies <= 0
         || block_size <= 0
     {
-        error!("Invalid arguments untuk c_hitung_entropy_rs");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_hitung_entropy_rs".to_string()));
         return -1;
     }
     let path_str = match CStr::from_ptr(file_path_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
     let binary = match Binary::load(path_str) {
         Ok(b) => b,
         Err(e) => {
-            error!("Binary::load gagal: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
     let results = match hitung_entropy_internal(&binary, block_size as usize) {
         Ok(res) => res,
         Err(e) => {
-            error!("hitung_entropy_internal gagal: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
     if results.len() > max_entropies as usize {
-        warn!(
+        set_last_error(ReToolsError::Generic(format!(
             "Jumlah hasil entropy ({}) melebihi max_entropies ({})",
             results.len(),
             max_entropies
-        );
+        )));
         return -1;
     }
     let out_slice = std::slice::from_raw_parts_mut(out_entropies, max_entropies as usize);
@@ -295,27 +295,27 @@ pub unsafe fn c_deteksi_pattern_rs(
         || out_buffer.is_null()
         || out_buffer_size <= 0
     {
-        error!("Invalid arguments untuk c_deteksi_pattern_rs");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_deteksi_pattern_rs".to_string()));
         return -1;
     }
     let path_str = match CStr::from_ptr(file_path_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
     let regex_str = match CStr::from_ptr(regex_str_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Regex tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
     let binary = match Binary::load(path_str) {
         Ok(b) => b,
         Err(e) => {
-            error!("Binary::load gagal: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
@@ -324,11 +324,14 @@ pub unsafe fn c_deteksi_pattern_rs(
         Ok(matches) => {
             serde_json::to_string(&matches).unwrap_or_else(|e| format!("[\"Error serialisasi: {}\"]", e))
         }
-        Err(e) => format!("[\"Error: {}\"]", e),
+        Err(e) => {
+            set_last_error(e);
+            "[]".to_string()
+        }
     };
     let json_bytes = json_result_string.as_bytes();
     if json_bytes.len() >= out_buffer_size as usize {
-        warn!("Ukuran buffer output JSON tidak cukup");
+        set_last_error(ReToolsError::Generic("Ukuran buffer output JSON tidak cukup".to_string()));
         return -1;
     }
     let out_slice = std::slice::from_raw_parts_mut(out_buffer, out_buffer_size as usize);
@@ -364,38 +367,39 @@ pub unsafe fn c_scan_yara_rs(
     file_path_c: *const c_char,
     yara_rules_c: *const c_char,
 ) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
     let path_str = match CStr::from_ptr(file_path_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e.into());
+            return error_json;
         }
     };
     let yara_rules_str = match CStr::from_ptr(yara_rules_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Rules YARA tidak valid UTF-8: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e.into());
+            return error_json;
         }
     };
     let binary = match Binary::load(path_str) {
         Ok(b) => b,
         Err(e) => {
-            error!("Binary::load gagal: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e);
+            return error_json;
         }
     };
     let results = match scan_yara_internal(&binary, yara_rules_str) {
         Ok(matches) => matches,
         Err(e) => {
-            error!("scan_yara_internal gagal: {}", e);
-            return CString::new("[]").unwrap().into_raw();
+            set_last_error(e);
+            return error_json;
         }
     };
     let json_result = match serde_json::to_string(&results) {
         Ok(json) => json,
         Err(e) => {
-            error!("Serialisasi JSON gagal untuk YARA: {}", e);
+            set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal untuk YARA: {}", e)));
             "[]".to_string()
         }
     };

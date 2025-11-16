@@ -1,7 +1,7 @@
-use crate::error::ReToolsError;
+use crate::error::{set_last_error, ReToolsError};
 use crate::utils::strncpy_rs_from_bytes;
 use libc::{c_char, c_int};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use memchr::memmem::Finder;
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
@@ -87,13 +87,13 @@ pub unsafe fn c_lihat_bytes(
         || offset < 0
         || length < 0
     {
-        error!("Invalid arguments untuk c_lihat_bytes");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_lihat_bytes".to_string()));
         return -1;
     }
     let path_str = match CStr::from_ptr(filename).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
@@ -101,7 +101,7 @@ pub unsafe fn c_lihat_bytes(
         Ok(hex_str) => {
             let hex_bytes = hex_str.as_bytes();
             if hex_bytes.len() >= out_buffer_size as usize {
-                warn!("Buffer output hex tidak cukup");
+                set_last_error(ReToolsError::Generic("Buffer output hex tidak cukup".to_string()));
                 return -1;
             }
             let out_slice = slice::from_raw_parts_mut(out_buffer, out_buffer_size as usize);
@@ -109,7 +109,7 @@ pub unsafe fn c_lihat_bytes(
             0
         }
         Err(e) => {
-            error!("lihat_bytes_internal gagal: {}", e);
+            set_last_error(e);
             -1
         }
     }
@@ -122,13 +122,13 @@ pub unsafe fn c_ubah_bytes(
     data_len: c_int,
 ) -> c_int {
     if filename.is_null() || data.is_null() || offset < 0 || data_len <= 0 {
-        error!("Invalid arguments untuk c_ubah_bytes");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_ubah_bytes".to_string()));
         return -1;
     }
     let path_str = match CStr::from_ptr(filename).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
@@ -137,7 +137,7 @@ pub unsafe fn c_ubah_bytes(
         Ok(true) => 1,
         Ok(false) => 0,
         Err(e) => {
-            error!("ubah_bytes_internal gagal: {}", e);
+            set_last_error(e);
             0
         }
     }
@@ -156,13 +156,13 @@ pub unsafe fn c_cari_pattern(
         || pattern_len <= 0
         || max_offsets <= 0
     {
-        error!("Invalid arguments untuk c_cari_pattern");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_cari_pattern".to_string()));
         return -1;
     }
     let path_str = match CStr::from_ptr(filename).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
+            set_last_error(e.into());
             return -1;
         }
     };
@@ -170,11 +170,11 @@ pub unsafe fn c_cari_pattern(
     match cari_pattern_internal(path_str, pattern_slice) {
         Ok(results) => {
             if results.len() > max_offsets as usize {
-                warn!(
+                set_last_error(ReToolsError::Generic(format!(
                     "Jumlah hasil ({}) melebihi max_offsets ({})",
                     results.len(),
                     max_offsets
-                );
+                )));
                 return -1;
             }
             let out_slice = slice::from_raw_parts_mut(out_offsets, max_offsets as usize);
@@ -184,7 +184,7 @@ pub unsafe fn c_cari_pattern(
             results.len() as c_int
         }
         Err(e) => {
-            error!("cari_pattern_internal gagal: {}", e);
+            set_last_error(e);
             -1
         }
     }

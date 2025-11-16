@@ -1,10 +1,10 @@
 use libc::{c_char, c_int};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::slice;
 
-use crate::error::ReToolsError;
+use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::binary::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::parser::C_DiffResult;
 use crate::utils::strncpy_rs;
@@ -208,44 +208,50 @@ pub unsafe fn c_diff_binary_rs(
     max_results: c_int,
 ) -> c_int {
     if out_results.is_null() || max_results <= 0 {
-        error!("Invalid arguments untuk c_diff_binary_rs");
+        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_diff_binary_rs".to_string()));
         return -1;
     }
     let path_str1 = match CStr::from_ptr(file1_c).to_str() {
         Ok(s) => s,
-        Err(_) => return -1,
+        Err(e) => {
+            set_last_error(e.into());
+            return -1;
+        }
     };
     let path_str2 = match CStr::from_ptr(file2_c).to_str() {
         Ok(s) => s,
-        Err(_) => return -1,
+        Err(e) => {
+            set_last_error(e.into());
+            return -1;
+        }
     };
     let binary1 = match Binary::load(path_str1) {
         Ok(b) => b,
         Err(e) => {
-            error!("Gagal load binary 1: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
     let binary2 = match Binary::load(path_str2) {
         Ok(b) => b,
         Err(e) => {
-            error!("Gagal load binary 2: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
     let results = match perform_diff_logic(&binary1, &binary2) {
         Ok(r) => r,
         Err(e) => {
-            error!("Gagal perform_diff_logic: {}", e);
+            set_last_error(e);
             return -1;
         }
     };
     if results.len() > max_results as usize {
-        error!(
+        set_last_error(ReToolsError::Generic(format!(
             "Jumlah hasil diff ({}) melebihi max_results ({})",
             results.len(),
             max_results
-        );
+        )));
         return -1;
     }
     let out_slice = slice::from_raw_parts_mut(out_results, max_results as usize);

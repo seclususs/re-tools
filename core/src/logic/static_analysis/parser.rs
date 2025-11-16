@@ -2,11 +2,10 @@ use libc::{c_char, c_int};
 use std::ffi::CStr;
 use std::slice;
 
-use crate::error::ReToolsError;
+use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::binary::{Binary, InternalHeaderInfo};
 use crate::utils::strncpy_rs;
-use log::{error, info, warn};
-
+use log::info;
 
 #[allow(non_snake_case)]
 #[deprecated(
@@ -88,7 +87,7 @@ pub unsafe fn c_get_binary_header(
             0
         }
         Err(e) => {
-            error!("c_get_binary_header gagal: {}", e);
+            set_last_error(e);
             -1
         }
     }
@@ -102,7 +101,7 @@ pub unsafe fn c_get_daftar_sections(
 ) -> c_int {
     unsafe {
         if out_buffer.is_null() || max_count <= 0 {
-            error!("Buffer output invalid atau max_count <= 0");
+            set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
             return -1;
         }
         let path_str_result = CStr::from_ptr(file_path_c).to_str();
@@ -114,11 +113,11 @@ pub unsafe fn c_get_daftar_sections(
             Ok(binary) => {
                 let sections = &binary.sections;
                 if sections.len() > max_count as usize {
-                    warn!(
+                    set_last_error(ReToolsError::Generic(format!(
                         "Jumlah sections ({}) melebihi max_count ({})",
                         sections.len(),
                         max_count
-                    );
+                    )));
                     return -1;
                 }
                 info!("Ditemukan {} sections", sections.len());
@@ -134,7 +133,7 @@ pub unsafe fn c_get_daftar_sections(
                 sections.len() as c_int
             }
             Err(e) => {
-                error!("Gagal load binary di c_get_daftar_sections: {}", e);
+                set_last_error(e);
                 -1
             }
         }
@@ -149,7 +148,7 @@ pub unsafe fn c_get_daftar_simbol(
 ) -> c_int {
     unsafe {
         if out_buffer.is_null() || max_count <= 0 {
-            error!("Buffer output invalid atau max_count <= 0");
+            set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
             return -1;
         }
         let path_str_result = CStr::from_ptr(file_path_c).to_str();
@@ -161,11 +160,11 @@ pub unsafe fn c_get_daftar_simbol(
             Ok(binary) => {
                 let all_symbols = &binary.symbols;
                 if all_symbols.len() > max_count as usize {
-                    warn!(
+                    set_last_error(ReToolsError::Generic(format!(
                         "Jumlah total simbol ({}) melebihi max_count ({})",
                         all_symbols.len(),
                         max_count
-                    );
+                    )));
                     return -1;
                 }
                 info!("Total simbol yang diproses: {}", all_symbols.len());
@@ -181,7 +180,7 @@ pub unsafe fn c_get_daftar_simbol(
                 all_symbols.len() as c_int
             }
             Err(e) => {
-                error!("Gagal load binary di c_get_daftar_simbol: {}", e);
+                set_last_error(e);
                 -1
             }
         }

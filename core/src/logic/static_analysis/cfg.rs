@@ -1,11 +1,11 @@
-use crate::error::ReToolsError;
+use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
 
 use libc::c_char;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use petgraph::dot::Dot;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
@@ -209,11 +209,12 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
 }
 
 pub unsafe fn c_generate_cfg_rs(filename_c: *const c_char) -> *mut c_char {
+    let error_dot = "digraph G {{ error [label=\"Koneksi error\"]; }}";
     let path_str = match CStr::from_ptr(filename_c).to_str() {
         Ok(s) => s,
         Err(e) => {
-            error!("Path tidak valid UTF-8: {}", e);
-            return CString::new("digraph G {{ error [label=\"Invalid Path\"]; }}")
+            set_last_error(e.into());
+            return CString::new(error_dot.replace("Koneksi error", "Invalid Path UTF-8"))
                 .unwrap()
                 .into_raw();
         }
@@ -223,13 +224,15 @@ pub unsafe fn c_generate_cfg_rs(filename_c: *const c_char) -> *mut c_char {
         Ok(binary) => match generate_cfg_internal(&binary) {
             Ok(dot) => dot,
             Err(e) => {
-                error!("generate_cfg_internal gagal: {}", e);
-                format!("digraph G {{ error [label=\"{}\"]; }}", e)
+                let err_msg = e.to_string();
+                set_last_error(e);
+                format!("digraph G {{ error [label=\"{}\"]; }}", err_msg)
             }
         },
         Err(e) => {
-            error!("Binary::load gagal: {}", e);
-            format!("digraph G {{ error [label=\"{}\"]; }}", e)
+            let err_msg = e.to_string();
+            set_last_error(e);
+            format!("digraph G {{ error [label=\"{}\"]; }}", err_msg)
         }
     };
     CString::new(dot_result).unwrap_or_default().into_raw()

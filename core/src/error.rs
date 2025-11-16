@@ -1,4 +1,11 @@
 use std::fmt;
+use std::cell::RefCell;
+use std::ffi::CString;
+use std::ptr;
+
+thread_local! {
+    static LAST_ERROR: RefCell<Option<CString>> = RefCell::new(None);
+}
 
 #[derive(Debug)]
 pub enum ReToolsError {
@@ -10,6 +17,26 @@ pub enum ReToolsError {
     CapstoneError(capstone::Error),
     YaraError(yara::Error),
     Generic(String),
+}
+
+pub fn set_last_error(err: ReToolsError) {
+    let err_msg = err.to_string();
+    LAST_ERROR.with(|cell| {
+        if let Ok(c_string) = CString::new(err_msg) {
+            *cell.borrow_mut() = Some(c_string);
+        } else {
+            let fallback_msg = format!("Error formatting error with interior nulls: {:?}", err);
+            *cell.borrow_mut() = CString::new(fallback_msg).ok();
+        }
+    });
+}
+
+pub fn get_last_error_message() -> *mut libc::c_char {
+    LAST_ERROR.with(|cell| {
+        cell.borrow_mut()
+            .take()
+            .map_or(ptr::null_mut(), |c_string| c_string.into_raw())
+    })
 }
 
 impl fmt::Display for ReToolsError {
