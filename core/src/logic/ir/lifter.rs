@@ -3,20 +3,40 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use capstone::prelude::*;
 use capstone::arch::{
-    x86::{X86InsnDetail, X86Operand, X86OperandType},
-    ArchDetail, ArchInsn, ArchOperand,
+    x86::{X86InsnDetail, X86Operand, X86OperandType}, 
+    ArchDetail,
 };
 
 
 fn get_capstone_instance(arch: ArsitekturDisasm) -> Result<Capstone, ReToolsError> {
-    let cs_builder = match arch {
-        ArsitekturDisasm::ARCH_X86_32 => Capstone::new().x86().mode(arch::x86::ArchMode::Mode32),
-        ArsitekturDisasm::ARCH_X86_64 => Capstone::new().x86().mode(arch::x86::ArchMode::Mode64),
-        ArsitekturDisasm::ARCH_ARM_32 => Capstone::new().arm().mode(arch::arm::ArchMode::Arm),
-        ArsitekturDisasm::ARCH_ARM_64 => Capstone::new().arm64().mode(arch::arm64::ArchMode::Arm),
-        _ => Capstone::new().x86().mode(arch::x86::ArchMode::Mode64),
+    let cs_result = match arch {
+        ArsitekturDisasm::ARCH_X86_32 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode32)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_X86_64 => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_ARM_32 => Capstone::new()
+            .arm()
+            .mode(arch::arm::ArchMode::Arm)
+            .detail(true)
+            .build(),
+        ArsitekturDisasm::ARCH_ARM_64 => Capstone::new()
+            .arm64()
+            .mode(arch::arm64::ArchMode::Arm)
+            .detail(true)
+            .build(),
+        _ => Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .detail(true)
+            .build(),
     };
-    cs_builder.detail(true).build().map_err(ReToolsError::from)
+    cs_result.map_err(ReToolsError::from)
 }
 
 pub fn angkat_blok_instruksi(
@@ -31,7 +51,8 @@ pub fn angkat_blok_instruksi(
     let insn = insns
         .first()
         .ok_or(ReToolsError::Generic("Disasm failed".to_string()))?;
-    let detail = cs.insn_detail(insn)?;
+    let insn_detail = cs.insn_detail(insn)?;
+    let detail = insn_detail.arch_detail();
     let ir_instrs = angkat_dari_detail(insn, &detail, &cs, arch);
     Ok((insn.bytes().len(), ir_instrs))
 }
@@ -113,7 +134,7 @@ fn map_x86_operand(op: &X86Operand, cs: &Capstone) -> IrOperand {
 
 fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec<IrInstruction> {
     let mnem = insn.mnemonic().unwrap_or("");
-    let operands = detail.operands();
+    let operands: Vec<X86Operand> = detail.operands().collect();
     match mnem {
         "mov" | "movsx" | "movzx" => {
             if operands.len() == 2 {

@@ -1,6 +1,5 @@
 use std::fmt;
 
-
 #[derive(Debug)]
 pub enum ReToolsError {
     IoError(std::io::Error),
@@ -57,6 +56,13 @@ impl From<regex::Error> for ReToolsError {
 impl From<capstone::Error> for ReToolsError {
     fn from(err: capstone::Error) -> ReToolsError {
         ReToolsError::CapstoneError(err)
+    }
+}
+
+impl From<yara::YaraError> for ReToolsError {
+    fn from(err: yara::YaraError) -> ReToolsError {
+        let error_enum = yara::Error::Yara(err);
+        ReToolsError::YaraError(error_enum)
     }
 }
 

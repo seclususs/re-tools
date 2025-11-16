@@ -6,10 +6,11 @@ use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
 
 use libc::c_char;
 use log::{debug, error, info, warn};
-use petgraph::dot::{Config, Dot};
+use petgraph::dot::Dot;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
+use std::fmt;
 
 
 #[derive(Debug, Clone)]
@@ -17,10 +18,25 @@ struct BasicBlock {
     va_start: u64,
     va_end: u64,
     instructions: Vec<(u64, Vec<IrInstruction>)>,
-    size: usize,
+    size: u64,
 }
 
-fn get_target_va_from_expr(expr: &IrExpression) -> Option<u66> {
+impl fmt::Display for BasicBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut label = format!("0x{:x} (size: {} bytes):\\n", self.va_start, self.size);
+        for (va, irs) in &self.instructions {
+            for ir in irs {
+                let ir_str = format!("{:?}", ir)
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
+                label.push_str(&format!("  0x{:x}: {}\\n", va, ir_str));
+            }
+        }
+        write!(f, "{}", label)
+    }
+}
+
+fn get_target_va_from_expr(expr: &IrExpression) -> Option<u64> {
     if let IrExpression::Operand(IrOperand::Immediate(imm)) = expr {
         Some(*imm)
     } else {
@@ -101,7 +117,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
     info!("Pass 1 selesai. Ditemukan {} leaders", leaders.len());
     let mut graph = DiGraph::<BasicBlock, &'static str>::new();
     let mut node_map = HashMap::<u64, NodeIndex>::new();
-    let mut sorted_leaders: Vec<u64> = leaders.into_iter().collect();
+    let mut sorted_leaders: Vec<u64> = leaders.iter().cloned().collect();
     sorted_leaders.sort();
     debug!("Pass 2: Membuat basic blocks");
     for &leader_va in &sorted_leaders {
@@ -110,7 +126,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         }
         let mut block_instrs: Vec<(u64, Vec<IrInstruction>)> = Vec::new();
         let mut current_addr = leader_va;
-        let mut block_size: usize = 0;
+        let mut block_size: u64 = 0;
         loop {
             let (irs, size) = match lifted_instructions.get(&current_addr) {
                 Some((irs, size)) => (irs.clone(), *size),
@@ -121,8 +137,8 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
             }
             let last_ir = irs.last().cloned();
             block_instrs.push((current_addr, irs));
-            block_size += size;
-            current_addr += size;
+            block_size += size as u64;
+            current_addr += size as u64;
             if let Some(ir) = last_ir {
                 if is_ir_branch(&ir) {
                     break;
@@ -143,62 +159,52 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
     }
     info!("Pass 2 selesai. Dibuat {} nodes", graph.node_count());
     debug!("Pass 3: Menghubungkan edges");
-    for (&va, &node_idx) in &node_map {
+    let mut edges_to_add = Vec::new();
+    for (&_va, &node_idx) in &node_map {
         let block = match graph.node_weight(node_idx) {
             Some(b) => b,
             None => continue,
         };
-        let last_ir_instruction_group = block.instructions.last();
-        if last_ir_instruction_group.is_none() {
-            continue;
-        }
-        let last_ir = last_ir_instruction_group.unwrap().1.last();
+        let fallthrough_va = block.va_end;
+        let last_ir = block.instructions.last().and_then(|(_, irs)| irs.last());
         if last_ir.is_none() {
+            if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
+                edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough"));
+            }
             continue;
         }
         match last_ir.unwrap() {
             IrInstruction::Jmp(target_expr) => {
                 if let Some(target_va) = get_target_va_from_expr(target_expr) {
                     if let Some(target_idx) = node_map.get(&target_va) {
-                        graph.add_edge(node_idx, *target_idx, "Jump");
+                        edges_to_add.push((node_idx, *target_idx, "Jump"));
                     }
                 }
             }
             IrInstruction::JmpCond(_, target_expr) => {
                 if let Some(target_va) = get_target_va_from_expr(target_expr) {
                     if let Some(target_idx) = node_map.get(&target_va) {
-                        graph.add_edge(node_idx, *target_idx, "Jump (True)");
+                        edges_to_add.push((node_idx, *target_idx, "Jump (True)"));
                     }
                 }
-                let fallthrough_va = block.va_end;
                 if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-                    graph.add_edge(node_idx, *fallthrough_idx, "Fallthrough (False)");
+                    edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough (False)"));
                 }
             }
             IrInstruction::Ret => {
             }
             _ => {
-                let fallthrough_va = block.va_end;
                 if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-                    graph.add_edge(node_idx, *fallthrough_idx, "Fallthrough");
+                    edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough"));
                 }
             }
         }
     }
+    for (source, target, label) in edges_to_add {
+        graph.add_edge(source, target, label);
+    }
     info!("Pass 3 selesai. Dibuat {} edges", graph.edge_count());
-    let dot_str = Dot::with_config(
-        &graph, 
-        &[Config::EdgeNoLabel], 
-        |_, edge| format!("label=\"{}\"", edge.weight()), 
-        |_, (_idx, node)| {
-            let mut label = format!("0x{:x}:\\n", node.va_start);
-            for (va, irs) in &node.instructions {
-                for ir in irs {
-                     label.push_str(&format!("  0x{:x}: {:?}\\n", va, ir));
-                }
-            }
-            format!("label={:?}", label)
-        });
+    let dot_str = Dot::with_config(&graph, &[]);
     Ok(format!("{}", dot_str))
 }
 

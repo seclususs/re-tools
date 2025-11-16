@@ -4,7 +4,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{Cursor, Read};
-use yara::{Compiler, Rules};
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::binary::Binary;
@@ -342,9 +341,9 @@ pub fn scan_yara_internal(
     yara_rules: &str,
 ) -> Result<Vec<YaraMatch>, ReToolsError> {
     info!("Mulai scan YARA di file: {}", binary.file_path);
-    let mut compiler = Compiler::new()?;
-    compiler.add_rules_str(yara_rules)?;
-    let rules = compiler.compile_rules()?;
+    let rules = yara::Compiler::new()?
+        .add_rules_str(yara_rules)?
+        .compile_rules()?;
     let matches = rules.scan_mem(&binary.file_bytes, 10)?;
     let results: Vec<YaraMatch> = matches.iter().map(|m| {
         YaraMatch {
@@ -352,7 +351,7 @@ pub fn scan_yara_internal(
             strings: m.strings.iter().map(|s| {
                 YaraStringMatch {
                     identifier: s.identifier.to_string(),
-                    offset: s.offset as u64,
+                    offset: s.matches.first().map_or(0, |m| m.offset) as u64,
                 }
             }).collect(),
         }
