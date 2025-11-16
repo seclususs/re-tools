@@ -1,354 +1,305 @@
-use super::state::StateDebuggerInternal;
+use super::platform::PlatformTracer;
 use super::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
+use crate::error::{ReToolsError, set_last_error};
 use libc::c_int;
-use log::{debug, error, info, warn};
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::uio::{process_vm_readv, process_vm_writev, IoVec, RemoteIoVec};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
 use std::io::IoSliceMut;
 
 
-pub unsafe fn impl_platform_attach(state_data: &mut StateDebuggerInternal) -> bool {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        if let Err(e) = ptrace::attach(pid_target) {
-            error!("Linux: PTRACE_ATTACH gagal: {}", e);
-            return false;
-        }
-        match waitpid(pid_target, None) {
-            Ok(status) => match status {
-                WaitStatus::Stopped(_, sig) => {
-                    info!(
-                        "Linux: Attach sukses, proses dihentikan dgn sinyal {:?}",
-                        sig
-                    );
-                    true
-                }
-                _ => {
-                    warn!(
-                        "Linux: Status waitpid tidak terduga setelah attach: {:?}",
-                        status
-                    );
-                    false
-                }
-            },
-            Err(e) => {
-                error!("Linux: waitpid gagal setelah attach: {}", e);
-                false
-            }
-        }
-    }
+pub struct LinuxTracer {
+    pid_target: Pid,
+    breakpoints_map: HashMap<u64, u8>,
 }
 
-pub unsafe fn impl_platform_detach(state_data: &mut StateDebuggerInternal) {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        if let Err(e) = ptrace::detach(pid_target, None) {
-            error!("Linux: PTRACE_DETACH gagal: {}", e);
-        } else {
-            info!("Linux: PTRACE_DETACH berhasil untuk PID {}", pid_target);
-        }
+impl LinuxTracer {
+    pub fn new(pid: c_int) -> Result<Self, ReToolsError> {
+        Ok(LinuxTracer {
+            pid_target: Pid::from_raw(pid),
+            breakpoints_map: HashMap::new(),
+        })
     }
-}
-
-pub unsafe fn impl_platform_baca_memory(
-    state_data: &StateDebuggerInternal,
-    addr: u64,
-    out_buffer: *mut u8,
-    size: c_int,
-) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        let local_slice = std::slice::from_raw_parts_mut(out_buffer, size as usize);
-        let mut local_iov = [IoSliceMut::new(local_slice)];
-        let remote_iov = [RemoteIoVec {
-            base: addr as usize,
-            len: size as usize,
-        }];
-        match process_vm_readv(pid_target, &mut local_iov, &remote_iov) {
-            Ok(bytes_read) => bytes_read as c_int,
-            Err(e) => {
-                warn!(
-                    "Linux: process_vm_readv gagal pada 0x{:x}: {}",
-                    addr, e
-                );
-                -1
-            }
-        }
-    }
-}
-
-pub unsafe fn impl_platform_tulis_memory(
-    state_data: &StateDebuggerInternal,
-    addr: u64,
-    data: *const u8,
-    size: c_int,
-) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        let local_slice = std::slice::from_raw_parts(data, size as usize);
-        let local_iov = [std::io::IoSlice::new(local_slice)];
-        let remote_iov = [RemoteIoVec {
-            base: addr as usize,
-            len: size as usize,
-        }];
-        match process_vm_writev(pid_target, &local_iov, &remote_iov) {
-            Ok(bytes_written) => bytes_written as c_int,
-            Err(e) => {
-                warn!(
-                    "Linux: process_vm_writev gagal pada 0x{:x}: {}",
-                    addr, e
-                );
-                -1
-            }
-        }
-    }
-}
-
-pub unsafe fn impl_platform_single_step(state_data: &StateDebuggerInternal) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        if let Err(e) = ptrace::step(pid_target, None) {
-            error!("Linux: PTRACE_SINGLESTEP gagal: {}", e);
-            return -1;
-        }
-        match waitpid(pid_target, None) {
-            Ok(status) => {
-                if matches!(status, WaitStatus::Stopped(_, Signal::SIGTRAP)) {
-                    0
-                } else {
-                    warn!(
-                        "Linux: Status waitpid tidak terduga setelah step: {:?}",
-                        status
-                    );
-                    -1
-                }
-            }
-            Err(e) => {
-                error!("Linux: waitpid gagal setelah step: {}", e);
-                -1
-            }
-        }
-    }
-}
-
-pub unsafe fn impl_platform_get_registers(
-    state_data: &StateDebuggerInternal,
-    out_registers: *mut C_Registers,
-) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        match ptrace::getregs(pid_target) {
-            Ok(regs) => {
-                *out_registers = C_Registers {
-                    rax: regs.rax,
-                    rbx: regs.rbx,
-                    rcx: regs.rcx,
-                    rdx: regs.rdx,
-                    rsi: regs.rsi,
-                    rdi: regs.rdi,
-                    rbp: regs.rbp,
-                    rsp: regs.rsp,
-                    r8: regs.r8,
-                    r9: regs.r9,
-                    r10: regs.r10,
-                    r11: regs.r11,
-                    r12: regs.r12,
-                    r13: regs.r13,
-                    r14: regs.r14,
-                    r15: regs.r15,
-                    rip: regs.rip,
-                    eflags: regs.eflags,
-                };
-                0
-            }
-            Err(e) => {
-                error!("Linux: PTRACE_GETREGS gagal: {}", e);
-                -1
-            }
-        }
-    }
-}
-
-pub unsafe fn impl_platform_set_registers(
-    state_data: &StateDebuggerInternal,
-    registers: *const C_Registers,
-) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        match ptrace::getregs(pid_target) {
-            Ok(mut regs) => {
-                let c_regs = *registers;
-                regs.rax = c_regs.rax;
-                regs.rbx = c_regs.rbx;
-                regs.rcx = c_regs.rcx;
-                regs.rdx = c_regs.rdx;
-                regs.rsi = c_regs.rsi;
-                regs.rdi = c_regs.rdi;
-                regs.rbp = c_regs.rbp;
-                regs.rsp = c_regs.rsp;
-                regs.r8 = c_regs.r8;
-                regs.r9 = c_regs.r9;
-                regs.r10 = c_regs.r10;
-                regs.r11 = c_regs.r11;
-                regs.r12 = c_regs.r12;
-                regs.r13 = c_regs.r13;
-                regs.r14 = c_regs.r14;
-                regs.r15 = c_regs.r15;
-                regs.rip = c_regs.rip;
-                regs.eflags = c_regs.eflags;
-                if let Err(e) = ptrace::setregs(pid_target, regs) {
-                    error!("Linux: PTRACE_SETREGS gagal: {}", e);
-                    -1
-                } else {
-                    0
-                }
-            }
-            Err(e) => {
-                error!("Linux: PTRACE_GETREGS (sebelum set) gagal: {}", e);
-                -1
-            }
-        }
-    }
-}
-
-pub unsafe fn impl_platform_continue_proses(state_data: &StateDebuggerInternal) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        match ptrace::cont(pid_target, None) {
-            Ok(_) => 0,
-            Err(e) => {
-                error!("Linux: PTRACE_CONT gagal: {}", e);
-                -1
-            }
-        }
-    }
-}
-
-unsafe fn handle_breakpoint_logic(
-    state_data: &mut StateDebuggerInternal,
-    pid: Pid,
-    alamat_bp: u64,
-) -> bool {
-    unsafe {
-        let Some(&byte_asli) = state_data.breakpoints_map.get(&alamat_bp) else {
-            warn!(
-                "SIGTRAP pada 0x{:x} tapi tidak ada di map breakpoint",
-                alamat_bp
-            );
+    unsafe fn handle_breakpoint_logic(&mut self, pid: Pid, alamat_bp: u64) -> bool {
+        let Some(&byte_asli) = self.breakpoints_map.get(&alamat_bp) else {
             return false;
         };
-        if impl_platform_tulis_memory(state_data, alamat_bp, &byte_asli as *const u8, 1) != 1 {
-            error!("Gagal restore byte asli pada 0x{:x}", alamat_bp);
+        if self.tulis_memory(alamat_bp, &[byte_asli]).is_err() {
             return false;
         }
         let mut regs = match ptrace::getregs(pid) {
             Ok(r) => r,
-            Err(e) => {
-                error!("Gagal getregs untuk restore RIP: {}", e);
-                return false;
-            }
+            Err(_) => return false,
         };
         regs.rip = alamat_bp;
         if ptrace::setregs(pid, regs).is_err() {
-            error!("Gagal setregs untuk restore RIP: {}", alamat_bp);
             return false;
         }
-        if impl_platform_single_step(state_data) != 0 {
-            let int3_byte: u8 = 0xCC;
-            impl_platform_tulis_memory(state_data, alamat_bp, &int3_byte, 1);
-            error!("Gagal single step setelah restore breakpoint");
+        if self.single_step().is_err() {
+            self.tulis_memory(alamat_bp, &[0xCC]).ok();
             return false;
         }
-        let int3_byte: u8 = 0xCC;
-        if impl_platform_tulis_memory(state_data, alamat_bp, &int3_byte, 1) != 1 {
-            error!("Gagal re-set breakpoint pada 0x{:x}", alamat_bp);
+        if self.tulis_memory(alamat_bp, &[0xCC]).is_err() {
             return false;
         }
         true
     }
+    #[cfg(target_arch = "x86_64")]
+    fn set_hw_bp(&self, addr: u64, index: usize) -> Result<(), ReToolsError> {
+        if index > 3 {
+            return Err(ReToolsError::Generic(
+                "Indeks hardware breakpoint harus 0-3".to_string(),
+            ));
+        }
+        let mut regs = ptrace::getregs(self.pid_target)?;
+        let dr7_val = regs.dr7;
+        let local_enable_mask = 1 << (index * 2);
+        let condition_mask = 0b00 << (16 + index * 4);
+        let len_mask = 0b00 << (18 + index * 4);
+        let new_dr7 = (dr7_val | local_enable_mask | condition_mask | len_mask) & !0x200;
+        match index {
+            0 => regs.dr0 = addr,
+            1 => regs.dr1 = addr,
+            2 => regs.dr2 = addr,
+            3 => regs.dr3 = addr,
+            _ => unreachable!(),
+        }
+        regs.dr7 = new_dr7;
+        ptrace::setregs(self.pid_target, regs)?;
+        Ok(())
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn remove_hw_bp(&self, index: usize) -> Result<(), ReToolsError> {
+        if index > 3 {
+            return Err(ReToolsError::Generic(
+                "Indeks hardware breakpoint harus 0-3".to_string(),
+            ));
+        }
+        let mut regs = ptrace::getregs(self.pid_target)?;
+        let local_disable_mask = !(1 << (index * 2));
+        regs.dr7 &= local_disable_mask;
+        match index {
+            0 => regs.dr0 = 0,
+            1 => regs.dr1 = 0,
+            2 => regs.dr2 = 0,
+            3 => regs.dr3 = 0,
+            _ => unreachable!(),
+        }
+        ptrace::setregs(self.pid_target, regs)?;
+        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    fn set_hw_bp(&self, _addr: u64, _index: usize) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic(
+            "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
+        ))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    fn remove_hw_bp(&self, _index: usize) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic(
+            "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
+        ))
+    }
 }
 
-pub unsafe fn impl_platform_tunggu_event(
-    state_data: &mut StateDebuggerInternal,
-    event_out: *mut C_DebugEvent,
-) -> c_int {
-    unsafe {
-        let pid_target = Pid::from_raw(state_data.pid_target);
-        loop {
-            match waitpid(pid_target, None) {
-                Ok(status) => {
-                    debug!("Linux: waitpid menerima status: {:?}", status);
-                    match status {
-                        WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
-                            let regs = match ptrace::getregs(pid) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    error!("Gagal getregs pada SIGTRAP: {}", e);
-                                    continue;
-                                }
-                            };
-                            let alamat_breakpoint_potensial = regs.rip.saturating_sub(1);
-                            if state_data
-                                .breakpoints_map
-                                .contains_key(&alamat_breakpoint_potensial)
-                            {
-                                if handle_breakpoint_logic(
-                                    state_data,
-                                    pid,
-                                    alamat_breakpoint_potensial,
-                                ) {
-                                    (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                                    (*event_out).pid_thread = pid.as_raw();
-                                    (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                    return 0;
+impl PlatformTracer for LinuxTracer {
+    fn attach(&mut self) -> Result<(), ReToolsError> {
+        ptrace::attach(self.pid_target)?;
+        match waitpid(self.pid_target, None) {
+            Ok(WaitStatus::Stopped(_, _)) => Ok(()),
+            Ok(status) => Err(ReToolsError::Generic(format!(
+                "Status waitpid tidak terduga setelah attach: {:?}",
+                status
+            ))),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn detach(&mut self) -> Result<(), ReToolsError> {
+        for (addr, orig_byte) in &self.breakpoints_map {
+            self.tulis_memory(*addr, &[*orig_byte]).ok();
+        }
+        self.breakpoints_map.clear();
+        ptrace::detach(self.pid_target, None)?;
+        Ok(())
+    }
+    fn baca_memory(&self, addr: u64, size: c_int) -> Result<Vec<u8>, ReToolsError> {
+        let mut buffer = vec![0u8; size as usize];
+        let mut local_iov = [IoSliceMut::new(&mut buffer)];
+        let remote_iov = [RemoteIoVec {
+            base: addr as usize,
+            len: size as usize,
+        }];
+        let bytes_read = process_vm_readv(self.pid_target, &mut local_iov, &remote_iov)?;
+        buffer.truncate(bytes_read);
+        Ok(buffer)
+    }
+    fn tulis_memory(&self, addr: u64, data: &[u8]) -> Result<usize, ReToolsError> {
+        let local_iov = [std::io::IoSlice::new(data)];
+        let remote_iov = [RemoteIoVec {
+            base: addr as usize,
+            len: data.len(),
+        }];
+        let bytes_written = process_vm_writev(self.pid_target, &local_iov, &remote_iov)?;
+        Ok(bytes_written)
+    }
+    fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
+        let regs = ptrace::getregs(self.pid_target)?;
+        Ok(C_Registers {
+            rax: regs.rax,
+            rbx: regs.rbx,
+            rcx: regs.rcx,
+            rdx: regs.rdx,
+            rsi: regs.rsi,
+            rdi: regs.rdi,
+            rbp: regs.rbp,
+            rsp: regs.rsp,
+            r8: regs.r8,
+            r9: regs.r9,
+            r10: regs.r10,
+            r11: regs.r11,
+            r12: regs.r12,
+            r13: regs.r13,
+            r14: regs.r14,
+            r15: regs.r15,
+            rip: regs.rip,
+            eflags: regs.eflags,
+        })
+    }
+    fn set_registers(&self, c_regs: &C_Registers) -> Result<(), ReToolsError> {
+        let mut regs = ptrace::getregs(self.pid_target)?;
+        regs.rax = c_regs.rax;
+        regs.rbx = c_regs.rbx;
+        regs.rcx = c_regs.rcx;
+        regs.rdx = c_regs.rdx;
+        regs.rsi = c_regs.rsi;
+        regs.rdi = c_regs.rdi;
+        regs.rbp = c_regs.rbp;
+        regs.rsp = c_regs.rsp;
+        regs.r8 = c_regs.r8;
+        regs.r9 = c_regs.r9;
+        regs.r10 = c_regs.r10;
+        regs.r11 = c_regs.r11;
+        regs.r12 = c_regs.r12;
+        regs.r13 = c_regs.r13;
+        regs.r14 = c_regs.r14;
+        regs.r15 = c_regs.r15;
+        regs.rip = c_regs.rip;
+        regs.eflags = c_regs.eflags;
+        ptrace::setregs(self.pid_target, regs)?;
+        Ok(())
+    }
+    fn continue_proses(&self) -> Result<(), ReToolsError> {
+        ptrace::cont(self.pid_target, None)?;
+        Ok(())
+    }
+    fn single_step(&mut self) -> Result<(), ReToolsError> {
+        ptrace::step(self.pid_target, None)?;
+        match waitpid(self.pid_target, None) {
+            Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => Ok(()),
+            Ok(status) => Err(ReToolsError::Generic(format!(
+                "Status waitpid tidak terduga setelah step: {:?}",
+                status
+            ))),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
+        unsafe {
+            loop {
+                match waitpid(self.pid_target, None) {
+                    Ok(status) => {
+                        match status {
+                            WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
+                                let regs = ptrace::getregs(pid)?;
+                                let alamat_breakpoint_potensial = regs.rip.saturating_sub(1);
+                                if self
+                                    .breakpoints_map
+                                    .contains_key(&alamat_breakpoint_potensial)
+                                {
+                                    if self.handle_breakpoint_logic(
+                                        pid,
+                                        alamat_breakpoint_potensial,
+                                    ) {
+                                        (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                                        (*event_out).pid_thread = pid.as_raw();
+                                        (*event_out).info_alamat = alamat_breakpoint_potensial;
+                                        return Ok(0);
+                                    } else {
+                                        set_last_error(ReToolsError::Generic(format!("Gagal menangani breakpoint logic pada 0x{:x}", alamat_breakpoint_potensial)));
+                                        (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                                        (*event_out).info_alamat = alamat_breakpoint_potensial;
+                                        return Ok(-1);
+                                    }
                                 } else {
-                                    error!("Gagal menangani breakpoint logic pada 0x{:x}", alamat_breakpoint_potensial);
-                                    (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                                    (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                    return -1;
+                                    (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                                    (*event_out).pid_thread = pid.as_raw();
+                                    (*event_out).info_alamat = regs.rip;
+                                    return Ok(0);
                                 }
-                            } else {
-                                (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                            }
+                            WaitStatus::Stopped(pid, sig) => {
+                                ptrace::cont(pid, None).ok();
+                                continue;
+                            }
+                            WaitStatus::Exited(pid, status_code) => {
+                                (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
                                 (*event_out).pid_thread = pid.as_raw();
-                                (*event_out).info_alamat = regs.rip;
-                                return 0;
+                                (*event_out).info_alamat = status_code as u64;
+                                return Ok(0);
+                            }
+                            WaitStatus::Signaled(pid, signal, _) => {
+                                (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                                (*event_out).pid_thread = pid.as_raw();
+                                (*event_out).info_alamat = signal as u64;
+                                return Ok(0);
+                            }
+                            _ => {
+                                continue;
                             }
                         }
-                        WaitStatus::Stopped(pid, sig) => {
-                            debug!(
-                                "Proses dihentikan oleh sinyal {:?}, melanjutkan...",
-                                sig
-                            );
-                            ptrace::cont(pid, None).ok();
-                            continue;
-                        }
-                        WaitStatus::Exited(pid, status_code) => {
-                            info!("Proses PID {} exit dengan status {}", pid, status_code);
-                            (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                            (*event_out).pid_thread = pid.as_raw();
-                            (*event_out).info_alamat = status_code as u64;
-                            return 0;
-                        }
-                        WaitStatus::Signaled(pid, signal, _) => {
-                            info!("Proses PID {} dihentikan oleh sinyal {:?}", pid, signal);
-                            (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                            (*event_out).pid_thread = pid.as_raw();
-                            (*event_out).info_alamat = signal as u64;
-                            return 0;
-                        }
-                        _ => {
-                            continue;
-                        }
                     }
-                }
-                Err(e) => {
-                    error!("Linux: waitpid gagal: {}", e);
-                    return -1;
+                    Err(e) => {
+                        return Err(e.into());
+                    }
                 }
             }
         }
+    }
+    fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
+        if self.breakpoints_map.contains_key(&addr) {
+            return Ok(());
+        }
+        let orig_bytes = self.baca_memory(addr, 1)?;
+        if orig_bytes.is_empty() {
+            return Err(ReToolsError::Generic(format!(
+                "Gagal membaca byte asli di 0x{:x}",
+                addr
+            )));
+        }
+        let orig_byte = orig_bytes[0];
+        self.tulis_memory(addr, &[0xCC])?;
+        self.breakpoints_map.insert(addr, orig_byte);
+        Ok(())
+    }
+    fn remove_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
+        if let Some(orig_byte) = self.breakpoints_map.remove(&addr) {
+            self.tulis_memory(addr, &[orig_byte])?;
+        }
+        Ok(())
+    }
+    fn set_hardware_breakpoint(&mut self, addr: u64, index: usize) -> Result<(), ReToolsError> {
+        self.set_hw_bp(addr, index)
+    }
+    fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError> {
+        self.remove_hw_bp(index)
+    }
+}
+
+impl From<nix::Error> for ReToolsError {
+    fn from(err: nix::Error) -> ReToolsError {
+        ReToolsError::Generic(format!("Nix error: {}", err))
     }
 }

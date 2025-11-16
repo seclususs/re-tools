@@ -1,10 +1,10 @@
-use super::instruction::{IrBinOp, IrExpression, IrInstruction, IrOperand};
+use super::instruction::{IrBinOp, IrExpression, IrInstruction, IrOperand, IrUnOp};
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use capstone::prelude::*;
 use capstone::arch::{
-    arm::ArmInsnDetail,
-    arm64::Arm64InsnDetail,
+    arm::{ArmInsnDetail, ArmOperand, ArmOperandType},
+    arm64::{Arm64InsnDetail, Arm64OpMem, Arm64Operand, Arm64OperandType},
     x86::{X86InsnDetail, X86Operand, X86OperandType},
     ArchDetail,
 };
@@ -140,7 +140,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
     let mnem = insn.mnemonic().unwrap_or("");
     let operands: Vec<X86Operand> = detail.operands().collect();
     match mnem {
-        "mov" | "movsx" | "movzx" => {
+        "mov" | "movsx" | "movzx" | "movsd" | "movaps" => {
             if operands.len() == 2 {
                 let dest = map_x86_operand(&operands[0], cs);
                 let src = map_x86_operand(&operands[1], cs);
@@ -178,7 +178,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
-        "add" => {
+        "add" | "addsd" => {
             if operands.len() == 2 {
                 let dest = map_x86_operand(&operands[0], cs);
                 let src = map_x86_operand(&operands[1], cs);
@@ -194,7 +194,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
-        "sub" => {
+        "sub" | "subsd" => {
             if operands.len() == 2 {
                 let dest = map_x86_operand(&operands[0], cs);
                 let src = map_x86_operand(&operands[1], cs);
@@ -210,13 +210,75 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
+        "and" => {
+            if operands.len() == 2 {
+                let dest = map_x86_operand(&operands[0], cs);
+                let src = map_x86_operand(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::BinaryOp(
+                        IrBinOp::And,
+                        Box::new(IrExpression::Operand(dest)),
+                        Box::new(IrExpression::Operand(src)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "or" => {
+            if operands.len() == 2 {
+                let dest = map_x86_operand(&operands[0], cs);
+                let src = map_x86_operand(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::BinaryOp(
+                        IrBinOp::Or,
+                        Box::new(IrExpression::Operand(dest)),
+                        Box::new(IrExpression::Operand(src)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "xor" | "pxor" => {
+            if operands.len() == 2 {
+                let dest = map_x86_operand(&operands[0], cs);
+                let src = map_x86_operand(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::BinaryOp(
+                        IrBinOp::Xor,
+                        Box::new(IrExpression::Operand(dest)),
+                        Box::new(IrExpression::Operand(src)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "not" => {
+            if operands.len() == 1 {
+                let dest = map_x86_operand(&operands[0], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::UnaryOp(IrUnOp::Not, Box::new(IrExpression::Operand(dest))),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
         "cmp" => {
             if operands.len() == 2 {
                 let op1 = map_x86_operand(&operands[0], cs);
                 let op2 = map_x86_operand(&operands[1], cs);
-                vec![IrInstruction::Cmp(
-                    IrExpression::Operand(op1),
-                    IrExpression::Operand(op2),
+                vec![IrInstruction::Set(
+                    IrOperand::Register("eflags".to_string()),
+                    IrExpression::Cmp(
+                        Box::new(IrExpression::Operand(op1)),
+                        Box::new(IrExpression::Operand(op2)),
+                    ),
                 )]
             } else {
                 vec![IrInstruction::Undefined]
@@ -226,9 +288,12 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
             if operands.len() == 2 {
                 let op1 = map_x86_operand(&operands[0], cs);
                 let op2 = map_x86_operand(&operands[1], cs);
-                vec![IrInstruction::Test(
-                    IrExpression::Operand(op1),
-                    IrExpression::Operand(op2),
+                vec![IrInstruction::Set(
+                    IrOperand::Register("eflags".to_string()),
+                    IrExpression::Test(
+                        Box::new(IrExpression::Operand(op1)),
+                        Box::new(IrExpression::Operand(op2)),
+                    ),
                 )]
             } else {
                 vec![IrInstruction::Undefined]
@@ -266,25 +331,290 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         "ret" => vec![IrInstruction::Ret],
         "nop" => vec![IrInstruction::Nop],
         "syscall" => vec![IrInstruction::Syscall],
-        "addsd" | "subsd" | "movsd" | "movaps" | "pxor" => {
-            vec![IrInstruction::Undefined]
+        _ => vec![IrInstruction::Undefined],
+    }
+}
+
+fn map_arm_operand(op: &ArmOperand, cs: &Capstone) -> IrOperand {
+    match op.op_type {
+        ArmOperandType::Reg(reg_id) => {
+            IrOperand::Register(cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string()))
+        }
+        ArmOperandType::Imm(imm_val) => IrOperand::Immediate(imm_val as u64),
+        _ => IrOperand::Immediate(0),
+    }
+}
+
+fn lift_arm(
+    insn: &capstone::Insn,
+    detail: &ArmInsnDetail,
+    cs: &Capstone,
+) -> Vec<IrInstruction> {
+    let mnem = insn.mnemonic().unwrap_or("");
+    let operands: Vec<ArmOperand> = detail.operands().collect();
+    match mnem {
+        "mov" => {
+            if operands.len() == 2 {
+                let dest = map_arm_operand(&operands[0], cs);
+                let src = map_arm_operand(&operands[1], cs);
+                vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "add" => {
+            if operands.len() == 3 {
+                let dest = map_arm_operand(&operands[0], cs);
+                let src1 = map_arm_operand(&operands[1], cs);
+                let src2 = map_arm_operand(&operands[2], cs);
+                vec![IrInstruction::Set(
+                    dest,
+                    IrExpression::BinaryOp(
+                        IrBinOp::Add,
+                        Box::new(IrExpression::Operand(src1)),
+                        Box::new(IrExpression::Operand(src2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "sub" => {
+            if operands.len() == 3 {
+                let dest = map_arm_operand(&operands[0], cs);
+                let src1 = map_arm_operand(&operands[1], cs);
+                let src2 = map_arm_operand(&operands[2], cs);
+                vec![IrInstruction::Set(
+                    dest,
+                    IrExpression::BinaryOp(
+                        IrBinOp::Sub,
+                        Box::new(IrExpression::Operand(src1)),
+                        Box::new(IrExpression::Operand(src2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "cmp" => {
+            if operands.len() == 2 {
+                let op1 = map_arm_operand(&operands[0], cs);
+                let op2 = map_arm_operand(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    IrOperand::Register("cpsr".to_string()),
+                    IrExpression::Cmp(
+                        Box::new(IrExpression::Operand(op1)),
+                        Box::new(IrExpression::Operand(op2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "b" => {
+            if operands.len() == 1 {
+                vec![IrInstruction::Jmp(IrExpression::Operand(
+                    map_arm_operand(&operands[0], cs),
+                ))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "bl" => {
+            if operands.len() == 1 {
+                vec![IrInstruction::Call(IrExpression::Operand(
+                    map_arm_operand(&operands[0], cs),
+                ))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "bx" => {
+            if operands.len() == 1 {
+                vec![IrInstruction::Ret]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "pop" => {
+            if operands.len() >= 1 {
+                vec![IrInstruction::Pop(map_arm_operand(&operands[0], cs))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "push" => {
+            if operands.len() >= 1 {
+                vec![IrInstruction::Push(IrExpression::Operand(map_arm_operand(
+                    &operands[0],
+                    cs,
+                )))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
         }
         _ => vec![IrInstruction::Undefined],
     }
 }
 
-fn lift_arm(
-    _insn: &capstone::Insn,
-    _detail: &ArmInsnDetail,
-    _cs: &Capstone,
-) -> Vec<IrInstruction> {
-    vec![IrInstruction::Undefined]
+fn map_aarch64_mem_op(mem_op: &Arm64OpMem, cs: &Capstone) -> IrOperand {
+    let mut expr_opt: Option<Box<IrExpression>> = None;
+    if mem_op.base().0 != 0 {
+        let base_reg_name = cs
+            .reg_name(mem_op.base())
+            .unwrap_or("unknown_reg".to_string());
+        expr_opt = Some(Box::new(IrExpression::Operand(IrOperand::Register(
+            base_reg_name,
+        ))));
+    }
+    if mem_op.index().0 != 0 {
+        let index_reg_name = cs
+            .reg_name(mem_op.index())
+            .unwrap_or("unknown_reg".to_string());
+        let index_expr = Box::new(IrExpression::Operand(IrOperand::Register(
+            index_reg_name,
+        )));
+        if let Some(base_expr) = expr_opt {
+            expr_opt = Some(Box::new(IrExpression::BinaryOp(
+                IrBinOp::Add,
+                base_expr,
+                index_expr,
+            )));
+        } else {
+            expr_opt = Some(index_expr);
+        }
+    }
+    if mem_op.disp() != 0 {
+        let disp_expr = Box::new(IrExpression::Operand(IrOperand::Immediate(
+            mem_op.disp() as u64,
+        )));
+        if let Some(base_expr) = expr_opt {
+            expr_opt = Some(Box::new(IrExpression::BinaryOp(
+                IrBinOp::Add,
+                base_expr,
+                disp_expr,
+            )));
+        } else {
+            expr_opt = Some(disp_expr);
+        }
+    }
+    IrOperand::Memory(expr_opt.unwrap_or(Box::new(IrExpression::Operand(IrOperand::Immediate(0)))))
+}
+
+fn map_aarch64_operand(op: &Arm64Operand, cs: &Capstone) -> IrOperand {
+    match op.op_type {
+        Arm64OperandType::Reg(reg_id) => {
+            IrOperand::Register(cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string()))
+        }
+        Arm64OperandType::Imm(imm_val) => IrOperand::Immediate(imm_val as u64),
+        Arm64OperandType::Mem(mem_op) => map_aarch64_mem_op(&mem_op, cs),
+        _ => IrOperand::Immediate(0),
+    }
 }
 
 fn lift_aarch64(
-    _insn: &capstone::Insn,
-    _detail: &Arm64InsnDetail,
-    _cs: &Capstone,
+    insn: &capstone::Insn,
+    detail: &Arm64InsnDetail,
+    cs: &Capstone,
 ) -> Vec<IrInstruction> {
-    vec![IrInstruction::Undefined]
+    let mnem = insn.mnemonic().unwrap_or("");
+    let operands: Vec<Arm64Operand> = detail.operands().collect();
+    match mnem {
+        "mov" => {
+            if operands.len() == 2 {
+                let dest = map_aarch64_operand(&operands[0], cs);
+                let src = map_aarch64_operand(&operands[1], cs);
+                vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "add" => {
+            if operands.len() == 3 {
+                let dest = map_aarch64_operand(&operands[0], cs);
+                let src1 = map_aarch64_operand(&operands[1], cs);
+                let src2 = map_aarch64_operand(&operands[2], cs);
+                vec![IrInstruction::Set(
+                    dest,
+                    IrExpression::BinaryOp(
+                        IrBinOp::Add,
+                        Box::new(IrExpression::Operand(src1)),
+                        Box::new(IrExpression::Operand(src2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "sub" => {
+            if operands.len() == 3 {
+                let dest = map_aarch64_operand(&operands[0], cs);
+                let src1 = map_aarch64_operand(&operands[1], cs);
+                let src2 = map_aarch64_operand(&operands[2], cs);
+                vec![IrInstruction::Set(
+                    dest,
+                    IrExpression::BinaryOp(
+                        IrBinOp::Sub,
+                        Box::new(IrExpression::Operand(src1)),
+                        Box::new(IrExpression::Operand(src2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "cmp" => {
+            if operands.len() == 2 {
+                let op1 = map_aarch64_operand(&operands[0], cs);
+                let op2 = map_aarch64_operand(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    IrOperand::Register("pstate".to_string()),
+                    IrExpression::Cmp(
+                        Box::new(IrExpression::Operand(op1)),
+                        Box::new(IrExpression::Operand(op2)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "b" => {
+            if operands.len() == 1 {
+                vec![IrInstruction::Jmp(IrExpression::Operand(
+                    map_aarch64_operand(&operands[0], cs),
+                ))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "bl" => {
+            if operands.len() == 1 {
+                vec![IrInstruction::Call(IrExpression::Operand(
+                    map_aarch64_operand(&operands[0], cs),
+                ))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "ret" => vec![IrInstruction::Ret],
+        "ldr" => {
+            if operands.len() == 2 {
+                let dest = map_aarch64_operand(&operands[0], cs);
+                let src = map_aarch64_operand(&operands[1], cs);
+                vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "str" => {
+            if operands.len() == 2 {
+                let src = map_aarch64_operand(&operands[0], cs);
+                let dest = map_aarch64_operand(&operands[1], cs);
+                vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        _ => vec![IrInstruction::Undefined],
+    }
 }

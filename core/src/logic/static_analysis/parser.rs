@@ -38,7 +38,7 @@ pub struct C_SectionInfo {
     pub addr: u64,
     pub size: u64,
     pub offset: u64,
-    pub tipe: u32,
+    pub flags: u64,
 }
 
 #[allow(non_camel_case_types)]
@@ -50,6 +50,29 @@ pub struct C_SymbolInfo {
     pub size: u64,
     pub symbol_type: [c_char; 64],
     pub bind: [c_char; 64],
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct C_ImportInfo {
+    pub name: [c_char; 128],
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct C_ExportInfo {
+    pub name: [c_char; 128],
+    pub addr: u64,
+}
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct C_ElfDynamicInfo {
+    pub tag_name: [c_char; 64],
+    pub value: u64,
 }
 
 #[allow(non_camel_case_types)]
@@ -128,7 +151,7 @@ pub unsafe fn c_get_daftar_sections(
                     out_item.addr = section.addr;
                     out_item.size = section.size;
                     out_item.offset = section.offset;
-                    out_item.tipe = section.tipe;
+                    out_item.flags = section.flags;
                 }
                 sections.len() as c_int
             }
@@ -183,6 +206,87 @@ pub unsafe fn c_get_daftar_simbol(
                 set_last_error(e);
                 -1
             }
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn c_get_daftar_imports(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_ImportInfo,
+    max_count: c_int,
+) -> c_int {
+    if out_buffer.is_null() || max_count <= 0 {
+        set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
+        return -1;
+    }
+    let path_str_result = CStr::from_ptr(file_path_c).to_str();
+    let binary_result = match path_str_result {
+        Ok(path_str) => Binary::load(path_str),
+        Err(e) => Err(ReToolsError::from(e)),
+    };
+    match binary_result {
+        Ok(binary) => {
+            let imports = &binary.imports;
+            if imports.len() > max_count as usize {
+                set_last_error(ReToolsError::Generic(format!(
+                    "Jumlah imports ({}) melebihi max_count ({})",
+                    imports.len(),
+                    max_count
+                )));
+                return -1;
+            }
+            let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
+            for (i, import_info) in imports.iter().enumerate() {
+                let out_item = &mut out_slice[i];
+                strncpy_rs(&import_info.name, &mut out_item.name);
+            }
+            imports.len() as c_int
+        }
+        Err(e) => {
+            set_last_error(e);
+            -1
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn c_get_daftar_exports(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_ExportInfo,
+    max_count: c_int,
+) -> c_int {
+    if out_buffer.is_null() || max_count <= 0 {
+        set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
+        return -1;
+    }
+    let path_str_result = CStr::from_ptr(file_path_c).to_str();
+    let binary_result = match path_str_result {
+        Ok(path_str) => Binary::load(path_str),
+        Err(e) => Err(ReToolsError::from(e)),
+    };
+    match binary_result {
+        Ok(binary) => {
+            let exports = &binary.exports;
+            if exports.len() > max_count as usize {
+                set_last_error(ReToolsError::Generic(format!(
+                    "Jumlah exports ({}) melebihi max_count ({})",
+                    exports.len(),
+                    max_count
+                )));
+                return -1;
+            }
+            let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
+            for (i, export_info) in exports.iter().enumerate() {
+                let out_item = &mut out_slice[i];
+                strncpy_rs(&export_info.name, &mut out_item.name);
+                out_item.addr = export_info.addr;
+            }
+            exports.len() as c_int
+        }
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }

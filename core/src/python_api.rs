@@ -5,7 +5,8 @@ use std::ffi::CStr;
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::analyzer::{
-    deteksi_pattern_internal, ekstrak_strings_internal, hitung_entropy_internal, scan_yara_internal,
+    deteksiHeuristicPacker_internal, deteksi_pattern_internal, ekstrak_strings_internal,
+    hitung_entropy_internal, identifikasiFungsiLibrary_internal, scan_yara_internal,
 };
 use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::cfg::generate_cfg_internal;
@@ -104,6 +105,46 @@ fn scan_yara_py(py: Python, file_path: &str, yara_rules: &str) -> PyResult<PyObj
                 py_results.append(dict)?;
             }
             Ok(py_results.to_object(py))
+        }
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
+#[pyfunction(name = "deteksiHeuristicPacker")]
+fn deteksi_heuristic_packer_py(
+    py: Python,
+    file_path: &str,
+    entropy_threshold: f64,
+) -> PyResult<PyObject> {
+    info!("py: deteksiHeuristicPacker dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match deteksiHeuristicPacker_internal(&binary, entropy_threshold) {
+        Ok(results) => {
+            let json_str = serde_json::to_string(&results)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let json_module = PyModule::import_bound(py, "json")?;
+            let py_json = json_module.getattr("loads")?.call1((json_str,))?;
+            Ok(py_json.to_object(py))
+        }
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
+#[pyfunction(name = "identifikasiFungsiLibrary")]
+fn identifikasi_fungsi_library_py(
+    py: Python,
+    file_path: &str,
+    signatures_json: &str,
+) -> PyResult<PyObject> {
+    info!("py: identifikasiFungsiLibrary dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match identifikasiFungsiLibrary_internal(&binary, signatures_json) {
+        Ok(results) => {
+            let json_str = serde_json::to_string(&results)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let json_module = PyModule::import_bound(py, "json")?;
+            let py_json = json_module.getattr("loads")?.call1((json_str,))?;
+            Ok(py_json.to_object(py))
         }
         Err(e) => Err(map_err_to_py(e)),
     }
@@ -252,7 +293,7 @@ fn parse_sections_py(py: Python, file_path: &str) -> PyResult<PyObject> {
         dict.set_item("addr", section.addr)?;
         dict.set_item("size", section.size)?;
         dict.set_item("offset", section.offset)?;
-        dict.set_item("tipe", section.tipe)?;
+        dict.set_item("flags", section.flags)?;
         py_list.append(dict)?;
     }
     Ok(py_list.to_object(py))
@@ -270,6 +311,33 @@ fn parse_symbols_py(py: Python, file_path: &str) -> PyResult<PyObject> {
         dict.set_item("size", symbol.size)?;
         dict.set_item("symbol_type", &symbol.symbol_type)?;
         dict.set_item("bind", &symbol.bind)?;
+        py_list.append(dict)?;
+    }
+    Ok(py_list.to_object(py))
+}
+
+#[pyfunction(name = "parseImports")]
+fn parse_imports_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseImports dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let py_list = PyList::new_bound(py);
+    for import_info in &binary.imports {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("name", &import_info.name)?;
+        py_list.append(dict)?;
+    }
+    Ok(py_list.to_object(py))
+}
+
+#[pyfunction(name = "parseExports")]
+fn parse_exports_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseExports dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let py_list = PyList::new_bound(py);
+    for export_info in &binary.exports {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("name", &export_info.name)?;
+        dict.set_item("addr", export_info.addr)?;
         py_list.append(dict)?;
     }
     Ok(py_list.to_object(py))
@@ -296,6 +364,8 @@ fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hitung_entropy_py, m)?)?;
     m.add_function(wrap_pyfunction!(deteksi_pattern_py, m)?)?;
     m.add_function(wrap_pyfunction!(scan_yara_py, m)?)?;
+    m.add_function(wrap_pyfunction!(deteksi_heuristic_packer_py, m)?)?;
+    m.add_function(wrap_pyfunction!(identifikasi_fungsi_library_py, m)?)?;
     m.add_function(wrap_pyfunction!(decode_instruksi_py, m)?)?;
     m.add_function(wrap_pyfunction!(get_ir_for_instruksi_py, m)?)?;
     m.add("ARCH_UNKNOWN", ArsitekturDisasm::ARCH_UNKNOWN as u32)?;
@@ -310,6 +380,8 @@ fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cari_pattern_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_sections_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_symbols_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_imports_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_exports_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_dynamic_section_elf_py, m)?)?;
     Ok(())
 }

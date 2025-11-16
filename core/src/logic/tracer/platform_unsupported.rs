@@ -1,41 +1,59 @@
-use libc::{c_int, c_void};
-use log::error;
+use super::platform::PlatformTracer;
+use super::types::{u64, C_DebugEvent, C_Registers};
+use crate::error::ReToolsError;
+use libc::c_int;
 
-fn print_unsupported() {
-    error!("PERINGATAN: Fungsi tracer tidak didukung di OS ini.");
+pub struct UnsupportedTracer;
+
+
+impl UnsupportedTracer {
+    pub fn new(_pid: c_int) -> Result<Self, ReToolsError> {
+        Ok(UnsupportedTracer)
+    }
+
+    fn unsupported_err() -> ReToolsError {
+        ReToolsError::Generic("Fungsi tracer tidak didukung di OS ini".to_string())
+    }
 }
-pub unsafe fn impl_platform_attach(_state_data: *mut c_void) -> bool {
-    print_unsupported();
-    false
-}
-pub unsafe fn impl_platform_detach(_state_data: *mut c_void) {
-    print_unsupported();
-}
-pub unsafe fn impl_platform_baca_memory() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_tulis_memory() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_single_step() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_get_registers() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_set_registers() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_continue_proses() -> c_int {
-    print_unsupported();
-    -1
-}
-pub unsafe fn impl_platform_tunggu_event() -> c_int {
-    print_unsupported();
-    -1
+
+impl PlatformTracer for UnsupportedTracer {
+    fn attach(&mut self) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn detach(&mut self) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn baca_memory(&self, _addr: u64, _size: c_int) -> Result<Vec<u8>, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn tulis_memory(&self, _addr: u64, _data: &[u8]) -> Result<usize, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn set_registers(&self, _regs: &C_Registers) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn continue_proses(&self) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn single_step(&mut self) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn tunggu_event(&mut self, _event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn set_software_breakpoint(&mut self, _addr: u64) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn remove_software_breakpoint(&mut self, _addr: u64) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn set_hardware_breakpoint(&mut self, _addr: u64, _index: usize) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn remove_hardware_breakpoint(&mut self, _index: usize) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
 }

@@ -6,5 +6,63 @@ pub mod platform_macos;
 pub mod platform_unsupported;
 #[cfg(windows)]
 pub mod platform_windows;
-pub mod state;
+
+pub mod platform;
 pub mod types;
+
+use crate::error::{set_last_error, ReToolsError};
+use libc::c_int;
+use platform::PlatformTracer;
+
+#[cfg(target_os = "linux")]
+use platform_linux::LinuxTracer;
+#[cfg(target_os = "macos")]
+use platform_macos::MacosTracer;
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+use platform_unsupported::UnsupportedTracer;
+#[cfg(windows)]
+use platform_windows::WindowsTracer;
+
+
+pub type Debugger = Box<dyn PlatformTracer + Send + Sync>;
+
+pub fn new_debugger(pid: c_int) -> Result<Debugger, ReToolsError> {
+    let tracer: Result<Debugger, ReToolsError> = {
+        #[cfg(target_os = "linux")]
+        {
+            LinuxTracer::new(pid).map(|t| Box::new(t) as Debugger)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            WindowsTracer::new(pid).map(|t| Box::new(t) as Debugger)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            MacosTracer::new(pid).map(|t| Box::new(t) as Debugger)
+        }
+        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+        {
+            UnsupportedTracer::new(pid).map(|t| Box::new(t) as Debugger)
+        }
+    };
+    match tracer {
+        Ok(mut t) => {
+            if let Err(e) = t.attach() {
+                set_last_error(e);
+                Err(ReToolsError::Generic(format!(
+                    "Gagal attach ke PID {}",
+                    pid
+                )))
+            } else {
+                Ok(t)
+            }
+        }
+        Err(e) => {
+            set_last_error(e);
+            Err(ReToolsError::Generic(format!(
+                "Gagal membuat tracer untuk PID {}",
+                pid
+            )))
+        }
+    }
+}

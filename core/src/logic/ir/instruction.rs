@@ -9,6 +9,11 @@ pub enum IrOperand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum IrUnOp {
+    Not,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum IrBinOp {
     Add,
     Sub,
@@ -22,7 +27,10 @@ pub enum IrBinOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum IrExpression {
     Operand(IrOperand),
+    UnaryOp(IrUnOp, Box<IrExpression>),
     BinaryOp(IrBinOp, Box<IrExpression>, Box<IrExpression>),
+    Cmp(Box<IrExpression>, Box<IrExpression>),
+    Test(Box<IrExpression>, Box<IrExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,7 +44,5 @@ pub enum IrInstruction {
     Ret,
     Nop,
     Syscall,
-    Cmp(IrExpression, IrExpression),
-    Test(IrExpression, IrExpression),
     Undefined,
 }

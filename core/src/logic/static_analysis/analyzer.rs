@@ -31,6 +31,23 @@ pub struct YaraMatch {
     pub strings: Vec<YaraStringMatch>,
 }
 
+#[derive(Serialize)]
+pub struct PackerHeuristicInfo {
+    pub section_name: String,
+    pub section_offset: u64,
+    pub section_size: u64,
+    pub entropy: f64,
+    pub is_writable: bool,
+    pub is_executable: bool,
+}
+
+#[derive(Serialize)]
+pub struct LibraryMatch {
+    pub signature_name: String,
+    pub offset: u64,
+    pub matched_bytes_hex: String,
+}
+
 pub fn ekstrak_strings_internal(
     binary: &Binary,
     min_length: usize,
@@ -400,6 +417,185 @@ pub unsafe fn c_scan_yara_rs(
         Ok(json) => json,
         Err(e) => {
             set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal untuk YARA: {}", e)));
+            "[]".to_string()
+        }
+    };
+    CString::new(json_result).unwrap_or_default().into_raw()
+}
+
+#[allow(non_snake_case)]
+pub fn deteksiHeuristicPacker_internal(
+    binary: &Binary,
+    entropy_threshold: f64,
+) -> Result<Vec<PackerHeuristicInfo>, ReToolsError> {
+    info!(
+        "Mulai deteksi heuristic packer untuk: {} (entropy > {})",
+        binary.file_path, entropy_threshold
+    );
+    let mut results = Vec::new();
+    let file_len = binary.file_bytes.len();
+    const SHF_WRITE: u64 = 0x1;
+    const SHF_EXECINSTR: u64 = 0x4;
+    const IMAGE_SCN_MEM_WRITE: u64 = 0x80000000;
+    const IMAGE_SCN_MEM_EXECUTE: u64 = 0x20000000;
+    for section in &binary.sections {
+        let (is_writable, is_executable) = match binary.header.format {
+            "ELF" => (
+                (section.flags & SHF_WRITE) != 0,
+                (section.flags & SHF_EXECINSTR) != 0,
+            ),
+            "PE" => (
+                (section.flags & IMAGE_SCN_MEM_WRITE) != 0,
+                (section.flags & IMAGE_SCN_MEM_EXECUTE) != 0,
+            ),
+            _ => (false, false),
+        };
+        if is_writable && is_executable {
+            let start = std::cmp::min(file_len, section.offset as usize);
+            let end = std::cmp::min(file_len, (section.offset + section.size) as usize);
+            if start >= end {
+                continue;
+            }
+            let section_bytes = &binary.file_bytes[start..end];
+            let entropy = calculate_entropy_for_block(section_bytes);
+            if entropy > entropy_threshold {
+                results.push(PackerHeuristicInfo {
+                    section_name: section.name.clone(),
+                    section_offset: section.offset,
+                    section_size: section.size,
+                    entropy,
+                    is_writable,
+                    is_executable,
+                });
+            }
+        }
+    }
+    info!(
+        "Deteksi heuristic packer selesai, {} section mencurigakan",
+        results.len()
+    );
+    Ok(results)
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn c_deteksiHeuristicPacker_rs(
+    file_path_c: *const c_char,
+    entropy_threshold: f64,
+) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
+    let path_str = match CStr::from_ptr(file_path_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e.into());
+            return error_json;
+        }
+    };
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(e);
+            return error_json;
+        }
+    };
+    let results = match deteksiHeuristicPacker_internal(&binary, entropy_threshold) {
+        Ok(matches) => matches,
+        Err(e) => {
+            set_last_error(e);
+            return error_json;
+        }
+    };
+    let json_result = match serde_json::to_string(&results) {
+        Ok(json) => json,
+        Err(e) => {
+            set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal untuk Packer: {}", e)));
+            "[]".to_string()
+        }
+    };
+    CString::new(json_result).unwrap_or_default().into_raw()
+}
+
+#[allow(non_snake_case)]
+pub fn identifikasiFungsiLibrary_internal(
+    binary: &Binary,
+    signatures_json: &str,
+) -> Result<Vec<LibraryMatch>, ReToolsError> {
+    info!(
+        "Mulai identifikasi fungsi library untuk: {}",
+        binary.file_path
+    );
+    let signatures: HashMap<String, String> = serde_json::from_str(signatures_json)
+        .map_err(|e| ReToolsError::Generic(format!("Gagal parse JSON signatures: {}", e)))?;
+    let mut results = Vec::new();
+    for (name, pattern) in signatures {
+        let re = match Regex::new(&pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "Skipping signature '{}': Gagal compile regex: {}",
+                    name, e
+                );
+                continue;
+            }
+        };
+        for m in re.find_iter(&binary.file_bytes) {
+            let hex_match = m
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            results.push(LibraryMatch {
+                signature_name: name.clone(),
+                offset: m.start() as u64,
+                matched_bytes_hex: hex_match,
+            });
+        }
+    }
+    info!(
+        "Identifikasi fungsi library selesai, {} match ditemukan",
+        results.len()
+    );
+    Ok(results)
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn c_identifikasiFungsiLibrary_rs(
+    file_path_c: *const c_char,
+    signatures_json_c: *const c_char,
+) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
+    let path_str = match CStr::from_ptr(file_path_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e.into());
+            return error_json;
+        }
+    };
+    let signatures_json = match CStr::from_ptr(signatures_json_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e.into());
+            return error_json;
+        }
+    };
+    let binary = match Binary::load(path_str) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(e);
+            return error_json;
+        }
+    };
+    let results = match identifikasiFungsiLibrary_internal(&binary, signatures_json) {
+        Ok(matches) => matches,
+        Err(e) => {
+            set_last_error(e);
+            return error_json;
+        }
+    };
+    let json_result = match serde_json::to_string(&results) {
+        Ok(json) => json,
+        Err(e) => {
+            set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal untuk Library ID: {}", e)));
             "[]".to_string()
         }
     };

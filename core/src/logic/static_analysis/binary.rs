@@ -71,7 +71,7 @@ pub struct SectionInfo {
     pub addr: u64,
     pub size: u64,
     pub offset: u64,
-    pub tipe: u32,
+    pub flags: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -226,7 +226,7 @@ impl Binary {
                         addr: section.sh_addr,
                         size: section.sh_size,
                         offset: section.sh_offset,
-                        tipe: section.sh_type,
+                        flags: section.sh_flags,
                     });
                 }
                 Ok(sections_vec)
@@ -240,7 +240,7 @@ impl Binary {
                         addr: section.virtual_address as u64,
                         size: section.virtual_size as u64,
                         offset: section.pointer_to_raw_data as u64,
-                        tipe: section.characteristics,
+                        flags: section.characteristics as u64,
                     });
                 }
                 Ok(sections_vec)
@@ -258,7 +258,7 @@ impl Binary {
                                         addr: section.addr,
                                         size: section.size,
                                         offset: section.offset as u64,
-                                        tipe: section.flags,
+                                        flags: section.flags as u64,
                                     });
                                 }
                             }
@@ -275,7 +275,7 @@ impl Binary {
                                             addr: section.addr,
                                             size: section.size,
                                             offset: section.offset as u64,
-                                            tipe: section.flags,
+                                            flags: section.flags as u64,
                                         });
                                     }
                                 }

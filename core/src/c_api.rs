@@ -1,16 +1,8 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-#[cfg(target_os = "linux")]
-use crate::logic::tracer::platform_linux;
-#[cfg(target_os = "macos")]
-use crate::logic::tracer::platform_macos;
-#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-use crate::logic::tracer::platform_unsupported;
-#[cfg(windows)]
-use crate::logic::tracer::platform_windows;
-
 use crate::logic::static_analysis::analyzer::{
-    c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs, c_scan_yara_rs,
+    c_deteksiHeuristicPacker_rs, c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs,
+    c_identifikasiFungsiLibrary_rs, c_scan_yara_rs,
 };
 use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::cfg::c_generate_cfg_rs;
@@ -18,30 +10,21 @@ use crate::logic::static_analysis::diff::c_diff_binary_rs;
 use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm, C_Instruksi};
 use crate::logic::static_analysis::hexeditor::{c_cari_pattern, c_lihat_bytes, c_ubah_bytes};
 use crate::logic::static_analysis::parser::{
-    c_get_binary_header, c_get_daftar_sections, c_get_daftar_simbol, C_DiffResult, C_HeaderInfo,
+    c_get_binary_header, c_get_daftar_exports, c_get_daftar_imports, c_get_daftar_sections,
+    c_get_daftar_simbol, C_DiffResult, C_ElfDynamicInfo, C_ExportInfo, C_HeaderInfo, C_ImportInfo,
     C_SectionInfo, C_SymbolInfo,
 };
-use crate::logic::tracer::state::{ambil_state, StateDebuggerInternal};
+use crate::logic::tracer::{self, Debugger};
 use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
 use crate::utils::{c_free_string, strncpy_rs};
 use crate::error::{set_last_error, get_last_error_message, ReToolsError};
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 
 use libc::{c_char, c_int, c_void};
-use log::debug;
-use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::ptr::null_mut;
 use std::slice;
 
-
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_ElfDynamicInfo {
-    pub tag_name: [c_char; 64],
-    pub value: u64,
-}
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
@@ -72,7 +55,6 @@ pub unsafe extern "C" fn c_getIrForInstruksi(
     let data_slice = unsafe { slice::from_raw_parts(ptr_data, len_data) };
     let code_slice = &data_slice[offset..];
     let ir_result = angkat_blok_instruksi(code_slice, instruction_base_va, arch);
-
     let json_result = match ir_result {
         Ok((_size, ir_vec)) => {
             serde_json::to_string(&ir_vec).unwrap_or_else(|e| {
@@ -85,7 +67,6 @@ pub unsafe extern "C" fn c_getIrForInstruksi(
             "[]".to_string()
         }
     };
-
     CString::new(json_result).unwrap_or_else(|_| {
         set_last_error(ReToolsError::Generic("Failed to create CString, possibly interior nulls".to_string()));
         CString::new("[]").unwrap()
@@ -119,6 +100,26 @@ pub unsafe extern "C" fn c_getDaftarSimbol(
     max_count: c_int,
 ) -> c_int {
     unsafe { c_get_daftar_simbol(file_path_c, out_buffer, max_count) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getDaftarImports(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_ImportInfo,
+    max_count: c_int,
+) -> c_int {
+    unsafe { c_get_daftar_imports(file_path_c, out_buffer, max_count) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getDaftarExports(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_ExportInfo,
+    max_count: c_int,
+) -> c_int {
+    unsafe { c_get_daftar_exports(file_path_c, out_buffer, max_count) }
 }
 
 #[allow(non_snake_case)]
@@ -205,6 +206,24 @@ pub unsafe extern "C" fn c_scanYara_rs(
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_deteksiHeuristicPacker(
+    file_path_c: *const c_char,
+    entropy_threshold: f64,
+) -> *mut c_char {
+    unsafe { c_deteksiHeuristicPacker_rs(file_path_c, entropy_threshold) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_identifikasiFungsiLibrary(
+    file_path_c: *const c_char,
+    signatures_json_c: *const c_char,
+) -> *mut c_char {
+    unsafe { c_identifikasiFungsiLibrary_rs(file_path_c, signatures_json_c) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_diffBinary_rs(
     file1_c: *const c_char,
     file2_c: *const c_char,
@@ -270,47 +289,24 @@ pub unsafe extern "C" fn c_cariPattern(
 
 type RtHandle = c_void;
 
+#[inline(always)]
+unsafe fn ambil_debugger<'a>(handle: *mut RtHandle) -> Option<&'a mut Debugger> {
+    if handle.is_null() {
+        set_last_error(ReToolsError::Generic("Handle tracer tidak valid (null)".to_string()));
+        return None;
+    }
+    (handle as *mut Debugger).as_mut()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHandle {
-    debug!("rt_attachProses dipanggil untuk PID: {}", pid_target_proses);
-    unsafe {
-        let state_debugger_box = Box::new(StateDebuggerInternal {
-            pid_target: pid_target_proses,
-            attached_status: false,
-            breakpoints_map: HashMap::new(),
-            #[cfg(windows)]
-            last_event_thread_id: 0,
-            #[cfg(windows)]
-            handle_proses: 0,
-            #[cfg(windows)]
-            handling_breakpoint_alamat: None,
-        });
-        let state_ptr = Box::into_raw(state_debugger_box);
-        let attach_sukses: bool = {
-            #[cfg(target_os = "linux")]
-            {
-                platform_linux::impl_platform_attach(state_ptr.as_mut().unwrap())
-            }
-            #[cfg(target_os = "macos")]
-            {
-                platform_macos::impl_platform_attach(state_ptr.as_mut().unwrap())
-            }
-            #[cfg(windows)]
-            {
-                platform_windows::impl_platform_attach(state_ptr.as_mut().unwrap())
-            }
-            #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-            {
-                platform_unsupported::impl_platform_attach(state_ptr.as_mut().unwrap())
-            }
-        };
-        if attach_sukses {
-            debug!("Attach ke PID {} berhasil", pid_target_proses);
-            (*state_ptr).attached_status = true;
-            state_ptr as *mut RtHandle
-        } else {
-            set_last_error(ReToolsError::Generic(format!("Attach ke PID {} gagal", pid_target_proses)));
-            let _ = Box::from_raw(state_ptr);
+    match tracer::new_debugger(pid_target_proses) {
+        Ok(debugger) => {
+            let handle = Box::into_raw(Box::new(debugger));
+            handle as *mut RtHandle
+        }
+        Err(e) => {
+            set_last_error(e);
             null_mut()
         }
     }
@@ -318,42 +314,13 @@ pub unsafe extern "C" fn rt_attachProses(pid_target_proses: c_int) -> *mut RtHan
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_detachProses(handle: *mut RtHandle) {
-    debug!("rt_detachProses dipanggil");
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_detachProses: handle tidak valid".to_string()));
-            return;
-        };
-        let bps_to_restore: Vec<(u64, u8)> = state_data
-            .breakpoints_map
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
-        debug!("Merestore {} breakpoints", bps_to_restore.len());
-        for (addr, orig_byte) in bps_to_restore {
-            let data_byte = [orig_byte];
-            #[cfg(target_os = "linux")]
-            platform_linux::impl_platform_tulis_memory(state_data, addr, data_byte.as_ptr(), 1);
-            #[cfg(target_os = "macos")]
-            platform_macos::impl_platform_tulis_memory(state_data, addr, data_byte.as_ptr(), 1);
-            #[cfg(windows)]
-            platform_windows::impl_platform_tulisMemory(state_data, addr, data_byte.as_ptr(), 1);
-        }
-        state_data.breakpoints_map.clear();
-        if state_data.attached_status {
-            #[cfg(target_os = "linux")]
-            platform_linux::impl_platform_detach(state_data);
-            #[cfg(target_os = "macos")]
-            platform_macos::impl_platform_detach(state_data);
-            #[cfg(windows)]
-            platform_windows::impl_platform_detach(state_data);
-            #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-            platform_unsupported::impl_platform_detach(state_data);
-            debug!("Detach platform-specific selesai");
-        }
-        let _ = Box::from_raw(handle as *mut StateDebuggerInternal);
-        debug!("State debugger dibebaskan");
+    let Some(debugger) = (handle as *mut Debugger).as_mut() else {
+        return;
+    };
+    if let Err(e) = debugger.detach() {
+        set_last_error(e);
     }
+    let _ = Box::from_raw(handle as *mut Debugger);
 }
 
 #[unsafe(no_mangle)]
@@ -363,35 +330,22 @@ pub unsafe extern "C" fn rt_bacaMemory(
     out_buffer: *mut u8,
     size: c_int,
 ) -> c_int {
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_bacaMemory: handle tidak valid".to_string()));
-            return -1;
-        };
-        if out_buffer.is_null() || size <= 0 {
-            set_last_error(ReToolsError::Generic("rt_bacaMemory: buffer output tidak valid atau size <= 0".to_string()));
-            return -1;
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if out_buffer.is_null() || size <= 0 {
+        set_last_error(ReToolsError::Generic("rt_bacaMemory: buffer output tidak valid atau size <= 0".to_string()));
+        return -1;
+    }
+    match debugger.baca_memory(addr, size) {
+        Ok(bytes) => {
+            let bytes_to_copy = bytes.len().min(size as usize);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buffer, bytes_to_copy);
+            bytes_to_copy as c_int
         }
-        if !state_data.attached_status {
-            set_last_error(ReToolsError::Generic("rt_bacaMemory: proses tidak ter-attach".to_string()));
-            return -1;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_baca_memory(state_data, addr, out_buffer, size);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_baca_memory(state_data, addr, out_buffer, size);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_bacaMemory(state_data, addr, out_buffer, size);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_bacaMemory: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_baca_memory();
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
@@ -403,95 +357,97 @@ pub unsafe extern "C" fn rt_tulisMemory(
     data: *const u8,
     size: c_int,
 ) -> c_int {
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_tulisMemory: handle tidak valid".to_string()));
-            return -1;
-        };
-        if data.is_null() || size <= 0 {
-            set_last_error(ReToolsError::Generic("rt_tulisMemory: data input tidak valid atau size <= 0".to_string()));
-            return -1;
-        }
-        if !state_data.attached_status {
-            set_last_error(ReToolsError::Generic("rt_tulisMemory: proses tidak ter-attach".to_string()));
-            return -1;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_tulis_memory(state_data, addr, data, size);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_tulis_memory(state_data, addr, data, size);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_tulisMemory(state_data, addr, data, size);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_tulisMemory: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_tulis_memory();
+     let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if data.is_null() || size <= 0 {
+        set_last_error(ReToolsError::Generic("rt_tulisMemory: data input tidak valid atau size <= 0".to_string()));
+        return -1;
+    }
+    let data_slice = slice::from_raw_parts(data, size as usize);
+    match debugger.tulis_memory(addr, data_slice) {
+        Ok(bytes_written) => bytes_written as c_int,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rt_setBreakpoint(handle: *mut RtHandle, addr: u64) -> c_int {
-    debug!("rt_setBreakpoint dipanggil pada alamat: 0x{:x}", addr);
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_setBreakpoint: handle tidak valid".to_string()));
-            return -1;
-        };
-        if state_data.breakpoints_map.contains_key(&addr) {
-            debug!("Breakpoint sudah ada di 0x{:x}", addr);
-            return 0;
+pub unsafe extern "C" fn rt_setSoftwareBreakpoint(handle: *mut RtHandle, addr: u64) -> c_int {
+     let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    match debugger.set_software_breakpoint(addr) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
-        let mut orig_byte: u8 = 0;
-        let bytes_dibaca = rt_bacaMemory(handle, addr, &mut orig_byte, 1);
-        if bytes_dibaca != 1 {
-            set_last_error(ReToolsError::Generic(format!("Gagal membaca byte asli di 0x{:x}", addr)));
-            return -1;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_removeSoftwareBreakpoint(handle: *mut RtHandle, addr: u64) -> c_int {
+     let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    match debugger.remove_software_breakpoint(addr) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
-        state_data.breakpoints_map.insert(addr, orig_byte);
-        let int3_byte: u8 = 0xCC;
-        let bytes_ditulis = rt_tulisMemory(handle, addr, &int3_byte, 1);
-        if bytes_ditulis != 1 {
-            set_last_error(ReToolsError::Generic(format!("Gagal menulis INT3 di 0x{:x}", addr)));
-            state_data.breakpoints_map.remove(&addr);
-            rt_tulisMemory(handle, addr, &orig_byte, 1);
-            return -1;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_setHardwareBreakpoint(handle: *mut RtHandle, addr: u64, index: c_int) -> c_int {
+     let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if !(0..=3).contains(&index) {
+        set_last_error(ReToolsError::Generic("Indeks hardware breakpoint harus 0-3".to_string()));
+        return -1;
+    }
+    match debugger.set_hardware_breakpoint(addr, index as usize) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
-        debug!("Breakpoint berhasil diset di 0x{:x}", addr);
-        0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_removeHardwareBreakpoint(handle: *mut RtHandle, index: c_int) -> c_int {
+     let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if !(0..=3).contains(&index) {
+        set_last_error(ReToolsError::Generic("Indeks hardware breakpoint harus 0-3".to_string()));
+        return -1;
+    }
+    match debugger.remove_hardware_breakpoint(index as usize) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_singleStep(handle: *mut RtHandle) -> c_int {
-    debug!("rt_singleStep dipanggil");
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_singleStep: handle tidak valid".to_string()));
-            return -1;
-        };
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_single_step(state_data);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_single_step(state_data);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_singleStep(state_data);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_singleStep: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_single_step();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    match debugger.single_step() {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
@@ -501,31 +457,21 @@ pub unsafe extern "C" fn rt_getRegisters(
     handle: *mut RtHandle,
     out_registers: *mut C_Registers,
 ) -> c_int {
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_getRegisters: handle tidak valid".to_string()));
-            return -1;
-        };
-        if out_registers.is_null() {
-            set_last_error(ReToolsError::Generic("rt_getRegisters: out_registers adalah null".to_string()));
-            return -1;
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if out_registers.is_null() {
+        set_last_error(ReToolsError::Generic("rt_getRegisters: out_registers adalah null".to_string()));
+        return -1;
+    }
+    match debugger.get_registers() {
+        Ok(regs) => {
+            *out_registers = regs;
+            0
         }
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_get_registers(state_data, out_registers);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_get_registers(state_data, out_registers);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_getRegisters(state_data, out_registers);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_getRegisters: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_get_registers();
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
@@ -535,59 +481,32 @@ pub unsafe extern "C" fn rt_setRegisters(
     handle: *mut RtHandle,
     registers: *const C_Registers,
 ) -> c_int {
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_setRegisters: handle tidak valid".to_string()));
-            return -1;
-        };
-        if registers.is_null() {
-            set_last_error(ReToolsError::Generic("rt_setRegisters: registers adalah null".to_string()));
-            return -1;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_set_registers(state_data, registers);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_set_registers(state_data, registers);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_setRegisters(state_data, registers);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_setRegisters: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_set_registers();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if registers.is_null() {
+        set_last_error(ReToolsError::Generic("rt_setRegisters: registers adalah null".to_string()));
+        return -1;
+    }
+    match debugger.set_registers(&*registers) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_continueProses(handle: *mut RtHandle) -> c_int {
-    debug!("rt_continueProses dipanggil");
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_continueProses: handle tidak valid".to_string()));
-            return -1;
-        };
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_continue_proses(state_data);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_continue_proses(state_data);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_continueProses(state_data);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_continueProses: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_continue_proses();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    match debugger.continue_proses() {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }
@@ -597,35 +516,21 @@ pub unsafe extern "C" fn rt_tungguEvent(
     handle: *mut RtHandle,
     event_out: *mut C_DebugEvent,
 ) -> c_int {
-    debug!("rt_tungguEvent: Menunggu event debug...");
-    unsafe {
-        let Some(state_data) = ambil_state(handle) else {
-            set_last_error(ReToolsError::Generic("rt_tungguEvent: handle tidak valid".to_string()));
-            return -1;
-        };
-        if event_out.is_null() {
-            set_last_error(ReToolsError::Generic("rt_tungguEvent: event_out adalah null".to_string()));
-            return -1;
-        }
-        (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-        (*event_out).pid_thread = 0;
-        (*event_out).info_alamat = 0;
-        #[cfg(target_os = "linux")]
-        {
-            return platform_linux::impl_platform_tunggu_event(state_data, event_out);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return platform_macos::impl_platform_tunggu_event(state_data, event_out);
-        }
-        #[cfg(windows)]
-        {
-            return platform_windows::impl_platform_tungguEvent(state_data, event_out);
-        }
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        {
-            set_last_error(ReToolsError::Generic("rt_tungguEvent: platform tidak didukung".to_string()));
-            return platform_unsupported::impl_platform_tunggu_event();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    if event_out.is_null() {
+        set_last_error(ReToolsError::Generic("rt_tungguEvent: event_out adalah null".to_string()));
+        return -1;
+    }
+    (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+    (*event_out).pid_thread = 0;
+    (*event_out).info_alamat = 0;
+    match debugger.tunggu_event(event_out) {
+        Ok(code) => code,
+        Err(e) => {
+            set_last_error(e);
+            -1
         }
     }
 }

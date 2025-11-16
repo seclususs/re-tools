@@ -1,5 +1,5 @@
 use libc::{c_char, c_int};
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::slice;
@@ -7,6 +7,9 @@ use std::slice;
 use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::binary::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::parser::C_DiffResult;
+use crate::logic::static_analysis::disasm::ArsitekturDisasm;
+use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::instruction::IrInstruction;
 use crate::utils::strncpy_rs;
 
 
@@ -23,26 +26,6 @@ const STATUS_MODIFIED: c_int = 1;
 const STATUS_REMOVED: c_int = 2;
 const STATUS_ADDED: c_int = 3;
 
-fn read_bytes_at_internal(
-    file_bytes: &[u8],
-    offset: u64,
-    size: u64,
-) -> Result<Vec<u8>, ReToolsError> {
-    let start = offset as usize;
-    let end = start.saturating_add(size as usize);
-
-    if start > file_bytes.len() || end > file_bytes.len() {
-        warn!(
-            "Read bytes OOB: offset {} + size {} > total {}",
-            offset,
-            size,
-            file_bytes.len()
-        );
-        return Err(ReToolsError::Generic("Read di luar batas".to_string()));
-    }
-    Ok(file_bytes[start..end].to_vec())
-}
-
 fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
     for sec in sections {
         if va >= sec.addr && va < (sec.addr + sec.size) {
@@ -53,10 +36,58 @@ fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
     None
 }
 
-fn compare_bytes(bytes1: Result<Vec<u8>, ReToolsError>, bytes2: Result<Vec<u8>, ReToolsError>) -> c_int {
-    match (bytes1, bytes2) {
-        (Ok(b1), Ok(b2)) => {
-            if b1 == b2 {
+fn get_arch_from_binary(binary: &Binary) -> ArsitekturDisasm {
+    match (binary.header.arch, binary.header.bits) {
+        ("x86-64", 64) => ArsitekturDisasm::ARCH_X86_64,
+        ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
+        ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
+        ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
+        _ => ArsitekturDisasm::ARCH_X86_64,
+    }
+}
+
+fn lift_function_to_ir(
+    binary: &Binary,
+    sym: &SymbolInfo,
+    arch: ArsitekturDisasm,
+) -> Result<Vec<IrInstruction>, ReToolsError> {
+    let func_va = sym.addr;
+    let func_size = sym.size;
+    if func_size == 0 {
+        return Ok(Vec::new());
+    }
+    let func_offset = va_to_offset(func_va, &binary.sections)
+        .ok_or_else(|| ReToolsError::Generic(format!("VA 0x{:x} tidak ditemukan di sections", func_va)))?;
+    let start = func_offset as usize;
+    let end = start.saturating_add(func_size as usize);
+    if start > binary.file_bytes.len() || end > binary.file_bytes.len() {
+        return Err(ReToolsError::Generic(format!("Simbol 0x{:x} di luar batas file", func_va)));
+    }
+    let func_bytes = &binary.file_bytes[start..end];
+    let mut all_irs = Vec::new();
+    let mut current_offset = 0;
+    while current_offset < func_bytes.len() {
+        let current_va = func_va + current_offset as u64;
+        let (size, irs) = match angkat_blok_instruksi(&func_bytes[current_offset..], current_va, arch) {
+            Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
+            _ => (1, vec![IrInstruction::Undefined]),
+        };
+        all_irs.extend(irs);
+        current_offset += size;
+        if size == 0 {
+            break;
+        }
+    }
+    Ok(all_irs)
+}
+
+fn compare_ir_sequences(
+    irs1_res: Result<Vec<IrInstruction>, ReToolsError>,
+    irs2_res: Result<Vec<IrInstruction>, ReToolsError>,
+) -> c_int {
+    match (irs1_res, irs2_res) {
+        (Ok(irs1), Ok(irs2)) => {
+            if irs1 == irs2 {
                 STATUS_MATCHED
             } else {
                 STATUS_MODIFIED
@@ -66,48 +97,12 @@ fn compare_bytes(bytes1: Result<Vec<u8>, ReToolsError>, bytes2: Result<Vec<u8>, 
     }
 }
 
-fn diff_fallback_by_section(
-    binary1: &Binary,
-    binary2: &Binary,
-    section_name: &str,
-) -> Option<C_DiffResult> {
-    info!("Menjalankan fallback diff pada section: {}", section_name);
-    let sec1 = binary1.sections.iter().find(|s| s.name == section_name);
-    let sec2 = binary2.sections.iter().find(|s| s.name == section_name);
-    let mut result = C_DiffResult {
-        function_name: [0; 128],
-        address_file1: 0,
-        address_file2: 0,
-        status: STATUS_MODIFIED,
-    };
-    strncpy_rs(section_name, &mut result.function_name);
-    match (sec1, sec2) {
-        (Some(s1), Some(s2)) => {
-            result.address_file1 = s1.addr;
-            result.address_file2 = s2.addr;
-            let bytes1 = read_bytes_at_internal(&binary1.file_bytes, s1.offset, s1.size);
-            let bytes2 = read_bytes_at_internal(&binary2.file_bytes, s2.offset, s2.size);
-            result.status = compare_bytes(bytes1, bytes2);
-            Some(result)
-        }
-        (Some(s1), None) => {
-            result.address_file1 = s1.addr;
-            result.status = STATUS_REMOVED;
-            Some(result)
-        }
-        (None, Some(s2)) => {
-            result.address_file2 = s2.addr;
-            result.status = STATUS_ADDED;
-            Some(result)
-        }
-        (None, None) => None,
-    }
-}
-
 fn perform_diff_logic(
     binary1: &Binary,
     binary2: &Binary,
 ) -> Result<Vec<C_DiffResult>, ReToolsError> {
+    let arch1 = get_arch_from_binary(binary1);
+    let arch2 = get_arch_from_binary(binary2);
     let symbols1_map: HashMap<String, &SymbolInfo> = binary1
         .symbols
         .iter()
@@ -121,7 +116,7 @@ fn perform_diff_logic(
         .map(|s| (s.name.clone(), s))
         .collect();
     info!(
-        "Membandingkan {} simbol FUNC dari file 1 vs {} simbol FUNC dari file 2",
+        "Membandingkan (IR-based) {} simbol FUNC dari file 1 vs {} simbol FUNC dari file 2",
         symbols1_map.len(),
         symbols2_map.len()
     );
@@ -137,19 +132,11 @@ fn perform_diff_logic(
             status: STATUS_REMOVED,
         };
         strncpy_rs(name, &mut result_entry.function_name);
+        let irs1 = lift_function_to_ir(binary1, sym1, arch1);
         if let Some(sym2) = symbols2_map.get(name) {
             result_entry.address_file2 = sym2.addr;
-            let offset1 = va_to_offset(sym1.addr, &binary1.sections);
-            let offset2 = va_to_offset(sym2.addr, &binary2.sections);
-            let bytes1 =
-                offset1.map_or(Err(ReToolsError::Generic("VA not found".to_string())), |off| {
-                    read_bytes_at_internal(&binary1.file_bytes, off, sym1.size)
-                });
-            let bytes2 =
-                offset2.map_or(Err(ReToolsError::Generic("VA not found".to_string())), |off| {
-                    read_bytes_at_internal(&binary2.file_bytes, off, sym2.size)
-                });
-            result_entry.status = compare_bytes(bytes1, bytes2);
+            let irs2 = lift_function_to_ir(binary2, sym2, arch2);
+            result_entry.status = compare_ir_sequences(irs1, irs2);
         }
         results.push(result_entry);
     }
@@ -164,12 +151,6 @@ fn perform_diff_logic(
             };
             strncpy_rs(name, &mut result_entry.function_name);
             results.push(result_entry);
-        }
-    }
-    if results.is_empty() {
-        warn!("Tidak ada simbol fungsi yang ditemukan, menjalankan fallback diff .text");
-        if let Some(fallback_result) = diff_fallback_by_section(binary1, binary2, ".text") {
-            results.push(fallback_result);
         }
     }
     Ok(results)
