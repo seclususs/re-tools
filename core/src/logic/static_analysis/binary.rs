@@ -1,4 +1,5 @@
 use crate::error::ReToolsError;
+use goblin::elf::dynamic;
 use goblin::elf::sym;
 use goblin::Object;
 use std::fs;
@@ -93,6 +94,12 @@ pub struct ExportInfo {
     pub addr: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ElfDynamicInfo {
+    pub tag_name: String,
+    pub value: u64,
+}
+
 #[derive(Debug)]
 pub struct Binary {
     pub file_path: String,
@@ -102,6 +109,7 @@ pub struct Binary {
     pub symbols: Vec<SymbolInfo>,
     pub imports: Vec<ImportInfo>,
     pub exports: Vec<ExportInfo>,
+    pub elf_dynamic_info: Vec<ElfDynamicInfo>,
 }
 
 impl Binary {
@@ -115,6 +123,7 @@ impl Binary {
         let symbols = Self::parse_symbols_internal(&obj)?;
         let imports = Self::parse_imports_internal(&obj)?;
         let exports = Self::parse_exports_internal(&obj)?;
+        let elf_dynamic_info = Self::parse_elf_dynamic_info_internal(&obj)?;
         Ok(Binary {
             file_path: file_path_string,
             file_bytes,
@@ -123,6 +132,7 @@ impl Binary {
             symbols,
             imports,
             exports,
+            elf_dynamic_info,
         })
     }
 
@@ -496,5 +506,66 @@ impl Binary {
             _ => {}
         }
         Ok(exports_vec)
+    }
+
+    fn elf_tag_to_str(tag: u64) -> &'static str {
+        match tag {
+            dynamic::DT_NULL => "DT_NULL",
+            dynamic::DT_NEEDED => "DT_NEEDED",
+            dynamic::DT_PLTRELSZ => "DT_PLTRELSZ",
+            dynamic::DT_PLTGOT => "DT_PLTGOT",
+            dynamic::DT_HASH => "DT_HASH",
+            dynamic::DT_STRTAB => "DT_STRTAB",
+            dynamic::DT_SYMTAB => "DT_SYMTAB",
+            dynamic::DT_RELA => "DT_RELA",
+            dynamic::DT_RELASZ => "DT_RELASZ",
+            dynamic::DT_RELAENT => "DT_RELAENT",
+            dynamic::DT_STRSZ => "DT_STRSZ",
+            dynamic::DT_SYMENT => "DT_SYMENT",
+            dynamic::DT_INIT => "DT_INIT",
+            dynamic::DT_FINI => "DT_FINI",
+            dynamic::DT_SONAME => "DT_SONAME",
+            dynamic::DT_RPATH => "DT_RPATH",
+            dynamic::DT_SYMBOLIC => "DT_SYMBOLIC",
+            dynamic::DT_REL => "DT_REL",
+            dynamic::DT_RELSZ => "DT_RELSZ",
+            dynamic::DT_RELENT => "DT_RELENT",
+            dynamic::DT_PLTREL => "DT_PLTREL",
+            dynamic::DT_DEBUG => "DT_DEBUG",
+            dynamic::DT_TEXTREL => "DT_TEXTREL",
+            dynamic::DT_JMPREL => "DT_JMPREL",
+            dynamic::DT_BIND_NOW => "DT_BIND_NOW",
+            dynamic::DT_INIT_ARRAY => "DT_INIT_ARRAY",
+            dynamic::DT_FINI_ARRAY => "DT_FINI_ARRAY",
+            dynamic::DT_INIT_ARRAYSZ => "DT_INIT_ARRAYSZ",
+            dynamic::DT_FINI_ARRAYSZ => "DT_FINI_ARRAYSZ",
+            dynamic::DT_RUNPATH => "DT_RUNPATH",
+            dynamic::DT_FLAGS => "DT_FLAGS",
+            dynamic::DT_PREINIT_ARRAY => "DT_PREINIT_ARRAY",
+            dynamic::DT_PREINIT_ARRAYSZ => "DT_PREINIT_ARRAYSZ",
+            dynamic::DT_VERSYM => "DT_VERSYM",
+            dynamic::DT_VERDEF => "DT_VERDEF",
+            dynamic::DT_VERDEFNUM => "DT_VERDEFNUM",
+            dynamic::DT_VERNEED => "DT_VERNEED",
+            dynamic::DT_VERNEEDNUM => "DT_VERNEEDNUM",
+            dynamic::DT_GNU_HASH => "DT_GNU_HASH",
+            _ => "DT_UNKNOWN",
+        }
+    }
+
+    fn parse_elf_dynamic_info_internal(obj: &Object) -> Result<Vec<ElfDynamicInfo>, ReToolsError> {
+        if let Object::Elf(elf) = obj {
+            if let Some(dynamic) = &elf.dynamic {
+                let mut entries = Vec::new();
+                for entry in &dynamic.dyns {
+                    entries.push(ElfDynamicInfo {
+                        tag_name: Self::elf_tag_to_str(entry.d_tag).to_string(),
+                        value: entry.d_val,
+                    });
+                }
+                return Ok(entries);
+            }
+        }
+        Ok(Vec::new())
     }
 }

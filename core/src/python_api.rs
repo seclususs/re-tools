@@ -241,6 +241,54 @@ fn cari_pattern_py(_py: Python, filename: &str, pattern: &Bound<'_, PyBytes>) ->
     }
 }
 
+#[pyfunction(name = "parseSections")]
+fn parse_sections_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseSections dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let py_list = PyList::new_bound(py);
+    for section in &binary.sections {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("name", &section.name)?;
+        dict.set_item("addr", section.addr)?;
+        dict.set_item("size", section.size)?;
+        dict.set_item("offset", section.offset)?;
+        dict.set_item("tipe", section.tipe)?;
+        py_list.append(dict)?;
+    }
+    Ok(py_list.to_object(py))
+}
+
+#[pyfunction(name = "parseSymbols")]
+fn parse_symbols_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseSymbols dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let py_list = PyList::new_bound(py);
+    for symbol in &binary.symbols {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("name", &symbol.name)?;
+        dict.set_item("addr", symbol.addr)?;
+        dict.set_item("size", symbol.size)?;
+        dict.set_item("symbol_type", &symbol.symbol_type)?;
+        dict.set_item("bind", &symbol.bind)?;
+        py_list.append(dict)?;
+    }
+    Ok(py_list.to_object(py))
+}
+
+#[pyfunction(name = "parseDynamicSectionElf")]
+fn parse_dynamic_section_elf_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: parseDynamicSectionElf dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let py_list = PyList::new_bound(py);
+    for entry in &binary.elf_dynamic_info {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("tag_name", &entry.tag_name)?;
+        dict.set_item("value", entry.value)?;
+        py_list.append(dict)?;
+    }
+    Ok(py_list.to_object(py))
+}
+
 #[pymodule]
 fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_header_info_py, m)?)?;
@@ -260,5 +308,8 @@ fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lihat_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(ubah_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(cari_pattern_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_sections_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_symbols_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_dynamic_section_elf_py, m)?)?;
     Ok(())
 }

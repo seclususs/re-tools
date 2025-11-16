@@ -10,6 +10,7 @@ use crate::logic::tracer::platform_windows;
 use crate::logic::static_analysis::analyzer::{
     c_deteksi_pattern_rs, c_get_strings_list, c_hitung_entropy_rs, c_scan_yara_rs,
 };
+use crate::logic::static_analysis::binary::Binary;
 use crate::logic::static_analysis::cfg::c_generate_cfg_rs;
 use crate::logic::static_analysis::diff::c_diff_binary_rs;
 use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm, C_Instruksi};
@@ -20,16 +21,25 @@ use crate::logic::static_analysis::parser::{
 };
 use crate::logic::tracer::state::{ambil_state, StateDebuggerInternal};
 use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
-use crate::utils::c_free_string;
+use crate::utils::{c_free_string, strncpy_rs};
+use crate::error::ReToolsError;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 
 use libc::{c_char, c_int, c_void};
-use log::{debug, error};
+use log::{debug, error, warn};
 use std::collections::HashMap;
+use std::ffi::{CStr, CString};
 use std::ptr::null_mut;
-use std::ffi::CString;
 use std::slice;
 
+
+#[allow(non_camel_case_types)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct C_ElfDynamicInfo {
+    pub tag_name: [c_char; 64],
+    pub value: u64,
+}
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
@@ -94,6 +104,48 @@ pub unsafe extern "C" fn c_getDaftarSimbol(
     max_count: c_int,
 ) -> c_int {
     unsafe { c_get_daftar_simbol(file_path_c, out_buffer, max_count) }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getDaftarDynamicElf(
+    file_path_c: *const c_char,
+    out_buffer: *mut C_ElfDynamicInfo,
+    max_count: c_int,
+) -> c_int {
+    if out_buffer.is_null() || max_count <= 0 {
+        error!("Buffer output invalid atau max_count <= 0");
+        return -1;
+    }
+    let path_str_result = CStr::from_ptr(file_path_c).to_str();
+    let binary_result = match path_str_result {
+        Ok(path_str) => Binary::load(path_str),
+        Err(e) => Err(ReToolsError::from(e)),
+    };
+    match binary_result {
+        Ok(binary) => {
+            let entries = &binary.elf_dynamic_info;
+            if entries.len() > max_count as usize {
+                warn!(
+                    "Jumlah dynamic entries ({}) melebihi max_count ({})",
+                    entries.len(),
+                    max_count
+                );
+                return -1;
+            }
+            let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
+            for (i, entry) in entries.iter().enumerate() {
+                let out_item = &mut out_slice[i];
+                strncpy_rs(&entry.tag_name, &mut out_item.tag_name);
+                out_item.value = entry.value;
+            }
+            entries.len() as c_int
+        }
+        Err(e) => {
+            error!("Gagal load binary di c_getDaftarDynamicElf: {}", e);
+            -1
+        }
+    }
 }
 
 #[allow(non_snake_case)]
