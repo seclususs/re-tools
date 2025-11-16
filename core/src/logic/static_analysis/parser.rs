@@ -1,335 +1,562 @@
-use libc::{c_char, c_int};
-use std::ffi::CStr;
-use std::slice;
+use crate::error::ReToolsError;
+use goblin::elf::dynamic;
+use goblin::elf::sym;
+use goblin::Object;
+use serde::Serialize;
+use std::fs;
 
-use crate::error::{set_last_error, ReToolsError};
-use crate::logic::static_analysis::binary::{Binary, InternalHeaderInfo};
-use crate::utils::strncpy_rs;
-use log::info;
 
-#[allow(non_snake_case)]
-#[deprecated(
-    note = "Gunakan Binary::load() secara internal. Fungsi ini dipertahankan hanya untuk C-API."
-)]
-pub fn parse_header_info_internal(
-    file_path: &str,
-) -> Result<InternalHeaderInfo, ReToolsError> {
-    Binary::load(file_path).map(|b| b.header)
-}
-
-#[allow(non_camel_case_types)]
-#[repr(C)]
-pub struct C_HeaderInfo {
-    pub valid: i32,
-    pub format: [c_char; 64],
-    pub arch: [c_char; 64],
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct InternalHeaderInfo {
+    pub valid: bool,
+    pub format: &'static str,
+    pub arch: &'static str,
     pub bits: u16,
     pub entry_point: u64,
     pub machine_id: u64,
-    pub is_lib: i32,
+    pub is_lib: bool,
     pub file_size: u64,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_SectionInfo {
-    pub name: [c_char; 128],
+impl InternalHeaderInfo {
+    pub fn invalid() -> Self {
+        InternalHeaderInfo {
+            valid: false,
+            format: "Unknown",
+            arch: "Unknown",
+            bits: 0,
+            entry_point: 0,
+            machine_id: 0,
+            is_lib: false,
+            file_size: 0,
+        }
+    }
+    pub fn arch_from_elf_machine(machine: u16) -> &'static str {
+        match machine {
+            goblin::elf::header::EM_X86_64 => "x86-64",
+            goblin::elf::header::EM_386 => "x86",
+            goblin::elf::header::EM_AARCH64 => "AArch64",
+            goblin::elf::header::EM_ARM => "ARM",
+            _ => "Unknown",
+        }
+    }
+    pub fn arch_from_pe_machine(machine: u16) -> &'static str {
+        match machine {
+            goblin::pe::header::COFF_MACHINE_X86_64 => "x86-64",
+            goblin::pe::header::COFF_MACHINE_X86 => "x86",
+            goblin::pe::header::COFF_MACHINE_ARM64 => "AArch64",
+            goblin::pe::header::COFF_MACHINE_ARMNT => "ARM",
+            _ => "Unknown",
+        }
+    }
+    pub fn arch_from_macho_cputype(cputype: u32) -> &'static str {
+        match cputype {
+            c if c == goblin::mach::cputype::CPU_TYPE_X86_64
+                || c == goblin::mach::cputype::CPU_TYPE_X86 =>
+            {
+                "x86"
+            }
+            c if c == goblin::mach::cputype::CPU_TYPE_ARM64
+                || c == goblin::mach::cputype::CPU_TYPE_ARM =>
+            {
+                "ARM"
+            }
+            _ => "Unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SectionInfo {
+    pub name: String,
     pub addr: u64,
     pub size: u64,
     pub offset: u64,
     pub flags: u64,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_SymbolInfo {
-    pub name: [c_char; 128],
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolInfo {
+    pub name: String,
     pub addr: u64,
     pub size: u64,
-    pub symbol_type: [c_char; 64],
-    pub bind: [c_char; 64],
+    pub symbol_type: String,
+    pub bind: String,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_ImportInfo {
-    pub name: [c_char; 128],
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportInfo {
+    pub name: String,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_ExportInfo {
-    pub name: [c_char; 128],
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportInfo {
+    pub name: String,
     pub addr: u64,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct C_ElfDynamicInfo {
-    pub tag_name: [c_char; 64],
+#[derive(Debug, Clone, Serialize)]
+pub struct ElfDynamicInfo {
+    pub tag_name: String,
     pub value: u64,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct C_DiffResult {
-    pub function_name: [c_char; 128],
-    pub address_file1: u64,
-    pub address_file2: u64,
-    pub status: c_int,
+#[derive(Debug)]
+pub struct Binary {
+    pub file_path: String,
+    pub file_bytes: Vec<u8>,
+    pub header: InternalHeaderInfo,
+    pub sections: Vec<SectionInfo>,
+    pub symbols: Vec<SymbolInfo>,
+    pub imports: Vec<ImportInfo>,
+    pub exports: Vec<ExportInfo>,
+    pub elf_dynamic_info: Vec<ElfDynamicInfo>,
 }
 
-#[allow(non_snake_case)]
-pub unsafe fn c_get_binary_header(
-    file_path_c: *const c_char,
-    out_header: *mut C_HeaderInfo,
-) -> c_int {
-    let path_str_result = CStr::from_ptr(file_path_c).to_str();
-    let binary_result = match path_str_result {
-        Ok(path_str) => Binary::load(path_str),
-        Err(e) => Err(ReToolsError::from(e)),
-    };
-    match binary_result {
-        Ok(binary) => {
-            let header_info = &binary.header;
-            let out = &mut *out_header;
-            out.valid = if header_info.valid { 1 } else { 0 };
-            strncpy_rs(header_info.format, &mut out.format);
-            strncpy_rs(header_info.arch, &mut out.arch);
-            out.bits = header_info.bits;
-            out.entry_point = header_info.entry_point;
-            out.machine_id = header_info.machine_id;
-            out.is_lib = if header_info.is_lib { 1 } else { 0 };
-            out.file_size = header_info.file_size;
-            0
-        }
-        Err(e) => {
-            set_last_error(e);
-            -1
+impl Binary {
+    pub fn load(file_path: &str) -> Result<Self, ReToolsError> {
+        let file_bytes = fs::read(file_path)?;
+        let file_path_string = file_path.to_string();
+        let obj = Object::parse(&file_bytes)
+            .map_err(|e| ReToolsError::ParseError(e.to_string()))?;
+        let header = Self::parse_header_internal(&obj, file_bytes.len() as u64)?;
+        let sections = Self::parse_sections_internal(&obj)?;
+        let symbols = Self::parse_symbols_internal(&obj)?;
+        let imports = Self::parse_imports_internal(&obj)?;
+        let exports = Self::parse_exports_internal(&obj)?;
+        let elf_dynamic_info = Self::parse_elf_dynamic_info_internal(&obj)?;
+        Ok(Binary {
+            file_path: file_path_string,
+            file_bytes,
+            header,
+            sections,
+            symbols,
+            imports,
+            exports,
+            elf_dynamic_info,
+        })
+    }
+    fn parse_header_internal(
+        obj: &Object,
+        file_size: u64,
+    ) -> Result<InternalHeaderInfo, ReToolsError> {
+        match obj {
+            Object::Elf(elf) => {
+                let machine_id = elf.header.e_machine;
+                Ok(InternalHeaderInfo {
+                    valid: true,
+                    format: "ELF",
+                    arch: InternalHeaderInfo::arch_from_elf_machine(machine_id),
+                    bits: if elf.is_64 { 64 } else { 32 },
+                    entry_point: elf.entry,
+                    machine_id: machine_id as u64,
+                    is_lib: elf.header.e_type == goblin::elf::header::ET_DYN,
+                    file_size,
+                })
+            }
+            Object::PE(pe) => {
+                let machine_id = pe.header.coff_header.machine;
+                Ok(InternalHeaderInfo {
+                    valid: true,
+                    format: "PE",
+                    arch: InternalHeaderInfo::arch_from_pe_machine(machine_id),
+                    bits: if pe.is_64 { 64 } else { 32 },
+                    entry_point: pe.entry as u64,
+                    machine_id: machine_id as u64,
+                    is_lib: pe.is_lib,
+                    file_size,
+                })
+            }
+            Object::Mach(mach) => {
+                let (format_str, bits, machine_id, entry, is_lib) = match mach {
+                    goblin::mach::Mach::Binary(macho) => (
+                        "Mach-O",
+                        if macho.is_64 { 64 } else { 32 },
+                        macho.header.cputype() as u64,
+                        macho.entry,
+                        macho.header.filetype == goblin::mach::header::MH_DYLIB,
+                    ),
+                    goblin::mach::Mach::Fat(multiarch) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = multiarch.get(0) {
+                            (
+                                "Mach-O (Fat)",
+                                if macho.is_64 { 64 } else { 32 },
+                                macho.header.cputype() as u64,
+                                macho.entry,
+                                macho.header.filetype == goblin::mach::header::MH_DYLIB,
+                            )
+                        } else {
+                            ("Mach-O (Fat-Empty/Archive)", 0, 0, 0, false)
+                        }
+                    }
+                };
+                Ok(InternalHeaderInfo {
+                    valid: true,
+                    format: format_str,
+                    arch: InternalHeaderInfo::arch_from_macho_cputype(machine_id as u32),
+                    bits,
+                    entry_point: entry,
+                    machine_id,
+                    is_lib,
+                    file_size,
+                })
+            }
+            Object::Archive(_) => Ok(InternalHeaderInfo {
+                valid: true,
+                format: "Archive (.a/.lib)",
+                file_size,
+                ..InternalHeaderInfo::invalid()
+            }),
+            _ => Ok(InternalHeaderInfo {
+                file_size,
+                ..InternalHeaderInfo::invalid()
+            }),
         }
     }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn c_get_daftar_sections(
-    file_path_c: *const c_char,
-    out_buffer: *mut C_SectionInfo,
-    max_count: c_int,
-) -> c_int {
-    unsafe {
-        if out_buffer.is_null() || max_count <= 0 {
-            set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
-            return -1;
-        }
-        let path_str_result = CStr::from_ptr(file_path_c).to_str();
-        let binary_result = match path_str_result {
-            Ok(path_str) => Binary::load(path_str),
-            Err(e) => Err(ReToolsError::from(e)),
-        };
-        match binary_result {
-            Ok(binary) => {
-                let sections = &binary.sections;
-                if sections.len() > max_count as usize {
-                    set_last_error(ReToolsError::Generic(format!(
-                        "Jumlah sections ({}) melebihi max_count ({})",
-                        sections.len(),
-                        max_count
-                    )));
-                    return -1;
+    fn parse_sections_internal(obj: &Object) -> Result<Vec<SectionInfo>, ReToolsError> {
+        match obj {
+            Object::Elf(elf) => {
+                let mut sections_vec = Vec::new();
+                for section in &elf.section_headers {
+                    let section_name =
+                        elf.shdr_strtab.get_at(section.sh_name).unwrap_or("(unknown)");
+                    sections_vec.push(SectionInfo {
+                        name: section_name.to_string(),
+                        addr: section.sh_addr,
+                        size: section.sh_size,
+                        offset: section.sh_offset,
+                        flags: section.sh_flags,
+                    });
                 }
-                info!("Ditemukan {} sections", sections.len());
-                let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
-                for (i, section) in sections.iter().enumerate() {
-                    let out_item = &mut out_slice[i];
-                    strncpy_rs(&section.name, &mut out_item.name);
-                    out_item.addr = section.addr;
-                    out_item.size = section.size;
-                    out_item.offset = section.offset;
-                    out_item.flags = section.flags;
+                Ok(sections_vec)
+            }
+            Object::PE(pe) => {
+                let mut sections_vec = Vec::new();
+                for section in &pe.sections {
+                    let section_name = section.name().unwrap_or("(unknown)");
+                    sections_vec.push(SectionInfo {
+                        name: section_name.to_string(),
+                        addr: section.virtual_address as u64,
+                        size: section.virtual_size as u64,
+                        offset: section.pointer_to_raw_data as u64,
+                        flags: section.characteristics as u64,
+                    });
                 }
-                sections.len() as c_int
+                Ok(sections_vec)
             }
-            Err(e) => {
-                set_last_error(e);
-                -1
+            Object::Mach(mach) => {
+                let mut sections_vec = Vec::new();
+                match mach {
+                    goblin::mach::Mach::Binary(m) => {
+                        let segments_iter = m.segments.iter();
+                        for segment in segments_iter {
+                            for section_result in segment {
+                                if let Ok((section, _data)) = section_result {
+                                    sections_vec.push(SectionInfo {
+                                        name: section.name().unwrap_or("?").to_string(),
+                                        addr: section.addr,
+                                        size: section.size,
+                                        offset: section.offset as u64,
+                                        flags: section.flags as u64,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    goblin::mach::Mach::Fat(m) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = m.get(0) {
+                            let segments_iter = macho.segments.iter();
+                            for segment in segments_iter {
+                                for section_result in segment {
+                                    if let Ok((section, _data)) = section_result {
+                                        sections_vec.push(SectionInfo {
+                                            name: section.name().unwrap_or("?").to_string(),
+                                            addr: section.addr,
+                                            size: section.size,
+                                            offset: section.offset as u64,
+                                            flags: section.flags as u64,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            return Ok(Vec::new());
+                        }
+                    }
+                };
+                Ok(sections_vec)
             }
+            _ => Ok(Vec::new()),
         }
     }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn c_get_daftar_simbol(
-    file_path_c: *const c_char,
-    out_buffer: *mut C_SymbolInfo,
-    max_count: c_int,
-) -> c_int {
-    unsafe {
-        if out_buffer.is_null() || max_count <= 0 {
-            set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
-            return -1;
+    fn st_type_to_str(st_type: u8) -> &'static str {
+        match st_type {
+            goblin::elf::sym::STT_NOTYPE => "NOTYPE",
+            goblin::elf::sym::STT_OBJECT => "OBJECT",
+            goblin::elf::sym::STT_FUNC => "FUNC",
+            goblin::elf::sym::STT_SECTION => "SECTION",
+            goblin::elf::sym::STT_FILE => "FILE",
+            goblin::elf::sym::STT_COMMON => "COMMON",
+            goblin::elf::sym::STT_TLS => "TLS",
+            _ => "OTHER",
         }
-        let path_str_result = CStr::from_ptr(file_path_c).to_str();
-        let binary_result = match path_str_result {
-            Ok(path_str) => Binary::load(path_str),
-            Err(e) => Err(ReToolsError::from(e)),
-        };
-        match binary_result {
-            Ok(binary) => {
-                let all_symbols = &binary.symbols;
-                if all_symbols.len() > max_count as usize {
-                    set_last_error(ReToolsError::Generic(format!(
-                        "Jumlah total simbol ({}) melebihi max_count ({})",
-                        all_symbols.len(),
-                        max_count
-                    )));
-                    return -1;
+    }
+    fn st_bind_to_str(st_bind: u8) -> &'static str {
+        match st_bind {
+            goblin::elf::sym::STB_LOCAL => "LOCAL",
+            goblin::elf::sym::STB_GLOBAL => "GLOBAL",
+            goblin::elf::sym::STB_WEAK => "WEAK",
+            _ => "OTHER_BIND",
+        }
+    }
+    fn parse_symbols_internal(obj: &Object) -> Result<Vec<SymbolInfo>, ReToolsError> {
+        match obj {
+            Object::Elf(elf) => {
+                let mut all_symbols = Vec::new();
+                for sym in &elf.syms {
+                    let symbol_name = elf.strtab.get_at(sym.st_name).unwrap_or("(unknown_static)");
+                    if !symbol_name.is_empty() {
+                        all_symbols.push(SymbolInfo {
+                            name: symbol_name.to_string(),
+                            addr: sym.st_value,
+                            size: sym.st_size,
+                            symbol_type: Self::st_type_to_str(sym.st_type()).to_string(),
+                            bind: Self::st_bind_to_str(sym.st_bind()).to_string(),
+                        });
+                    }
                 }
-                info!("Total simbol yang diproses: {}", all_symbols.len());
-                let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
-                for (i, sym) in all_symbols.iter().enumerate() {
-                    let out_item = &mut out_slice[i];
-                    strncpy_rs(&sym.name, &mut out_item.name);
-                    out_item.addr = sym.addr;
-                    out_item.size = sym.size;
-                    strncpy_rs(&sym.symbol_type, &mut out_item.symbol_type);
-                    strncpy_rs(&sym.bind, &mut out_item.bind);
+                for sym in &elf.dynsyms {
+                    let symbol_name = elf
+                        .dynstrtab
+                        .get_at(sym.st_name)
+                        .unwrap_or("(unknown_dynamic)");
+                    if !symbol_name.is_empty() {
+                        all_symbols.push(SymbolInfo {
+                            name: symbol_name.to_string(),
+                            addr: sym.st_value,
+                            size: sym.st_size,
+                            symbol_type: Self::st_type_to_str(sym.st_type()).to_string(),
+                            bind: Self::st_bind_to_str(sym.st_bind()).to_string(),
+                        });
+                    }
                 }
-                all_symbols.len() as c_int
+                Ok(all_symbols)
             }
-            Err(e) => {
-                set_last_error(e);
-                -1
+            Object::PE(_pe) => {
+                Ok(Vec::new())
             }
+            Object::Mach(mach) => {
+                let mut all_symbols = Vec::new();
+                fn process_symbols<'a>(
+                    symbols: goblin::mach::symbols::SymbolIterator<'a>,
+                    all_symbols: &mut Vec<SymbolInfo>,
+                ) {
+                    for symbol_result in symbols {
+                        if let Ok(symbol) = symbol_result {
+                            let name = symbol.0;
+                            let nlist = symbol.1;
+                            all_symbols.push(SymbolInfo {
+                                name: name.to_string(),
+                                addr: nlist.n_value,
+                                size: 0,
+                                symbol_type: "".to_string(),
+                                bind: "".to_string(),
+                            });
+                        }
+                    }
+                }
+                match mach {
+                    goblin::mach::Mach::Binary(m) => {
+                        process_symbols(m.symbols(), &mut all_symbols);
+                    }
+                    goblin::mach::Mach::Fat(m) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = m.get(0) {
+                            process_symbols(macho.symbols(), &mut all_symbols);
+                        }
+                    }
+                };
+                Ok(all_symbols)
+            }
+            _ => Ok(Vec::new()),
         }
     }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn c_get_daftar_imports(
-    file_path_c: *const c_char,
-    out_buffer: *mut C_ImportInfo,
-    max_count: c_int,
-) -> c_int {
-    if out_buffer.is_null() || max_count <= 0 {
-        set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
-        return -1;
-    }
-    let path_str_result = CStr::from_ptr(file_path_c).to_str();
-    let binary_result = match path_str_result {
-        Ok(path_str) => Binary::load(path_str),
-        Err(e) => Err(ReToolsError::from(e)),
-    };
-    match binary_result {
-        Ok(binary) => {
-            let imports = &binary.imports;
-            if imports.len() > max_count as usize {
-                set_last_error(ReToolsError::Generic(format!(
-                    "Jumlah imports ({}) melebihi max_count ({})",
-                    imports.len(),
-                    max_count
-                )));
-                return -1;
+    fn parse_imports_internal(obj: &Object) -> Result<Vec<ImportInfo>, ReToolsError> {
+        let mut imports_vec = Vec::new();
+        match obj {
+            Object::Elf(elf) => {
+                imports_vec = elf
+                    .dynsyms
+                    .iter()
+                    .filter(|sym| sym.is_import())
+                    .filter_map(|sym| elf.dynstrtab.get_at(sym.st_name))
+                    .filter(|name| !name.is_empty())
+                    .map(|name| ImportInfo {
+                        name: name.to_string(),
+                    })
+                    .collect();
             }
-            let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
-            for (i, import_info) in imports.iter().enumerate() {
-                let out_item = &mut out_slice[i];
-                strncpy_rs(&import_info.name, &mut out_item.name);
+            Object::PE(pe) => {
+                for import in &pe.imports {
+                    imports_vec.push(ImportInfo {
+                        name: import.name.to_string(),
+                    });
+                }
             }
-            imports.len() as c_int
-        }
-        Err(e) => {
-            set_last_error(e);
-            -1
-        }
-    }
-}
-
-#[allow(non_snake_case)]
-pub unsafe fn c_get_daftar_exports(
-    file_path_c: *const c_char,
-    out_buffer: *mut C_ExportInfo,
-    max_count: c_int,
-) -> c_int {
-    if out_buffer.is_null() || max_count <= 0 {
-        set_last_error(ReToolsError::Generic("Buffer output invalid atau max_count <= 0".to_string()));
-        return -1;
-    }
-    let path_str_result = CStr::from_ptr(file_path_c).to_str();
-    let binary_result = match path_str_result {
-        Ok(path_str) => Binary::load(path_str),
-        Err(e) => Err(ReToolsError::from(e)),
-    };
-    match binary_result {
-        Ok(binary) => {
-            let exports = &binary.exports;
-            if exports.len() > max_count as usize {
-                set_last_error(ReToolsError::Generic(format!(
-                    "Jumlah exports ({}) melebihi max_count ({})",
-                    exports.len(),
-                    max_count
-                )));
-                return -1;
+            Object::Mach(mach) => {
+                match mach {
+                    goblin::mach::Mach::Binary(m) => {
+                        if let Ok(imports) = m.imports() {
+                            for import in imports {
+                                imports_vec.push(ImportInfo {
+                                    name: import.name.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    goblin::mach::Mach::Fat(m) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = m.get(0) {
+                            if let Ok(imports) = macho.imports() {
+                                for import in imports {
+                                    imports_vec.push(ImportInfo {
+                                        name: import.name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                };
             }
-            let out_slice = slice::from_raw_parts_mut(out_buffer, max_count as usize);
-            for (i, export_info) in exports.iter().enumerate() {
-                let out_item = &mut out_slice[i];
-                strncpy_rs(&export_info.name, &mut out_item.name);
-                out_item.addr = export_info.addr;
+            _ => {}
+        }
+        Ok(imports_vec)
+    }
+    fn parse_exports_internal(obj: &Object) -> Result<Vec<ExportInfo>, ReToolsError> {
+        let mut exports_vec = Vec::new();
+        match obj {
+            Object::Elf(elf) => {
+                exports_vec = elf
+                    .dynsyms
+                    .iter()
+                    .filter_map(|sym| {
+                        let bind = sym::st_bind(sym.st_info);
+                        let type_ = sym::st_type(sym.st_info);
+                        let vis = sym::st_visibility(sym.st_other);
+                        if !sym.is_import()
+                            && (bind == sym::STB_GLOBAL || bind == sym::STB_WEAK)
+                            && type_ == sym::STT_FUNC
+                            && vis != sym::STV_HIDDEN
+                        {
+                            elf.dynstrtab
+                                .get_at(sym.st_name)
+                                .map(|name| (name, sym.st_value))
+                        } else {
+                            None
+                        }
+                    })
+                    .filter(|(name, _addr)| !name.is_empty())
+                    .map(|(name, addr)| ExportInfo {
+                        name: name.to_string(),
+                        addr,
+                    })
+                    .collect();
             }
-            exports.len() as c_int
+            Object::PE(pe) => {
+                for export in &pe.exports {
+                    if let Some(name) = export.name {
+                        exports_vec.push(ExportInfo {
+                            name: name.to_string(),
+                            addr: export.rva as u64,
+                        });
+                    }
+                }
+            }
+            Object::Mach(mach) => {
+                match mach {
+                    goblin::mach::Mach::Binary(m) => {
+                        if let Ok(exports) = m.exports() {
+                            for export in exports {
+                                exports_vec.push(ExportInfo {
+                                    name: export.name.to_string(),
+                                    addr: export.offset,
+                                });
+                            }
+                        }
+                    }
+                    goblin::mach::Mach::Fat(m) => {
+                        if let Ok(goblin::mach::SingleArch::MachO(macho)) = m.get(0) {
+                            if let Ok(exports) = macho.exports() {
+                                for export in exports {
+                                    exports_vec.push(ExportInfo {
+                                        name: export.name.to_string(),
+                                        addr: export.offset,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                };
+            }
+            _ => {}
         }
-        Err(e) => {
-            set_last_error(e);
-            -1
+        Ok(exports_vec)
+    }
+    fn elf_tag_to_str(tag: u64) -> &'static str {
+        match tag {
+            dynamic::DT_NULL => "DT_NULL",
+            dynamic::DT_NEEDED => "DT_NEEDED",
+            dynamic::DT_PLTRELSZ => "DT_PLTRELSZ",
+            dynamic::DT_PLTGOT => "DT_PLTGOT",
+            dynamic::DT_HASH => "DT_HASH",
+            dynamic::DT_STRTAB => "DT_STRTAB",
+            dynamic::DT_SYMTAB => "DT_SYMTAB",
+            dynamic::DT_RELA => "DT_RELA",
+            dynamic::DT_RELASZ => "DT_RELASZ",
+            dynamic::DT_RELAENT => "DT_RELAENT",
+            dynamic::DT_STRSZ => "DT_STRSZ",
+            dynamic::DT_SYMENT => "DT_SYMENT",
+            dynamic::DT_INIT => "DT_INIT",
+            dynamic::DT_FINI => "DT_FINI",
+            dynamic::DT_SONAME => "DT_SONAME",
+            dynamic::DT_RPATH => "DT_RPATH",
+            dynamic::DT_SYMBOLIC => "DT_SYMBOLIC",
+            dynamic::DT_REL => "DT_REL",
+            dynamic::DT_RELSZ => "DT_RELSZ",
+            dynamic::DT_RELENT => "DT_RELENT",
+            dynamic::DT_PLTREL => "DT_PLTREL",
+            dynamic::DT_DEBUG => "DT_DEBUG",
+            dynamic::DT_TEXTREL => "DT_TEXTREL",
+            dynamic::DT_JMPREL => "DT_JMPREL",
+            dynamic::DT_BIND_NOW => "DT_BIND_NOW",
+            dynamic::DT_INIT_ARRAY => "DT_INIT_ARRAY",
+            dynamic::DT_FINI_ARRAY => "DT_FINI_ARRAY",
+            dynamic::DT_INIT_ARRAYSZ => "DT_INIT_ARRAYSZ",
+            dynamic::DT_FINI_ARRAYSZ => "DT_FINI_ARRAYSZ",
+            dynamic::DT_RUNPATH => "DT_RUNPATH",
+            dynamic::DT_FLAGS => "DT_FLAGS",
+            dynamic::DT_PREINIT_ARRAY => "DT_PREINIT_ARRAY",
+            dynamic::DT_PREINIT_ARRAYSZ => "DT_PREINIT_ARRAYSZ",
+            dynamic::DT_VERSYM => "DT_VERSYM",
+            dynamic::DT_VERDEF => "DT_VERDEF",
+            dynamic::DT_VERDEFNUM => "DT_VERDEFNUM",
+            dynamic::DT_VERNEED => "DT_VERNEED",
+            dynamic::DT_VERNEEDNUM => "DT_VERNEEDNUM",
+            dynamic::DT_GNU_HASH => "DT_GNU_HASH",
+            _ => "DT_UNKNOWN",
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
-    fn create_dummy_elf(path: &str) -> std::io::Result<()> {
-        let mut file = File::create(path)?;
-        let elf_header: [u8; 64] = [
-            0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x02, 0x00, 0x3e, 0x00, 0x01, 0x00, 0x00, 0x00, 0x40, 0x00, 0x40, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x38, 0x00,
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ];
-        file.write_all(&elf_header)?;
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_header_info_internal_success() {
-        let test_file = "test_elf_parser.bin";
-        create_dummy_elf(test_file).unwrap();
-        let result = Binary::load(test_file).map(|b| b.header);
-        assert!(result.is_ok());
-        let header = result.unwrap();
-        assert!(header.valid);
-        assert_eq!(header.format, "ELF");
-        assert_eq!(header.arch, "x86-64");
-        assert_eq!(header.bits, 64);
-        std::fs::remove_file(test_file).unwrap();
-    }
-
-    #[test]
-    fn test_parse_header_info_internal_not_found() {
-        let result = Binary::load("file_tidak_ada.bin").map(|b| b.header);
-        assert!(result.is_err());
-        match result.err().unwrap() {
-            ReToolsError::IoError(_) => (),
-            _ => panic!("Expected IoError"),
+    fn parse_elf_dynamic_info_internal(obj: &Object) -> Result<Vec<ElfDynamicInfo>, ReToolsError> {
+        if let Object::Elf(elf) = obj {
+            if let Some(dynamic) = &elf.dynamic {
+                let mut entries = Vec::new();
+                for entry in &dynamic.dyns {
+                    entries.push(ElfDynamicInfo {
+                        tag_name: Self::elf_tag_to_str(entry.d_tag).to_string(),
+                        value: entry.d_val,
+                    });
+                }
+                return Ok(entries);
+            }
         }
+        Ok(Vec::new())
     }
 }

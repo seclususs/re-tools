@@ -1,19 +1,15 @@
-use libc::{c_char, c_int};
+use libc::c_int;
 use log::{debug, info};
 use std::collections::HashMap;
-use std::ffi::CStr;
-use std::slice;
 
-use crate::error::{set_last_error, ReToolsError};
-use crate::logic::static_analysis::binary::{Binary, SectionInfo, SymbolInfo};
-use crate::logic::static_analysis::parser::C_DiffResult;
+use crate::error::ReToolsError;
+use crate::logic::static_analysis::parser::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 use crate::logic::ir::instruction::IrInstruction;
-use crate::utils::strncpy_rs;
 
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct DiffResultInternal {
     pub function_name: String,
     pub address_file1: u64,
@@ -100,7 +96,7 @@ fn compare_ir_sequences(
 fn perform_diff_logic(
     binary1: &Binary,
     binary2: &Binary,
-) -> Result<Vec<C_DiffResult>, ReToolsError> {
+) -> Result<Vec<DiffResultInternal>, ReToolsError> {
     let arch1 = get_arch_from_binary(binary1);
     let arch2 = get_arch_from_binary(binary2);
     let symbols1_map: HashMap<String, &SymbolInfo> = binary1
@@ -120,37 +116,36 @@ fn perform_diff_logic(
         symbols1_map.len(),
         symbols2_map.len()
     );
-    let mut results: Vec<C_DiffResult> = Vec::new();
+    let mut results: Vec<DiffResultInternal> = Vec::new();
     let mut processed_names: HashMap<String, bool> = HashMap::new();
+    let status_map = ["Matched", "Modified", "Removed", "Added", "Unknown"];
     debug!("Membandingkan simbol dari file 1...");
     for (name, sym1) in &symbols1_map {
         processed_names.insert(name.clone(), true);
-        let mut result_entry = C_DiffResult {
-            function_name: [0; 128],
-            address_file1: sym1.addr,
-            address_file2: 0,
-            status: STATUS_REMOVED,
-        };
-        strncpy_rs(name, &mut result_entry.function_name);
+        let mut status_code = STATUS_REMOVED;
+        let mut addr2 = 0;
         let irs1 = lift_function_to_ir(binary1, sym1, arch1);
         if let Some(sym2) = symbols2_map.get(name) {
-            result_entry.address_file2 = sym2.addr;
+            addr2 = sym2.addr;
             let irs2 = lift_function_to_ir(binary2, sym2, arch2);
-            result_entry.status = compare_ir_sequences(irs1, irs2);
+            status_code = compare_ir_sequences(irs1, irs2);
         }
-        results.push(result_entry);
+        results.push(DiffResultInternal {
+            function_name: name.clone(),
+            address_file1: sym1.addr,
+            address_file2: addr2,
+            status: status_map[status_code as usize].to_string(),
+        });
     }
     debug!("Mencari simbol yang ditambah di file 2...");
     for (name, sym2) in &symbols2_map {
         if !processed_names.contains_key(name) {
-            let mut result_entry = C_DiffResult {
-                function_name: [0; 128],
+            results.push(DiffResultInternal {
+                function_name: name.clone(),
                 address_file1: 0,
                 address_file2: sym2.addr,
-                status: STATUS_ADDED,
-            };
-            strncpy_rs(name, &mut result_entry.function_name);
-            results.push(result_entry);
+                status: status_map[STATUS_ADDED as usize].to_string(),
+            });
         }
     }
     Ok(results)
@@ -163,81 +158,7 @@ pub fn diff_binary_internal(
     info!("Mulai diff binary: {} vs {}", file1_path, file2_path);
     let binary1 = Binary::load(file1_path).map_err(|e| e.to_string())?;
     let binary2 = Binary::load(file2_path).map_err(|e| e.to_string())?;
-    let c_results = perform_diff_logic(&binary1, &binary2).map_err(|e| e.to_string())?;
-    info!("Diff selesai, {} hasil ditemukan", c_results.len());
-    let status_map = ["Matched", "Modified", "Removed", "Added", "Unknown"];
-    let mut rust_results: Vec<DiffResultInternal> = Vec::new();
-    for res in &c_results {
-        let func_name = unsafe { CStr::from_ptr(res.function_name.as_ptr()).to_str().unwrap_or("") };
-        let status_str = status_map
-            .get(res.status as usize)
-            .unwrap_or(&status_map[4]);
-        rust_results.push(DiffResultInternal {
-            function_name: func_name.to_string(),
-            address_file1: res.address_file1,
-            address_file2: res.address_file2,
-            status: status_str.to_string(),
-        });
-    }
-    Ok(rust_results)
-}
-
-pub unsafe fn c_diff_binary_rs(
-    file1_c: *const c_char,
-    file2_c: *const c_char,
-    out_results: *mut C_DiffResult,
-    max_results: c_int,
-) -> c_int {
-    if out_results.is_null() || max_results <= 0 {
-        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_diff_binary_rs".to_string()));
-        return -1;
-    }
-    let path_str1 = match CStr::from_ptr(file1_c).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return -1;
-        }
-    };
-    let path_str2 = match CStr::from_ptr(file2_c).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return -1;
-        }
-    };
-    let binary1 = match Binary::load(path_str1) {
-        Ok(b) => b,
-        Err(e) => {
-            set_last_error(e);
-            return -1;
-        }
-    };
-    let binary2 = match Binary::load(path_str2) {
-        Ok(b) => b,
-        Err(e) => {
-            set_last_error(e);
-            return -1;
-        }
-    };
-    let results = match perform_diff_logic(&binary1, &binary2) {
-        Ok(r) => r,
-        Err(e) => {
-            set_last_error(e);
-            return -1;
-        }
-    };
-    if results.len() > max_results as usize {
-        set_last_error(ReToolsError::Generic(format!(
-            "Jumlah hasil diff ({}) melebihi max_results ({})",
-            results.len(),
-            max_results
-        )));
-        return -1;
-    }
-    let out_slice = slice::from_raw_parts_mut(out_results, max_results as usize);
-    for (i, res) in results.iter().enumerate() {
-        out_slice[i] = *res;
-    }
-    results.len() as c_int
+    let results = perform_diff_logic(&binary1, &binary2).map_err(|e| e.to_string())?;
+    info!("Diff selesai, {} hasil ditemukan", results.len());
+    Ok(results)
 }

@@ -1,15 +1,13 @@
-use crate::error::{set_last_error, ReToolsError};
-use crate::logic::static_analysis::binary::Binary;
+use crate::error::ReToolsError;
+use crate::logic::static_analysis::parser::Binary;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
 
-use libc::c_char;
 use log::{debug, info, warn};
 use petgraph::dot::Dot;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CStr, CString};
 use std::fmt;
 
 
@@ -206,34 +204,4 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
     info!("Pass 3 selesai. Dibuat {} edges", graph.edge_count());
     let dot_str = Dot::with_config(&graph, &[]);
     Ok(format!("{}", dot_str))
-}
-
-pub unsafe fn c_generate_cfg_rs(filename_c: *const c_char) -> *mut c_char {
-    let error_dot = "digraph G {{ error [label=\"Koneksi error\"]; }}";
-    let path_str = match CStr::from_ptr(filename_c).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return CString::new(error_dot.replace("Koneksi error", "Invalid Path UTF-8"))
-                .unwrap()
-                .into_raw();
-        }
-    };
-    let binary_result = Binary::load(path_str);
-    let dot_result = match binary_result {
-        Ok(binary) => match generate_cfg_internal(&binary) {
-            Ok(dot) => dot,
-            Err(e) => {
-                let err_msg = e.to_string();
-                set_last_error(e);
-                format!("digraph G {{ error [label=\"{}\"]; }}", err_msg)
-            }
-        },
-        Err(e) => {
-            let err_msg = e.to_string();
-            set_last_error(e);
-            format!("digraph G {{ error [label=\"{}\"]; }}", err_msg)
-        }
-    };
-    CString::new(dot_result).unwrap_or_default().into_raw()
 }

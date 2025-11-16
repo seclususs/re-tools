@@ -1,13 +1,9 @@
-use crate::error::{set_last_error, ReToolsError};
-use crate::utils::strncpy_rs_from_bytes;
-use libc::{c_char, c_int};
+use crate::error::ReToolsError;
 use log::{debug, info, warn};
 use memchr::memmem::Finder;
-use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::slice;
 
 
 pub fn lihat_bytes_internal(
@@ -72,122 +68,6 @@ pub fn cari_pattern_internal(
 
     info!("Ditemukan {} cocok", offsets.len());
     Ok(offsets)
-}
-
-pub unsafe fn c_lihat_bytes(
-    filename: *const c_char,
-    offset: c_int,
-    length: c_int,
-    out_buffer: *mut c_char,
-    out_buffer_size: c_int,
-) -> c_int {
-    if filename.is_null()
-        || out_buffer.is_null()
-        || out_buffer_size <= 0
-        || offset < 0
-        || length < 0
-    {
-        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_lihat_bytes".to_string()));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return -1;
-        }
-    };
-    match lihat_bytes_internal(path_str, offset as u64, length as usize) {
-        Ok(hex_str) => {
-            let hex_bytes = hex_str.as_bytes();
-            if hex_bytes.len() >= out_buffer_size as usize {
-                set_last_error(ReToolsError::Generic("Buffer output hex tidak cukup".to_string()));
-                return -1;
-            }
-            let out_slice = slice::from_raw_parts_mut(out_buffer, out_buffer_size as usize);
-            strncpy_rs_from_bytes(hex_bytes, out_slice);
-            0
-        }
-        Err(e) => {
-            set_last_error(e);
-            -1
-        }
-    }
-}
-
-pub unsafe fn c_ubah_bytes(
-    filename: *const c_char,
-    offset: c_int,
-    data: *const u8,
-    data_len: c_int,
-) -> c_int {
-    if filename.is_null() || data.is_null() || offset < 0 || data_len <= 0 {
-        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_ubah_bytes".to_string()));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return -1;
-        }
-    };
-    let data_slice = slice::from_raw_parts(data, data_len as usize);
-    match ubah_bytes_internal(path_str, offset as u64, data_slice) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(e) => {
-            set_last_error(e);
-            0
-        }
-    }
-}
-
-pub unsafe fn c_cari_pattern(
-    filename: *const c_char,
-    pattern: *const u8,
-    pattern_len: c_int,
-    out_offsets: *mut c_int,
-    max_offsets: c_int,
-) -> c_int {
-    if filename.is_null()
-        || pattern.is_null()
-        || out_offsets.is_null()
-        || pattern_len <= 0
-        || max_offsets <= 0
-    {
-        set_last_error(ReToolsError::Generic("Invalid arguments untuk c_cari_pattern".to_string()));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(filename).to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            set_last_error(e.into());
-            return -1;
-        }
-    };
-    let pattern_slice = slice::from_raw_parts(pattern, pattern_len as usize);
-    match cari_pattern_internal(path_str, pattern_slice) {
-        Ok(results) => {
-            if results.len() > max_offsets as usize {
-                set_last_error(ReToolsError::Generic(format!(
-                    "Jumlah hasil ({}) melebihi max_offsets ({})",
-                    results.len(),
-                    max_offsets
-                )));
-                return -1;
-            }
-            let out_slice = slice::from_raw_parts_mut(out_offsets, max_offsets as usize);
-            for (i, &res) in results.iter().enumerate() {
-                out_slice[i] = res as c_int;
-            }
-            results.len() as c_int
-        }
-        Err(e) => {
-            set_last_error(e);
-            -1
-        }
-    }
 }
 
 #[cfg(test)]
