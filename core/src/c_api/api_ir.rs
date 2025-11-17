@@ -2,7 +2,7 @@
 
 use crate::error::{set_last_error, ReToolsError};
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm, C_Instruksi};
+use crate::logic::static_analysis::disasm::{decode_satu_instruksi, ArsitekturDisasm, C_Instruksi};
 use crate::logic::tracer::types::u8;
 
 use libc::c_char;
@@ -19,7 +19,7 @@ pub unsafe extern "C" fn c_decodeInstruksi(
     instruction_base_va: u64,
     arch: ArsitekturDisasm,
 ) -> C_Instruksi {
-    logic_decode_instruksi(ptr_data, len_data, offset, instruction_base_va, arch)
+    decode_satu_instruksi(ptr_data, len_data, offset, instruction_base_va, arch)
 }
 
 #[allow(non_snake_case)]

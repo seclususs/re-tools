@@ -72,6 +72,8 @@ impl InternalHeaderInfo {
             ArsitekturDisasm::ARCH_X86_32 => "x86",
             ArsitekturDisasm::ARCH_ARM_64 => "AArch64",
             ArsitekturDisasm::ARCH_ARM_32 => "ARM",
+            ArsitekturDisasm::ARCH_RISCV_32 | ArsitekturDisasm::ARCH_RISCV_64 => "RISC-V",
+            ArsitekturDisasm::ARCH_MIPS_32 | ArsitekturDisasm::ARCH_MIPS_64 => "MIPS",
             ArsitekturDisasm::ARCH_UNKNOWN => "Unknown",
         }
     }
@@ -81,6 +83,10 @@ impl InternalHeaderInfo {
             ArsitekturDisasm::ARCH_X86_32 => 32,
             ArsitekturDisasm::ARCH_ARM_64 => 64,
             ArsitekturDisasm::ARCH_ARM_32 => 32,
+            ArsitekturDisasm::ARCH_RISCV_64 => 64,
+            ArsitekturDisasm::ARCH_RISCV_32 => 32,
+            ArsitekturDisasm::ARCH_MIPS_64 => 64,
+            ArsitekturDisasm::ARCH_MIPS_32 => 32,
             ArsitekturDisasm::ARCH_UNKNOWN => 0,
         }
     }

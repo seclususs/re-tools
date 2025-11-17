@@ -5,7 +5,7 @@ use std::ffi::CStr;
 
 use super::api_static::map_err_to_py;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::static_analysis::disasm::{logic_decode_instruksi, ArsitekturDisasm};
+use crate::logic::static_analysis::disasm::{decode_satu_instruksi, ArsitekturDisasm};
 
 
 #[pyfunction(name = "decodeInstruksi")]
@@ -24,9 +24,13 @@ fn decode_instruksi_py(
         2 => ArsitekturDisasm::ARCH_X86_64,
         3 => ArsitekturDisasm::ARCH_ARM_32,
         4 => ArsitekturDisasm::ARCH_ARM_64,
+        5 => ArsitekturDisasm::ARCH_RISCV_32,
+        6 => ArsitekturDisasm::ARCH_RISCV_64,
+        7 => ArsitekturDisasm::ARCH_MIPS_32,
+        8 => ArsitekturDisasm::ARCH_MIPS_64,
         _ => ArsitekturDisasm::ARCH_UNKNOWN,
     };
-    let c_instr = logic_decode_instruksi(ptr_data, len_data, offset, base_va, arch);
+    let c_instr = decode_satu_instruksi(ptr_data, len_data, offset, base_va, arch);
     let dict = PyDict::new_bound(py);
     dict.set_item("valid", c_instr.valid != 0)?;
     dict.set_item("size", c_instr.ukuran)?;
@@ -62,6 +66,10 @@ fn get_ir_for_instruksi_py(
         2 => ArsitekturDisasm::ARCH_X86_64,
         3 => ArsitekturDisasm::ARCH_ARM_32,
         4 => ArsitekturDisasm::ARCH_ARM_64,
+        5 => ArsitekturDisasm::ARCH_RISCV_32,
+        6 => ArsitekturDisasm::ARCH_RISCV_64,
+        7 => ArsitekturDisasm::ARCH_MIPS_32,
+        8 => ArsitekturDisasm::ARCH_MIPS_64,
         _ => ArsitekturDisasm::ARCH_UNKNOWN,
     };
     match angkat_blok_instruksi(code_slice, base_va, arch) {

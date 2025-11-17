@@ -22,6 +22,19 @@ pub enum IrBinOp {
     And,
     Or,
     Xor,
+    TambahFloat,
+    KurangFloat,
+    KaliFloat,
+    BagiFloat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum IrFlag {
+    BenderaNol,
+    BenderaBawa,
+    BenderaLimpah,
+    BenderaTanda,
+    BenderaParitas,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -45,4 +58,6 @@ pub enum IrInstruction {
     Nop,
     Syscall,
     Undefined,
+    AturBendera(IrFlag, IrExpression),
+    InstruksiVektor(String, Vec<IrOperand>),
 }

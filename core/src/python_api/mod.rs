@@ -15,5 +15,9 @@ fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ARCH_X86_64", ArsitekturDisasm::ARCH_X86_64 as u32)?;
     m.add("ARCH_ARM_32", ArsitekturDisasm::ARCH_ARM_32 as u32)?;
     m.add("ARCH_ARM_64", ArsitekturDisasm::ARCH_ARM_64 as u32)?;
+    m.add("ARCH_RISCV_32", ArsitekturDisasm::ARCH_RISCV_32 as u32)?;
+    m.add("ARCH_RISCV_64", ArsitekturDisasm::ARCH_RISCV_64 as u32)?;
+    m.add("ARCH_MIPS_32", ArsitekturDisasm::ARCH_MIPS_32 as u32)?;
+    m.add("ARCH_MIPS_64", ArsitekturDisasm::ARCH_MIPS_64 as u32)?;
     Ok(())
 }

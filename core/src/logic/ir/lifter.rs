@@ -1,6 +1,6 @@
 use super::instruction::{IrBinOp, IrExpression, IrInstruction, IrOperand, IrUnOp};
 use crate::error::ReToolsError;
-use crate::logic::static_analysis::disasm::ArsitekturDisasm;
+use crate::logic::static_analysis::disasm::{ArsitekturDisasm, buat_instance_capstone_by_arch};
 use capstone::prelude::*;
 use capstone::arch::{
     arm::{ArmInsnDetail, ArmOperand, ArmOperandType},
@@ -10,43 +10,12 @@ use capstone::arch::{
 };
 
 
-fn get_capstone_instance(arch: ArsitekturDisasm) -> Result<Capstone, ReToolsError> {
-    let cs_result = match arch {
-        ArsitekturDisasm::ARCH_X86_32 => Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode32)
-            .detail(true)
-            .build(),
-        ArsitekturDisasm::ARCH_X86_64 => Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .detail(true)
-            .build(),
-        ArsitekturDisasm::ARCH_ARM_32 => Capstone::new()
-            .arm()
-            .mode(arch::arm::ArchMode::Arm)
-            .detail(true)
-            .build(),
-        ArsitekturDisasm::ARCH_ARM_64 => Capstone::new()
-            .arm64()
-            .mode(arch::arm64::ArchMode::Arm)
-            .detail(true)
-            .build(),
-        _ => Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .detail(true)
-            .build(),
-    };
-    cs_result.map_err(ReToolsError::from)
-}
-
 pub fn angkat_blok_instruksi(
     bytes: &[u8],
     va: u64,
     arch: ArsitekturDisasm,
 ) -> Result<(usize, Vec<IrInstruction>), ReToolsError> {
-    let cs = get_capstone_instance(arch)?;
+    let cs = buat_instance_capstone_by_arch(arch)?;
     let insns = cs
         .disasm_count(bytes, va, 1)
         .map_err(ReToolsError::from)?;
@@ -59,7 +28,7 @@ pub fn angkat_blok_instruksi(
     Ok((insn.bytes().len(), ir_instrs))
 }
 
-fn angkat_dari_detail(
+pub fn angkat_dari_detail(
     insn: &capstone::Insn,
     detail: &ArchDetail,
     cs: &Capstone,
@@ -67,15 +36,17 @@ fn angkat_dari_detail(
 ) -> Vec<IrInstruction> {
     match arch {
         ArsitekturDisasm::ARCH_X86_64 | ArsitekturDisasm::ARCH_X86_32 => {
-            lift_x86(insn, detail.x86().unwrap(), cs)
+            angkat_x86(insn, detail.x86().unwrap(), cs)
         }
-        ArsitekturDisasm::ARCH_ARM_32 => lift_arm(insn, detail.arm().unwrap(), cs),
-        ArsitekturDisasm::ARCH_ARM_64 => lift_aarch64(insn, detail.arm64().unwrap(), cs),
+        ArsitekturDisasm::ARCH_ARM_32 => angkat_arm(insn, detail.arm().unwrap(), cs),
+        ArsitekturDisasm::ARCH_ARM_64 => angkat_aarch64(insn, detail.arm64().unwrap(), cs),
+        ArsitekturDisasm::ARCH_RISCV_32 | ArsitekturDisasm::ARCH_RISCV_64 => vec![IrInstruction::Undefined],
+        ArsitekturDisasm::ARCH_MIPS_32 | ArsitekturDisasm::ARCH_MIPS_64 => vec![IrInstruction::Undefined],
         _ => vec![IrInstruction::Undefined],
     }
 }
 
-fn map_x86_operand(op: &X86Operand, cs: &Capstone) -> IrOperand {
+pub fn petakan_operand_x86(op: &X86Operand, cs: &Capstone) -> IrOperand {
     match op.op_type {
         X86OperandType::Reg(reg_id) => {
             let reg_name = cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string());
@@ -136,14 +107,23 @@ fn map_x86_operand(op: &X86Operand, cs: &Capstone) -> IrOperand {
     }
 }
 
-fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec<IrInstruction> {
+pub fn angkat_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec<IrInstruction> {
     let mnem = insn.mnemonic().unwrap_or("");
     let operands: Vec<X86Operand> = detail.operands().collect();
     match mnem {
-        "mov" | "movsx" | "movzx" | "movsd" | "movaps" => {
+        "mov" | "movsx" | "movzx" | "movaps" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
+                vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "movsd" => {
+             if operands.len() == 2 {
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -151,8 +131,8 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         }
         "lea" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src_op = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src_op = petakan_operand_x86(&operands[1], cs);
                 if let IrOperand::Memory(expr) = src_op {
                     vec![IrInstruction::Set(dest, *expr)]
                 } else {
@@ -165,7 +145,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         "push" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Push(IrExpression::Operand(
-                    map_x86_operand(&operands[0], cs),
+                    petakan_operand_x86(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -173,15 +153,15 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         }
         "pop" => {
             if operands.len() == 1 {
-                vec![IrInstruction::Pop(map_x86_operand(&operands[0], cs))]
+                vec![IrInstruction::Pop(petakan_operand_x86(&operands[0], cs))]
             } else {
                 vec![IrInstruction::Undefined]
             }
         }
-        "add" | "addsd" => {
+        "add" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::BinaryOp(
@@ -194,10 +174,26 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
-        "sub" | "subsd" => {
+         "addsd" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::BinaryOp(
+                        IrBinOp::TambahFloat,
+                        Box::new(IrExpression::Operand(dest)),
+                        Box::new(IrExpression::Operand(src)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
+        "sub" => {
+            if operands.len() == 2 {
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::BinaryOp(
@@ -210,10 +206,26 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
+        "subsd" => {
+            if operands.len() == 2 {
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
+                vec![IrInstruction::Set(
+                    dest.clone(),
+                    IrExpression::BinaryOp(
+                        IrBinOp::KurangFloat,
+                        Box::new(IrExpression::Operand(dest)),
+                        Box::new(IrExpression::Operand(src)),
+                    ),
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
         "and" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::BinaryOp(
@@ -228,8 +240,8 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         }
         "or" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::BinaryOp(
@@ -242,10 +254,10 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
-        "xor" | "pxor" => {
+        "xor" => {
             if operands.len() == 2 {
-                let dest = map_x86_operand(&operands[0], cs);
-                let src = map_x86_operand(&operands[1], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::BinaryOp(
@@ -258,9 +270,21 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
                 vec![IrInstruction::Undefined]
             }
         }
+        "pxor" => {
+            if operands.len() == 2 {
+                let dest = petakan_operand_x86(&operands[0], cs);
+                let src = petakan_operand_x86(&operands[1], cs);
+                vec![IrInstruction::InstruksiVektor(
+                    "pxor".to_string(),
+                    vec![dest, src]
+                )]
+            } else {
+                vec![IrInstruction::Undefined]
+            }
+        }
         "not" => {
             if operands.len() == 1 {
-                let dest = map_x86_operand(&operands[0], cs);
+                let dest = petakan_operand_x86(&operands[0], cs);
                 vec![IrInstruction::Set(
                     dest.clone(),
                     IrExpression::UnaryOp(IrUnOp::Not, Box::new(IrExpression::Operand(dest))),
@@ -271,10 +295,10 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         }
         "cmp" => {
             if operands.len() == 2 {
-                let op1 = map_x86_operand(&operands[0], cs);
-                let op2 = map_x86_operand(&operands[1], cs);
+                let op1 = petakan_operand_x86(&operands[0], cs);
+                let op2 = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
-                    IrOperand::Register("eflags".to_string()),
+                    IrOperand::Register("FLAGS".to_string()),
                     IrExpression::Cmp(
                         Box::new(IrExpression::Operand(op1)),
                         Box::new(IrExpression::Operand(op2)),
@@ -286,10 +310,10 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         }
         "test" => {
             if operands.len() == 2 {
-                let op1 = map_x86_operand(&operands[0], cs);
-                let op2 = map_x86_operand(&operands[1], cs);
+                let op1 = petakan_operand_x86(&operands[0], cs);
+                let op2 = petakan_operand_x86(&operands[1], cs);
                 vec![IrInstruction::Set(
-                    IrOperand::Register("eflags".to_string()),
+                    IrOperand::Register("FLAGS".to_string()),
                     IrExpression::Test(
                         Box::new(IrExpression::Operand(op1)),
                         Box::new(IrExpression::Operand(op2)),
@@ -302,7 +326,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         "jmp" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Jmp(IrExpression::Operand(
-                    map_x86_operand(&operands[0], cs),
+                    petakan_operand_x86(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -312,8 +336,8 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         | "jo" | "jno" | "jp" | "jnp" | "js" | "jns" => {
             if operands.len() == 1 {
                 vec![IrInstruction::JmpCond(
-                    IrExpression::Operand(IrOperand::Register("eflags".to_string())),
-                    IrExpression::Operand(map_x86_operand(&operands[0], cs)),
+                    IrExpression::Operand(IrOperand::Register("FLAGS".to_string())),
+                    IrExpression::Operand(petakan_operand_x86(&operands[0], cs)),
                 )]
             } else {
                 vec![IrInstruction::Undefined]
@@ -322,7 +346,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
         "call" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Call(IrExpression::Operand(
-                    map_x86_operand(&operands[0], cs),
+                    petakan_operand_x86(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -335,7 +359,7 @@ fn lift_x86(insn: &capstone::Insn, detail: &X86InsnDetail, cs: &Capstone) -> Vec
     }
 }
 
-fn map_arm_operand(op: &ArmOperand, cs: &Capstone) -> IrOperand {
+pub fn petakan_operand_arm(op: &ArmOperand, cs: &Capstone) -> IrOperand {
     match op.op_type {
         ArmOperandType::Reg(reg_id) => {
             IrOperand::Register(cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string()))
@@ -345,7 +369,7 @@ fn map_arm_operand(op: &ArmOperand, cs: &Capstone) -> IrOperand {
     }
 }
 
-fn lift_arm(
+pub fn angkat_arm(
     insn: &capstone::Insn,
     detail: &ArmInsnDetail,
     cs: &Capstone,
@@ -355,8 +379,8 @@ fn lift_arm(
     match mnem {
         "mov" => {
             if operands.len() == 2 {
-                let dest = map_arm_operand(&operands[0], cs);
-                let src = map_arm_operand(&operands[1], cs);
+                let dest = petakan_operand_arm(&operands[0], cs);
+                let src = petakan_operand_arm(&operands[1], cs);
                 vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -364,9 +388,9 @@ fn lift_arm(
         }
         "add" => {
             if operands.len() == 3 {
-                let dest = map_arm_operand(&operands[0], cs);
-                let src1 = map_arm_operand(&operands[1], cs);
-                let src2 = map_arm_operand(&operands[2], cs);
+                let dest = petakan_operand_arm(&operands[0], cs);
+                let src1 = petakan_operand_arm(&operands[1], cs);
+                let src2 = petakan_operand_arm(&operands[2], cs);
                 vec![IrInstruction::Set(
                     dest,
                     IrExpression::BinaryOp(
@@ -381,9 +405,9 @@ fn lift_arm(
         }
         "sub" => {
             if operands.len() == 3 {
-                let dest = map_arm_operand(&operands[0], cs);
-                let src1 = map_arm_operand(&operands[1], cs);
-                let src2 = map_arm_operand(&operands[2], cs);
+                let dest = petakan_operand_arm(&operands[0], cs);
+                let src1 = petakan_operand_arm(&operands[1], cs);
+                let src2 = petakan_operand_arm(&operands[2], cs);
                 vec![IrInstruction::Set(
                     dest,
                     IrExpression::BinaryOp(
@@ -398,8 +422,8 @@ fn lift_arm(
         }
         "cmp" => {
             if operands.len() == 2 {
-                let op1 = map_arm_operand(&operands[0], cs);
-                let op2 = map_arm_operand(&operands[1], cs);
+                let op1 = petakan_operand_arm(&operands[0], cs);
+                let op2 = petakan_operand_arm(&operands[1], cs);
                 vec![IrInstruction::Set(
                     IrOperand::Register("cpsr".to_string()),
                     IrExpression::Cmp(
@@ -414,7 +438,7 @@ fn lift_arm(
         "b" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Jmp(IrExpression::Operand(
-                    map_arm_operand(&operands[0], cs),
+                    petakan_operand_arm(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -423,7 +447,7 @@ fn lift_arm(
         "bl" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Call(IrExpression::Operand(
-                    map_arm_operand(&operands[0], cs),
+                    petakan_operand_arm(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -438,14 +462,14 @@ fn lift_arm(
         }
         "pop" => {
             if operands.len() >= 1 {
-                vec![IrInstruction::Pop(map_arm_operand(&operands[0], cs))]
+                vec![IrInstruction::Pop(petakan_operand_arm(&operands[0], cs))]
             } else {
                 vec![IrInstruction::Undefined]
             }
         }
         "push" => {
             if operands.len() >= 1 {
-                vec![IrInstruction::Push(IrExpression::Operand(map_arm_operand(
+                vec![IrInstruction::Push(IrExpression::Operand(petakan_operand_arm(
                     &operands[0],
                     cs,
                 )))]
@@ -457,7 +481,7 @@ fn lift_arm(
     }
 }
 
-fn map_aarch64_mem_op(mem_op: &Arm64OpMem, cs: &Capstone) -> IrOperand {
+pub fn petakan_mem_op_aarch64(mem_op: &Arm64OpMem, cs: &Capstone) -> IrOperand {
     let mut expr_opt: Option<Box<IrExpression>> = None;
     if mem_op.base().0 != 0 {
         let base_reg_name = cs
@@ -501,18 +525,18 @@ fn map_aarch64_mem_op(mem_op: &Arm64OpMem, cs: &Capstone) -> IrOperand {
     IrOperand::Memory(expr_opt.unwrap_or(Box::new(IrExpression::Operand(IrOperand::Immediate(0)))))
 }
 
-fn map_aarch64_operand(op: &Arm64Operand, cs: &Capstone) -> IrOperand {
+pub fn petakan_operand_aarch64(op: &Arm64Operand, cs: &Capstone) -> IrOperand {
     match op.op_type {
         Arm64OperandType::Reg(reg_id) => {
             IrOperand::Register(cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string()))
         }
         Arm64OperandType::Imm(imm_val) => IrOperand::Immediate(imm_val as u64),
-        Arm64OperandType::Mem(mem_op) => map_aarch64_mem_op(&mem_op, cs),
+        Arm64OperandType::Mem(mem_op) => petakan_mem_op_aarch64(&mem_op, cs),
         _ => IrOperand::Immediate(0),
     }
 }
 
-fn lift_aarch64(
+pub fn angkat_aarch64(
     insn: &capstone::Insn,
     detail: &Arm64InsnDetail,
     cs: &Capstone,
@@ -522,8 +546,8 @@ fn lift_aarch64(
     match mnem {
         "mov" => {
             if operands.len() == 2 {
-                let dest = map_aarch64_operand(&operands[0], cs);
-                let src = map_aarch64_operand(&operands[1], cs);
+                let dest = petakan_operand_aarch64(&operands[0], cs);
+                let src = petakan_operand_aarch64(&operands[1], cs);
                 vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -531,9 +555,9 @@ fn lift_aarch64(
         }
         "add" => {
             if operands.len() == 3 {
-                let dest = map_aarch64_operand(&operands[0], cs);
-                let src1 = map_aarch64_operand(&operands[1], cs);
-                let src2 = map_aarch64_operand(&operands[2], cs);
+                let dest = petakan_operand_aarch64(&operands[0], cs);
+                let src1 = petakan_operand_aarch64(&operands[1], cs);
+                let src2 = petakan_operand_aarch64(&operands[2], cs);
                 vec![IrInstruction::Set(
                     dest,
                     IrExpression::BinaryOp(
@@ -548,9 +572,9 @@ fn lift_aarch64(
         }
         "sub" => {
             if operands.len() == 3 {
-                let dest = map_aarch64_operand(&operands[0], cs);
-                let src1 = map_aarch64_operand(&operands[1], cs);
-                let src2 = map_aarch64_operand(&operands[2], cs);
+                let dest = petakan_operand_aarch64(&operands[0], cs);
+                let src1 = petakan_operand_aarch64(&operands[1], cs);
+                let src2 = petakan_operand_aarch64(&operands[2], cs);
                 vec![IrInstruction::Set(
                     dest,
                     IrExpression::BinaryOp(
@@ -565,8 +589,8 @@ fn lift_aarch64(
         }
         "cmp" => {
             if operands.len() == 2 {
-                let op1 = map_aarch64_operand(&operands[0], cs);
-                let op2 = map_aarch64_operand(&operands[1], cs);
+                let op1 = petakan_operand_aarch64(&operands[0], cs);
+                let op2 = petakan_operand_aarch64(&operands[1], cs);
                 vec![IrInstruction::Set(
                     IrOperand::Register("pstate".to_string()),
                     IrExpression::Cmp(
@@ -581,7 +605,7 @@ fn lift_aarch64(
         "b" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Jmp(IrExpression::Operand(
-                    map_aarch64_operand(&operands[0], cs),
+                    petakan_operand_aarch64(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -590,7 +614,7 @@ fn lift_aarch64(
         "bl" => {
             if operands.len() == 1 {
                 vec![IrInstruction::Call(IrExpression::Operand(
-                    map_aarch64_operand(&operands[0], cs),
+                    petakan_operand_aarch64(&operands[0], cs),
                 ))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -599,8 +623,8 @@ fn lift_aarch64(
         "ret" => vec![IrInstruction::Ret],
         "ldr" => {
             if operands.len() == 2 {
-                let dest = map_aarch64_operand(&operands[0], cs);
-                let src = map_aarch64_operand(&operands[1], cs);
+                let dest = petakan_operand_aarch64(&operands[0], cs);
+                let src = petakan_operand_aarch64(&operands[1], cs);
                 vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
             } else {
                 vec![IrInstruction::Undefined]
@@ -608,8 +632,8 @@ fn lift_aarch64(
         }
         "str" => {
             if operands.len() == 2 {
-                let src = map_aarch64_operand(&operands[0], cs);
-                let dest = map_aarch64_operand(&operands[1], cs);
+                let src = petakan_operand_aarch64(&operands[0], cs);
+                let dest = petakan_operand_aarch64(&operands[1], cs);
                 vec![IrInstruction::Set(dest, IrExpression::Operand(src))]
             } else {
                 vec![IrInstruction::Undefined]
