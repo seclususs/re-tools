@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use crate::error::ReToolsError;
 use log::{debug, info, warn};
 use memchr::memmem::Finder;

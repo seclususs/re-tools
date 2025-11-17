@@ -1,7 +1,9 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::ir::instruction::{IrExpressionSsa, IrInstructionSsa, IrOperandSsa};
+use crate::logic::ir::instruction::{MicroExpr, MicroInstruction, MicroOperand};
 use goblin::elf::dynamic;
 use goblin::elf::sym;
 use goblin::Object;
@@ -270,7 +272,7 @@ impl Binary {
                 let va = base_addr + offset as u64;
                 let (size, irs) = match angkat_blok_instruksi(&section_data[offset..], va, arch) {
                     Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-                    _ => (1, vec![IrInstructionSsa::TidakTerdefinisi]),
+                    _ => (1, vec![MicroInstruction::TidakTerdefinisi]),
                 };
                 if size == 0 { 
                     warn!("Disasm size 0 pada 0x{:x}, break", va);
@@ -286,20 +288,20 @@ impl Binary {
         Ok((call_graph, data_access_graph))
     }
     fn analyze_ir_for_xrefs(
-        ir: IrInstructionSsa,
+        ir: MicroInstruction,
         instr_va: u64,
         call_graph: &mut HashMap<u64, Vec<u64>>,
         data_access_graph: &mut HashMap<u64, Vec<u64>>,
         binary: &Binary,
     ) {
         match ir {
-            IrInstructionSsa::Panggil(expr) => {
+            MicroInstruction::Panggil(expr) => {
                 if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
                     call_graph.entry(instr_va).or_default().push(target_va);
                 }
                 Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
             }
-            IrInstructionSsa::Lompat(expr) => {
+            MicroInstruction::Lompat(expr) => {
                 if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
                     if binary.symbols.iter().any(|s| s.addr == target_va && s.symbol_type == "FUNC") {
                         call_graph.entry(instr_va).or_default().push(target_va);
@@ -307,15 +309,14 @@ impl Binary {
                 }
                 Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
             }
-            IrInstructionSsa::Assign(_, expr) |
-            IrInstructionSsa::Dorong(expr) => {
+            MicroInstruction::Assign(_, expr) => {
                 Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
             }
-            IrInstructionSsa::LompatKondisi(cond_expr, target_expr) => {
+            MicroInstruction::LompatKondisi(cond_expr, target_expr) => {
                 Self::find_data_refs_in_expr(&cond_expr, instr_va, data_access_graph);
                 Self::find_data_refs_in_expr(&target_expr, instr_va, data_access_graph);
             }
-            IrInstructionSsa::SimpanMemori(addr_expr, data_expr) => {
+            MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
                 Self::find_data_refs_in_expr(&addr_expr, instr_va, data_access_graph);
                 Self::find_data_refs_in_expr(&data_expr, instr_va, data_access_graph);
             }
@@ -323,17 +324,17 @@ impl Binary {
         }
     }
     fn find_data_refs_in_expr(
-        expr: &IrExpressionSsa,
+        expr: &MicroExpr,
         instr_va: u64,
         data_graph: &mut HashMap<u64, Vec<u64>>,
     ) {
         match expr {
-            IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => {
+            MicroExpr::Operand(MicroOperand::Konstanta(imm)) => {
                 if *imm > 0x1000 {
                     data_graph.entry(*imm).or_default().push(instr_va);
                 }
             }
-            IrExpressionSsa::MuatMemori(inner) => {
+            MicroExpr::MuatMemori(inner) => {
                 if let Some(data_va) = Self::extract_constant_from_expr(inner) {
                     if data_va > 0x1000 {
                         data_graph.entry(data_va).or_default().push(instr_va);
@@ -341,25 +342,25 @@ impl Binary {
                 }
                 Self::find_data_refs_in_expr(inner, instr_va, data_graph);
             }
-            IrExpressionSsa::OperasiUnary(_, inner) => {
+            MicroExpr::OperasiUnary(_, inner) => {
                 Self::find_data_refs_in_expr(inner, instr_va, data_graph);
             }
-            IrExpressionSsa::OperasiBiner(_, left, right) |
-            IrExpressionSsa::Bandingkan(left, right) |
-            IrExpressionSsa::UjiBit(left, right) => {
+            MicroExpr::OperasiBiner(_, left, right) |
+            MicroExpr::Bandingkan(left, right) |
+            MicroExpr::UjiBit(left, right) => {
                 Self::find_data_refs_in_expr(left, instr_va, data_graph);
                 Self::find_data_refs_in_expr(right, instr_va, data_graph);
             }
-            IrExpressionSsa::Operand(IrOperandSsa::SsaVar(_)) => {}
+            MicroExpr::Operand(MicroOperand::SsaVar(_)) => {}
         }
     }
-    fn extract_constant_from_expr(expr: &IrExpressionSsa) -> Option<u64> {
+    fn extract_constant_from_expr(expr: &MicroExpr) -> Option<u64> {
         match expr {
-            IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => Some(*imm),
-            IrExpressionSsa::OperasiBiner(_, left, right) => {
+            MicroExpr::Operand(MicroOperand::Konstanta(imm)) => Some(*imm),
+            MicroExpr::OperasiBiner(_, left, right) => {
                 Self::extract_constant_from_expr(left).or_else(|| Self::extract_constant_from_expr(right))
             }
-            IrExpressionSsa::MuatMemori(inner) => Self::extract_constant_from_expr(inner),
+            MicroExpr::MuatMemori(inner) => Self::extract_constant_from_expr(inner),
             _ => None,
         }
     }

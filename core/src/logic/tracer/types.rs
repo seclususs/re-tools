@@ -1,6 +1,7 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use libc::{c_char, c_int, c_ulonglong, c_uchar};
 use serde::{Serialize, Serializer};
-
 
 #[allow(non_camel_case_types)]
 pub type u64 = c_ulonglong;

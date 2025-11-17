@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use libc::c_int;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -6,7 +8,7 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::ir::instruction::IrInstructionSsa;
+use crate::logic::ir::instruction::MicroInstruction;
 
 #[derive(Debug, serde::Serialize)]
 pub struct DiffResultInternal {
@@ -45,7 +47,7 @@ fn lift_function_to_ir(
     binary: &Binary,
     sym: &SymbolInfo,
     arch: ArsitekturDisasm,
-) -> Result<Vec<IrInstructionSsa>, ReToolsError> {
+) -> Result<Vec<MicroInstruction>, ReToolsError> {
     let func_va = sym.addr;
     let func_size = sym.size;
     if func_size == 0 {
@@ -65,7 +67,7 @@ fn lift_function_to_ir(
         let current_va = func_va + current_offset as u64;
         let (size, irs) = match angkat_blok_instruksi(&func_bytes[current_offset..], current_va, arch) {
             Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-            _ => (1, vec![IrInstructionSsa::TidakTerdefinisi]),
+            _ => (1, vec![MicroInstruction::TidakTerdefinisi]),
         };
         all_irs.extend(irs);
         current_offset += size;
@@ -76,28 +78,26 @@ fn lift_function_to_ir(
     Ok(all_irs)
 }
 
-fn is_ir_branch(ir: &IrInstructionSsa) -> bool {
-    matches!(ir, IrInstructionSsa::Lompat(_) | IrInstructionSsa::LompatKondisi(_, _) | IrInstructionSsa::Kembali | IrInstructionSsa::Panggil(_))
+fn is_ir_branch(ir: &MicroInstruction) -> bool {
+    matches!(ir, MicroInstruction::Lompat(_) | MicroInstruction::LompatKondisi(_, _) | MicroInstruction::Kembali | MicroInstruction::Panggil(_))
 }
 
-fn get_ir_signature(ir: &IrInstructionSsa) -> &'static str {
+fn get_ir_signature(ir: &MicroInstruction) -> &'static str {
     match ir {
-        IrInstructionSsa::Assign(_, _) => "Assign",
-        IrInstructionSsa::SimpanMemori(_, _) => "SimpanMemori",
-        IrInstructionSsa::Dorong(_) => "Dorong",
-        IrInstructionSsa::Ambil(_) => "Ambil",
-        IrInstructionSsa::Lompat(_) => "Lompat",
-        IrInstructionSsa::LompatKondisi(_, _) => "LompatKondisi",
-        IrInstructionSsa::Panggil(_) => "Panggil",
-        IrInstructionSsa::Kembali => "Kembali",
-        IrInstructionSsa::Nop => "Nop",
-        IrInstructionSsa::Syscall => "Syscall",
-        IrInstructionSsa::TidakTerdefinisi => "TidakTerdefinisi",
-        IrInstructionSsa::InstruksiVektor(_, _) => "InstruksiVektor",
+        MicroInstruction::Assign(_, _) => "Assign",
+        MicroInstruction::SimpanMemori(_, _) => "SimpanMemori",
+        MicroInstruction::Lompat(_) => "Lompat",
+        MicroInstruction::LompatKondisi(_, _) => "LompatKondisi",
+        MicroInstruction::Panggil(_) => "Panggil",
+        MicroInstruction::Kembali => "Kembali",
+        MicroInstruction::Nop => "Nop",
+        MicroInstruction::Syscall => "Syscall",
+        MicroInstruction::TidakTerdefinisi => "TidakTerdefinisi",
+        MicroInstruction::InstruksiVektor(_, _) => "InstruksiVektor",
     }
 }
 
-fn generate_function_signature(irs: Vec<IrInstructionSsa>) -> Vec<String> {
+fn generate_function_signature(irs: Vec<MicroInstruction>) -> Vec<String> {
     let mut all_block_sigs = Vec::new();
     let mut current_block_sig = String::new();
     for ir in irs {

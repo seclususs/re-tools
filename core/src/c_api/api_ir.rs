@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::error::{set_last_error, ReToolsError};
@@ -8,7 +10,6 @@ use crate::logic::tracer::types::u8;
 use libc::c_char;
 use std::ffi::CString;
 use std::slice;
-
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]

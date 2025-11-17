@@ -9,6 +9,7 @@ pub mod platform_windows;
 
 pub mod platform;
 pub mod types;
+pub mod dta;
 
 use crate::error::{set_last_error, ReToolsError};
 use libc::c_int;

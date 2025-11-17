@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 #![allow(non_snake_case)]
 
 use super::platform::PlatformTracer;

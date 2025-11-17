@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::error::{set_last_error, ReToolsError};
@@ -11,7 +13,6 @@ use std::ptr::null_mut;
 use std::slice;
 
 type RtHandle = c_void;
-
 
 #[inline(always)]
 unsafe fn ambil_debugger<'a>(handle: *mut RtHandle) -> Option<&'a mut Debugger> {

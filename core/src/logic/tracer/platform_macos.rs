@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use super::platform::PlatformTracer;
 use super::types::{u64, u8, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo, DebugEventTipe};
 use crate::error::{set_last_error, ReToolsError};

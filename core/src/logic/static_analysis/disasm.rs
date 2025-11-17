@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use capstone::prelude::*;
 use libc::{c_char, c_int};
 use std::slice;

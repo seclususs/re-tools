@@ -1,8 +1,9 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use libc::c_char;
 use log::{debug, warn};
 use std::ffi::CString;
 use std::ptr;
-
 
 pub fn strncpy_rs(src: &str, dest: &mut [c_char]) {
     let src_bytes = src.as_bytes();

@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use std::fmt;
 use std::cell::RefCell;
 use std::ffi::CString;

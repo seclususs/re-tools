@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use encoding_rs::{UTF_16BE, UTF_16LE};
 use serde::Serialize;
 use std::collections::HashMap;

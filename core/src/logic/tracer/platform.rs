@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use crate::error::ReToolsError;
 use crate::logic::tracer::types::{u64, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo};
 use libc::c_int;

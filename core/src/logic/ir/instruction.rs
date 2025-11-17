@@ -1,3 +1,5 @@
+//! Author: [Seclususs](https://github.com/seclususs)
+
 use serde::Serialize;
 use std::fmt;
 
@@ -14,18 +16,18 @@ impl fmt::Display for SsaVariabel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrOperandSsa {
+pub enum MicroOperand {
     SsaVar(SsaVariabel),
     Konstanta(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrUnOp {
+pub enum MicroUnOp {
     Not,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrBinOp {
+pub enum MicroBinOp {
     Add,
     Sub,
     Mul,
@@ -40,27 +42,25 @@ pub enum IrBinOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrExpressionSsa {
-    Operand(IrOperandSsa),
-    OperasiUnary(IrUnOp, Box<IrExpressionSsa>),
-    OperasiBiner(IrBinOp, Box<IrExpressionSsa>, Box<IrExpressionSsa>),
-    MuatMemori(Box<IrExpressionSsa>),
-    Bandingkan(Box<IrExpressionSsa>, Box<IrExpressionSsa>),
-    UjiBit(Box<IrExpressionSsa>, Box<IrExpressionSsa>),
+pub enum MicroExpr {
+    Operand(MicroOperand),
+    OperasiUnary(MicroUnOp, Box<MicroExpr>),
+    OperasiBiner(MicroBinOp, Box<MicroExpr>, Box<MicroExpr>),
+    MuatMemori(Box<MicroExpr>),
+    Bandingkan(Box<MicroExpr>, Box<MicroExpr>),
+    UjiBit(Box<MicroExpr>, Box<MicroExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrInstructionSsa {
-    Assign(SsaVariabel, IrExpressionSsa),
-    SimpanMemori(IrExpressionSsa, IrExpressionSsa),
-    Dorong(IrExpressionSsa),
-    Ambil(SsaVariabel),
-    Lompat(IrExpressionSsa),
-    LompatKondisi(IrExpressionSsa, IrExpressionSsa),
-    Panggil(IrExpressionSsa),
+pub enum MicroInstruction {
+    Assign(SsaVariabel, MicroExpr),
+    SimpanMemori(MicroExpr, MicroExpr),
+    Lompat(MicroExpr),
+    LompatKondisi(MicroExpr, MicroExpr),
+    Panggil(MicroExpr),
     Kembali,
     Nop,
     Syscall,
     TidakTerdefinisi,
-    InstruksiVektor(String, Vec<IrOperandSsa>),
+    InstruksiVektor(String, Vec<MicroOperand>),
 }
