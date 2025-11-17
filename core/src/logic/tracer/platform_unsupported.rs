@@ -1,5 +1,5 @@
 use super::platform::PlatformTracer;
-use super::types::{u64, C_DebugEvent, C_Registers};
+use super::types::{u64, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo};
 use crate::error::ReToolsError;
 use libc::c_int;
 
@@ -54,6 +54,22 @@ impl PlatformTracer for UnsupportedTracer {
         Err(Self::unsupported_err())
     }
     fn remove_hardware_breakpoint(&mut self, _index: usize) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+
+    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
 }

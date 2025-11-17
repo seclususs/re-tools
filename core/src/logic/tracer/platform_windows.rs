@@ -1,37 +1,47 @@
+#![allow(non_snake_case)]
+
 use super::platform::PlatformTracer;
-use super::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
-use crate::error::{ReToolsError, set_last_error};
-use libc::{c_int, c_void};
+use super::types::{
+    u64, u8, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo, DebugEventTipe,
+};
+use crate::error::{set_last_error, ReToolsError};
+use libc::{c_char, c_int, c_void};
 use std::collections::HashMap;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, LUID};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     ContinueDebugEvent, DebugActiveProcess, DebugActiveProcessStop, GetThreadContext,
     ReadProcessMemory, SetThreadContext, WaitForDebugEvent, WriteProcessMemory, CONTEXT,
-    DEBUG_EVENT, EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
+    CREATE_THREAD_DEBUG_EVENT, DEBUG_EVENT, EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
+    EXIT_THREAD_DEBUG_EVENT, LOAD_DLL_DEBUG_EVENT,
 };
 use windows_sys::Win32::Foundation::{
     DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, EXCEPTION_BREAKPOINT, EXCEPTION_SINGLE_STEP,
 };
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+};
+use windows_sys::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION};
+use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExA;
+
 
 #[cfg(target_arch = "x86_64")]
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CONTEXT_FULL_AMD64 as CONTEXT_FULL,
-    CONTEXT_DEBUG_REGISTERS_AMD64 as CONTEXT_DEBUG_REGISTERS
+    CONTEXT_DEBUG_REGISTERS_AMD64 as CONTEXT_DEBUG_REGISTERS, CONTEXT_FULL_AMD64 as CONTEXT_FULL,
 };
 #[cfg(target_arch = "x86")]
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    CONTEXT_CONTROL_X86 as CONTEXT_CONTROL, CONTEXT_FULL_X86 as CONTEXT_FULL,
-    CONTEXT_DEBUG_REGISTERS_X86 as CONTEXT_DEBUG_REGISTERS
+    CONTEXT_CONTROL_X86 as CONTEXT_CONTROL,
+    CONTEXT_DEBUG_REGISTERS_X86 as CONTEXT_DEBUG_REGISTERS, CONTEXT_FULL_X86 as CONTEXT_FULL,
 };
 
-use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, OpenThread, PROCESS_ALL_ACCESS,
-    THREAD_GET_CONTEXT, THREAD_SET_CONTEXT,
-};
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueA, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
     TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, OpenThread, PROCESS_ALL_ACCESS,
+    THREAD_GET_CONTEXT, THREAD_SET_CONTEXT,
 };
 
 
@@ -84,7 +94,11 @@ impl WindowsTracer {
         CloseHandle(handle_token);
         b_ok != 0
     }
-    unsafe fn get_thread_handle(&self, thread_id: u32, access: u32) -> Result<HANDLE, ReToolsError> {
+    unsafe fn get_thread_handle(
+        &self,
+        thread_id: u32,
+        access: u32,
+    ) -> Result<HANDLE, ReToolsError> {
         let h_thread = OpenThread(access, FALSE, thread_id);
         if h_thread == 0 {
             Err(ReToolsError::IoError(std::io::Error::last_os_error()))
@@ -92,7 +106,11 @@ impl WindowsTracer {
             Ok(h_thread)
         }
     }
-    unsafe fn get_thread_context(&self, thread_id: u32, flags: u32) -> Result<CONTEXT, ReToolsError> {
+    unsafe fn get_thread_context(
+        &self,
+        thread_id: u32,
+        flags: u32,
+    ) -> Result<CONTEXT, ReToolsError> {
         let h_thread = self.get_thread_handle(thread_id, THREAD_GET_CONTEXT)?;
         let mut context: CONTEXT = std::mem::zeroed();
         context.ContextFlags = flags;
@@ -104,7 +122,11 @@ impl WindowsTracer {
             Ok(context)
         }
     }
-    unsafe fn set_thread_context(&self, thread_id: u32, context: &CONTEXT) -> Result<(), ReToolsError> {
+    unsafe fn set_thread_context(
+        &self,
+        thread_id: u32,
+        context: &CONTEXT,
+    ) -> Result<(), ReToolsError> {
         let h_thread = self.get_thread_handle(thread_id, THREAD_SET_CONTEXT)?;
         let result = SetThreadContext(h_thread, context);
         CloseHandle(h_thread);
@@ -145,10 +167,7 @@ impl WindowsTracer {
         self.handling_breakpoint_alamat = Some(alamat_bp);
         true
     }
-    unsafe fn internal_handle_breakpoint_post_step(
-        &mut self,
-        alamat_bp: u64,
-    ) -> bool {
+    unsafe fn internal_handle_breakpoint_post_step(&mut self, alamat_bp: u64) -> bool {
         if self.tulis_memory(alamat_bp, &[0xCC]).is_err() {
             return false;
         }
@@ -161,7 +180,8 @@ impl WindowsTracer {
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
+        let mut context =
+            self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
         match index {
             0 => context.Dr0 = addr,
             1 => context.Dr1 = addr,
@@ -177,12 +197,13 @@ impl WindowsTracer {
         Ok(())
     }
     unsafe fn remove_hw_bp(&self, index: usize) -> Result<(), ReToolsError> {
-         if index > 3 {
+        if index > 3 {
             return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
+        let mut context =
+            self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
         match index {
             0 => context.Dr0 = 0,
             1 => context.Dr1 = 0,
@@ -214,7 +235,9 @@ impl PlatformTracer for WindowsTracer {
             if WaitForDebugEvent(&mut debug_event, 5000) == 0 {
                 DebugActiveProcessStop(self.pid_target);
                 CloseHandle(handle_proses);
-                return Err(ReToolsError::Generic("Timeout menunggu event attach".to_string()));
+                return Err(ReToolsError::Generic(
+                    "Timeout menunggu event attach".to_string(),
+                ));
             }
             self.last_event_thread_id = debug_event.dwThreadId;
             ContinueDebugEvent(
@@ -233,7 +256,7 @@ impl PlatformTracer for WindowsTracer {
             self.breakpoints_map.clear();
             if self.handle_proses != 0 {
                 if DebugActiveProcessStop(self.pid_target) == 0 {
-                   return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
+                    return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
                 }
                 CloseHandle(self.handle_proses);
                 self.handle_proses = 0;
@@ -263,7 +286,7 @@ impl PlatformTracer for WindowsTracer {
     fn tulis_memory(&self, addr: u64, data: &[u8]) -> Result<usize, ReToolsError> {
         let mut bytes_ditulis: usize = 0;
         unsafe {
-             if WriteProcessMemory(
+            if WriteProcessMemory(
                 self.handle_proses,
                 addr as *mut c_void,
                 data.as_ptr() as *const c_void,
@@ -280,10 +303,12 @@ impl PlatformTracer for WindowsTracer {
     fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
         unsafe {
             if self.last_event_thread_id == 0 {
-                return Err(ReToolsError::Generic("last_event_thread_id adalah 0".to_string()));
+                return Err(ReToolsError::Generic(
+                    "last_event_thread_id adalah 0".to_string(),
+                ));
             }
             let context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
-             #[cfg(target_arch = "x86_64")]
+            #[cfg(target_arch = "x86_64")]
             {
                 Ok(C_Registers {
                     rax: context.Rax,
@@ -317,7 +342,14 @@ impl PlatformTracer for WindowsTracer {
                     rdi: context.Edi as u64,
                     rbp: context.Ebp as u64,
                     rsp: context.Esp as u64,
-                    r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+                    r8: 0,
+                    r9: 0,
+                    r10: 0,
+                    r11: 0,
+                    r12: 0,
+                    r13: 0,
+                    r14: 0,
+                    r15: 0,
                     rip: context.Eip as u64,
                     eflags: context.EFlags as u64,
                 })
@@ -327,7 +359,9 @@ impl PlatformTracer for WindowsTracer {
     fn set_registers(&self, c_regs: &C_Registers) -> Result<(), ReToolsError> {
         unsafe {
             if self.last_event_thread_id == 0 {
-                return Err(ReToolsError::Generic("last_event_thread_id adalah 0".to_string()));
+                return Err(ReToolsError::Generic(
+                    "last_event_thread_id adalah 0".to_string(),
+                ));
             }
             let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
             #[cfg(target_arch = "x86_64")]
@@ -369,8 +403,10 @@ impl PlatformTracer for WindowsTracer {
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
         unsafe {
-             if self.last_event_thread_id == 0 {
-                return Err(ReToolsError::Generic("last_event_thread_id adalah 0".to_string()));
+            if self.last_event_thread_id == 0 {
+                return Err(ReToolsError::Generic(
+                    "last_event_thread_id adalah 0".to_string(),
+                ));
             }
             if ContinueDebugEvent(
                 self.pid_target,
@@ -387,7 +423,9 @@ impl PlatformTracer for WindowsTracer {
     fn single_step(&mut self) -> Result<(), ReToolsError> {
         unsafe {
             if self.last_event_thread_id == 0 {
-                return Err(ReToolsError::Generic("last_event_thread_id adalah 0".to_string()));
+                return Err(ReToolsError::Generic(
+                    "last_event_thread_id adalah 0".to_string(),
+                ));
             }
             let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
             context.EFlags |= 0x100;
@@ -416,7 +454,9 @@ impl PlatformTracer for WindowsTracer {
                                 ) {
                                     continue_status = DBG_CONTINUE;
                                 } else {
-                                    set_last_error(ReToolsError::Generic("Gagal pre-step breakpoint".to_string()));
+                                    set_last_error(ReToolsError::Generic(
+                                        "Gagal pre-step breakpoint".to_string(),
+                                    ));
                                     continue_status = DBG_EXCEPTION_NOT_HANDLED;
                                 }
                             } else {
@@ -442,6 +482,29 @@ impl PlatformTracer for WindowsTracer {
                             continue_status = DBG_EXCEPTION_NOT_HANDLED;
                         }
                     }
+                    CREATE_THREAD_DEBUG_EVENT => {
+                        (*event_out).tipe = DebugEventTipe::EVENT_THREAD_BARU;
+                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                        (*event_out).info_alamat = debug_event
+                            .u
+                            .CreateThread
+                            .lpStartAddress
+                            .map_or(0, |addr| addr as usize)
+                            as u64;
+                        return Ok(0);
+                    }
+                    EXIT_THREAD_DEBUG_EVENT => {
+                        (*event_out).tipe = DebugEventTipe::EVENT_THREAD_EXIT;
+                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                        (*event_out).info_alamat = debug_event.u.ExitThread.dwExitCode as u64;
+                        return Ok(0);
+                    }
+                    LOAD_DLL_DEBUG_EVENT => {
+                        (*event_out).tipe = DebugEventTipe::EVENT_MODUL_LOAD;
+                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                        (*event_out).info_alamat = debug_event.u.LoadDll.lpBaseOfDll as u64;
+                        return Ok(0);
+                    }
                     EXIT_PROCESS_DEBUG_EVENT => {
                         (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
                         (*event_out).pid_thread = debug_event.dwThreadId as c_int;
@@ -459,7 +522,7 @@ impl PlatformTracer for WindowsTracer {
             }
         }
     }
-     fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
+    fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
         if self.breakpoints_map.contains_key(&addr) {
             return Ok(());
         }
@@ -486,6 +549,106 @@ impl PlatformTracer for WindowsTracer {
     }
     fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError> {
         unsafe { self.remove_hw_bp(index) }
+    }
+    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
+        let mut threads = Vec::new();
+        unsafe {
+            let h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if h_snapshot == 0 {
+                return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
+            }
+            let mut te32: THREADENTRY32 = std::mem::zeroed();
+            te32.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            if Thread32First(h_snapshot, &mut te32) == 0 {
+                CloseHandle(h_snapshot);
+                return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
+            }
+            loop {
+                if te32.th32OwnerProcessID == self.pid_target {
+                    threads.push(te32.th32ThreadID as c_int);
+                }
+                if Thread32Next(h_snapshot, &mut te32) == 0 {
+                    break;
+                }
+            }
+            CloseHandle(h_snapshot);
+        }
+        Ok(threads)
+    }
+    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+        let mut regions = Vec::new();
+        let mut current_addr: usize = 0;
+        unsafe {
+            loop {
+                let mut mem_info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+                let bytes_returned = VirtualQueryEx(
+                    self.handle_proses,
+                    current_addr as *const c_void,
+                    &mut mem_info,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                );
+                if bytes_returned == 0 {
+                    break;
+                }
+                let mut proteksi = 0;
+                if (mem_info.Protect & 0x02) != 0 {
+                    proteksi |= 1;
+                } // PAGE_READONLY
+                if (mem_info.Protect & 0x04) != 0 {
+                    proteksi |= 3;
+                } // PAGE_READWRITE
+                if (mem_info.Protect & 0x08) != 0 {
+                    proteksi |= 3;
+                } // PAGE_WRITECOPY
+                if (mem_info.Protect & 0x10) != 0 {
+                    proteksi |= 5;
+                } // PAGE_EXECUTE
+                if (mem_info.Protect & 0x20) != 0 {
+                    proteksi |= 5;
+                } // PAGE_EXECUTE_READ
+                if (mem_info.Protect & 0x40) != 0 {
+                    proteksi |= 7;
+                } // PAGE_EXECUTE_READWRITE
+                if (mem_info.Protect & 0x80) != 0 {
+                    proteksi |= 7;
+                } // PAGE_EXECUTE_WRITECOPY
+                let mut path_bytes = [0 as c_char; 260];
+                let mut path_buffer: [u8; 260] = [0; 260];
+                if GetModuleFileNameExA(
+                    self.handle_proses,
+                    mem_info.AllocationBase as _,
+                    path_buffer.as_mut_ptr(),
+                    260,
+                ) > 0
+                {
+                    let len = path_buffer.iter().position(|&r| r == 0).unwrap_or(259);
+                    for i in 0..len {
+                        path_bytes[i] = path_buffer[i] as c_char;
+                    }
+                }
+                regions.push(C_MemoryRegionInfo {
+                    alamat_basis: mem_info.BaseAddress as u64,
+                    ukuran: mem_info.RegionSize as u64,
+                    proteksi,
+                    path_modul: path_bytes,
+                });
+                current_addr = (mem_info.BaseAddress as usize) + mem_info.RegionSize;
+            }
+        }
+        Ok(regions)
+    }
+    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic(
+            "set_pelacakan_syscall tidak didukung di Windows".to_string(),
+        ))
+    }
+    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+        Err(ReToolsError::Generic(
+            "get_info_syscall tidak didukung di Windows".to_string(),
+        ))
+    }
+    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+        Ok(())
     }
 }
 

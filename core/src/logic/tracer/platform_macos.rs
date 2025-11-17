@@ -1,6 +1,6 @@
 use super::platform::PlatformTracer;
-use super::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
-use crate::error::{ReToolsError, set_last_error};
+use super::types::{u64, u8, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo, DebugEventTipe};
+use crate::error::{set_last_error, ReToolsError};
 use libc::c_int;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
@@ -73,7 +73,7 @@ impl MacosTracer {
     #[cfg(target_arch = "x86_64")]
     fn remove_hw_bp(&self, index: usize) -> Result<(), ReToolsError> {
         if index > 3 {
-             return Err(ReToolsError::Generic(
+            return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
@@ -93,7 +93,7 @@ impl MacosTracer {
     }
     #[cfg(not(target_arch = "x86_64"))]
     fn remove_hw_bp(&self, _index: usize) -> Result<(), ReToolsError> {
-         Err(ReToolsError::Generic(
+        Err(ReToolsError::Generic(
             "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
         ))
     }
@@ -246,7 +246,10 @@ impl PlatformTracer for MacosTracer {
                                         (*event_out).info_alamat = alamat_breakpoint_potensial;
                                         return Ok(0);
                                     } else {
-                                        set_last_error(ReToolsError::Generic(format!("Gagal menangani breakpoint logic pada 0x{:x}", alamat_breakpoint_potensial)));
+                                        set_last_error(ReToolsError::Generic(format!(
+                                            "Gagal menangani breakpoint logic pada 0x{:x}",
+                                            alamat_breakpoint_potensial
+                                        )));
                                         (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
                                         (*event_out).info_alamat = alamat_breakpoint_potensial;
                                         return Ok(-1);
@@ -313,6 +316,21 @@ impl PlatformTracer for MacosTracer {
     }
     fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError> {
         self.remove_hw_bp(index)
+    }
+    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
+        Err(ReToolsError::Generic("list_semua_threads belum diimplementasikan di macOS".to_string()))
+    }
+    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+        Err(ReToolsError::Generic("get_memory_regions belum diimplementasikan di macOS".to_string()))
+    }
+    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("set_pelacakan_syscall belum diimplementasikan di macOS".to_string()))
+    }
+    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+        Err(ReToolsError::Generic("get_info_syscall belum diimplementasikan di macOS".to_string()))
+    }
+    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+        Ok(())
     }
 }
 

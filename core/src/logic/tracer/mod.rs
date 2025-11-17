@@ -49,13 +49,20 @@ pub fn new_debugger(pid: c_int) -> Result<Debugger, ReToolsError> {
         Ok(mut t) => {
             if let Err(e) = t.attach() {
                 set_last_error(e);
-                Err(ReToolsError::Generic(format!(
+                return Err(ReToolsError::Generic(format!(
                     "Gagal attach ke PID {}",
                     pid
-                )))
-            } else {
-                Ok(t)
+                )));
             }
+            if let Err(e) = t.set_options_multithread() {
+                set_last_error(e);
+                t.detach().ok();
+                return Err(ReToolsError::Generic(format!(
+                    "Gagal set options multithread untuk PID {}",
+                    pid
+                )));
+            }
+            Ok(t)
         }
         Err(e) => {
             set_last_error(e);

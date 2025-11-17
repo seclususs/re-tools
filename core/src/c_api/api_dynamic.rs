@@ -4,7 +4,9 @@ use crate::error::{set_last_error, ReToolsError};
 use crate::logic::tracer::{self, Debugger};
 use crate::logic::tracer::types::{u64, u8, C_DebugEvent, C_Registers, DebugEventTipe};
 
-use libc::{c_int, c_void};
+use libc::{c_char, c_int, c_void};
+use serde_json;
+use std::ffi::CString;
 use std::ptr::null_mut;
 use std::slice;
 
@@ -14,7 +16,9 @@ type RtHandle = c_void;
 #[inline(always)]
 unsafe fn ambil_debugger<'a>(handle: *mut RtHandle) -> Option<&'a mut Debugger> {
     if handle.is_null() {
-        set_last_error(ReToolsError::Generic("Handle tracer tidak valid (null)".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "Handle tracer tidak valid (null)".to_string(),
+        ));
         return None;
     }
     (handle as *mut Debugger).as_mut()
@@ -56,7 +60,9 @@ pub unsafe extern "C" fn rt_bacaMemory(
         return -1;
     };
     if out_buffer.is_null() || size <= 0 {
-        set_last_error(ReToolsError::Generic("rt_bacaMemory: buffer output tidak valid atau size <= 0".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "rt_bacaMemory: buffer output tidak valid atau size <= 0".to_string(),
+        ));
         return -1;
     }
     match debugger.baca_memory(addr, size) {
@@ -83,7 +89,9 @@ pub unsafe extern "C" fn rt_tulisMemory(
         return -1;
     };
     if data.is_null() || size <= 0 {
-        set_last_error(ReToolsError::Generic("rt_tulisMemory: data input tidak valid atau size <= 0".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "rt_tulisMemory: data input tidak valid atau size <= 0".to_string(),
+        ));
         return -1;
     }
     let data_slice = slice::from_raw_parts(data, size as usize);
@@ -134,7 +142,9 @@ pub unsafe extern "C" fn rt_setHardwareBreakpoint(
         return -1;
     };
     if !(0..=3).contains(&index) {
-        set_last_error(ReToolsError::Generic("Indeks hardware breakpoint harus 0-3".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "Indeks hardware breakpoint harus 0-3".to_string(),
+        ));
         return -1;
     }
     match debugger.set_hardware_breakpoint(addr, index as usize) {
@@ -152,7 +162,9 @@ pub unsafe extern "C" fn rt_removeHardwareBreakpoint(handle: *mut RtHandle, inde
         return -1;
     };
     if !(0..=3).contains(&index) {
-        set_last_error(ReToolsError::Generic("Indeks hardware breakpoint harus 0-3".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "Indeks hardware breakpoint harus 0-3".to_string(),
+        ));
         return -1;
     }
     match debugger.remove_hardware_breakpoint(index as usize) {
@@ -187,7 +199,9 @@ pub unsafe extern "C" fn rt_getRegisters(
         return -1;
     };
     if out_registers.is_null() {
-        set_last_error(ReToolsError::Generic("rt_getRegisters: out_registers adalah null".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "rt_getRegisters: out_registers adalah null".to_string(),
+        ));
         return -1;
     }
     match debugger.get_registers() {
@@ -211,7 +225,9 @@ pub unsafe extern "C" fn rt_setRegisters(
         return -1;
     };
     if registers.is_null() {
-        set_last_error(ReToolsError::Generic("rt_setRegisters: registers adalah null".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "rt_setRegisters: registers adalah null".to_string(),
+        ));
         return -1;
     }
     match debugger.set_registers(&*registers) {
@@ -246,7 +262,9 @@ pub unsafe extern "C" fn rt_tungguEvent(
         return -1;
     };
     if event_out.is_null() {
-        set_last_error(ReToolsError::Generic("rt_tungguEvent: event_out adalah null".to_string()));
+        set_last_error(ReToolsError::Generic(
+            "rt_tungguEvent: event_out adalah null".to_string(),
+        ));
         return -1;
     }
     (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
@@ -257,6 +275,86 @@ pub unsafe extern "C" fn rt_tungguEvent(
         Err(e) => {
             set_last_error(e);
             -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_listSemuaThreads_json(handle: *mut RtHandle) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return error_json;
+    };
+    match debugger.list_semua_threads() {
+        Ok(threads) => match serde_json::to_string(&threads) {
+            Ok(json_str) => CString::new(json_str).unwrap_or_default().into_raw(),
+            Err(e) => {
+                set_last_error(ReToolsError::Generic(e.to_string()));
+                error_json
+            }
+        },
+        Err(e) => {
+            set_last_error(e);
+            error_json
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_getMemoryRegions_json(handle: *mut RtHandle) -> *mut c_char {
+    let error_json = CString::new("[]").unwrap().into_raw();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return error_json;
+    };
+    match debugger.get_memory_regions() {
+        Ok(regions) => match serde_json::to_string(&regions) {
+            Ok(json_str) => CString::new(json_str).unwrap_or_default().into_raw(),
+            Err(e) => {
+                set_last_error(ReToolsError::Generic(e.to_string()));
+                error_json
+            }
+        },
+        Err(e) => {
+            set_last_error(e);
+            error_json
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_setPelacakanSyscall(handle: *mut RtHandle, enable: bool) -> c_int {
+    let Some(debugger) = ambil_debugger(handle) else {
+        return -1;
+    };
+    match debugger.set_pelacakan_syscall(enable) {
+        Ok(_) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rt_getInfoSyscall_json(
+    handle: *mut RtHandle,
+    pid_thread: c_int,
+) -> *mut c_char {
+    let error_json = CString::new("{}").unwrap().into_raw();
+    let Some(debugger) = ambil_debugger(handle) else {
+        return error_json;
+    };
+    match debugger.get_info_syscall(pid_thread) {
+        Ok(info) => match serde_json::to_string(&info) {
+            Ok(json_str) => CString::new(json_str).unwrap_or_default().into_raw(),
+            Err(e) => {
+                set_last_error(ReToolsError::Generic(e.to_string()));
+                error_json
+            }
+        },
+        Err(e) => {
+            set_last_error(e);
+            error_json
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::error::ReToolsError;
-use crate::logic::tracer::types::{u64, C_DebugEvent, C_Registers};
+use crate::logic::tracer::types::{u64, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo};
 use libc::c_int;
 
 pub trait PlatformTracer: Send + Sync {
@@ -16,4 +16,9 @@ pub trait PlatformTracer: Send + Sync {
     fn remove_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError>;
     fn set_hardware_breakpoint(&mut self, addr: u64, index: usize) -> Result<(), ReToolsError>;
     fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError>;
+    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError>;
+    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError>;
+    fn set_pelacakan_syscall(&mut self, enable: bool) -> Result<(), ReToolsError>;
+    fn get_info_syscall(&self, pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError>;
+    fn set_options_multithread(&mut self) -> Result<(), ReToolsError>;
 }
