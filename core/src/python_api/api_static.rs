@@ -7,12 +7,13 @@ use crate::logic::static_analysis::analyzer::{
     deteksiHeuristicPacker_internal, deteksi_pattern_internal, ekstrak_strings_internal,
     hitung_entropy_internal, identifikasiFungsiLibrary_internal, scan_yara_internal,
 };
-use crate::logic::static_analysis::parser::Binary;
 use crate::logic::static_analysis::cfg::generate_cfg_internal;
 use crate::logic::static_analysis::diff::diff_binary_internal;
+use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::static_analysis::hexeditor::{
     cari_pattern_internal, lihat_bytes_internal, ubah_bytes_internal,
 };
+use crate::logic::static_analysis::parser::Binary;
 
 use log::{error, info};
 
@@ -35,6 +36,35 @@ pub fn map_err_to_py(err: ReToolsError) -> PyErr {
 fn parse_header_info_py(py: Python, file_path: &str) -> PyResult<PyObject> {
     info!("py: parseHeaderInfo dipanggil untuk: {}", file_path);
     let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let header_info = &binary.header;
+    let dict = PyDict::new_bound(py);
+    dict.set_item("valid", header_info.valid)?;
+    dict.set_item("format", header_info.format)?;
+    dict.set_item("arch", header_info.arch)?;
+    dict.set_item("bits", header_info.bits)?;
+    dict.set_item("entry_point", header_info.entry_point)?;
+    dict.set_item("machine_id", header_info.machine_id)?;
+    dict.set_item("is_lib", header_info.is_lib)?;
+    dict.set_item("file_size", header_info.file_size)?;
+    Ok(dict.to_object(py))
+}
+
+#[pyfunction(name = "parseHeaderInfoRaw")]
+fn parse_header_info_raw_py(
+    py: Python,
+    file_path: &str,
+    arch_int: u32,
+    base_va: u64,
+) -> PyResult<PyObject> {
+    info!("py: parseHeaderInfoRaw dipanggil untuk: {}", file_path);
+    let arch = match arch_int {
+        1 => ArsitekturDisasm::ARCH_X86_32,
+        2 => ArsitekturDisasm::ARCH_X86_64,
+        3 => ArsitekturDisasm::ARCH_ARM_32,
+        4 => ArsitekturDisasm::ARCH_ARM_64,
+        _ => ArsitekturDisasm::ARCH_UNKNOWN,
+    };
+    let binary = Binary::load_raw(file_path, arch, base_va).map_err(map_err_to_py)?;
     let header_info = &binary.header;
     let dict = PyDict::new_bound(py);
     dict.set_item("valid", header_info.valid)?;
@@ -288,6 +318,7 @@ fn parse_dynamic_section_elf_py(py: Python, file_path: &str) -> PyResult<PyObjec
 
 pub fn register_static_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_header_info_py, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_header_info_raw_py, m)?)?;
     m.add_function(wrap_pyfunction!(ekstrak_strings_py, m)?)?;
     m.add_function(wrap_pyfunction!(hitung_entropy_py, m)?)?;
     m.add_function(wrap_pyfunction!(deteksi_pattern_py, m)?)?;

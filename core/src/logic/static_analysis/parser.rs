@@ -1,9 +1,11 @@
 use crate::error::ReToolsError;
+use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use goblin::elf::dynamic;
 use goblin::elf::sym;
 use goblin::Object;
+use memmap2::Mmap;
 use serde::Serialize;
-use std::fs;
+use std::fs::File;
 
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -64,6 +66,24 @@ impl InternalHeaderInfo {
             _ => "Unknown",
         }
     }
+    pub fn arch_from_disasm(arch: ArsitekturDisasm) -> &'static str {
+        match arch {
+            ArsitekturDisasm::ARCH_X86_64 => "x86-64",
+            ArsitekturDisasm::ARCH_X86_32 => "x86",
+            ArsitekturDisasm::ARCH_ARM_64 => "AArch64",
+            ArsitekturDisasm::ARCH_ARM_32 => "ARM",
+            ArsitekturDisasm::ARCH_UNKNOWN => "Unknown",
+        }
+    }
+    pub fn bits_from_disasm(arch: ArsitekturDisasm) -> u16 {
+        match arch {
+            ArsitekturDisasm::ARCH_X86_64 => 64,
+            ArsitekturDisasm::ARCH_X86_32 => 32,
+            ArsitekturDisasm::ARCH_ARM_64 => 64,
+            ArsitekturDisasm::ARCH_ARM_32 => 32,
+            ArsitekturDisasm::ARCH_UNKNOWN => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -101,10 +121,11 @@ pub struct ElfDynamicInfo {
     pub value: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Binary {
     pub file_path: String,
-    pub file_bytes: Vec<u8>,
+    #[serde(skip)]
+    pub file_data: Mmap,
     pub header: InternalHeaderInfo,
     pub sections: Vec<SectionInfo>,
     pub symbols: Vec<SymbolInfo>,
@@ -115,11 +136,13 @@ pub struct Binary {
 
 impl Binary {
     pub fn load(file_path: &str) -> Result<Self, ReToolsError> {
-        let file_bytes = fs::read(file_path)?;
         let file_path_string = file_path.to_string();
-        let obj = Object::parse(&file_bytes)
+        let file = File::open(file_path)?;
+        let file_data = unsafe { Mmap::map(&file)? };
+        let file_size = file_data.len() as u64;
+        let obj = Object::parse(&file_data)
             .map_err(|e| ReToolsError::ParseError(e.to_string()))?;
-        let header = Self::parse_header_internal(&obj, file_bytes.len() as u64)?;
+        let header = Self::parse_header_internal(&obj, file_size)?;
         let sections = Self::parse_sections_internal(&obj)?;
         let symbols = Self::parse_symbols_internal(&obj)?;
         let imports = Self::parse_imports_internal(&obj)?;
@@ -127,7 +150,7 @@ impl Binary {
         let elf_dynamic_info = Self::parse_elf_dynamic_info_internal(&obj)?;
         Ok(Binary {
             file_path: file_path_string,
-            file_bytes,
+            file_data,
             header,
             sections,
             symbols,
@@ -136,6 +159,45 @@ impl Binary {
             elf_dynamic_info,
         })
     }
+
+    pub fn load_raw(
+        file_path: &str,
+        raw_arch: ArsitekturDisasm,
+        base_addr: u64,
+    ) -> Result<Self, ReToolsError> {
+        let file_path_string = file_path.to_string();
+        let file = File::open(file_path)?;
+        let file_data = unsafe { Mmap::map(&file)? };
+        let file_size = file_data.len() as u64;
+        let header = InternalHeaderInfo {
+            valid: true,
+            format: "Raw",
+            arch: InternalHeaderInfo::arch_from_disasm(raw_arch),
+            bits: InternalHeaderInfo::bits_from_disasm(raw_arch),
+            entry_point: base_addr,
+            machine_id: 0,
+            is_lib: false,
+            file_size,
+        };
+        let main_section = SectionInfo {
+            name: ".data".to_string(),
+            addr: base_addr,
+            size: file_size,
+            offset: 0,
+            flags: 0x1 | 0x2 | 0x4,
+        };
+        Ok(Binary {
+            file_path: file_path_string,
+            file_data,
+            header,
+            sections: vec![main_section],
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+            elf_dynamic_info: Vec::new(),
+        })
+    }
+
     fn parse_header_internal(
         obj: &Object,
         file_size: u64,

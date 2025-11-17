@@ -53,7 +53,7 @@ pub fn ekstrak_strings_internal(
         "Mulai ekstrak strings dari: {} (min_length: {})",
         binary.file_path, min_length
     );
-    let buffer_bytes = &binary.file_bytes;
+    let buffer_bytes = &binary.file_data;
     debug!("Ukuran file dibaca: {} bytes", buffer_bytes.len());
     let strings_info = extract_all_strings(buffer_bytes, min_length);
     info!("Selesai ekstrak strings, ditemukan: {}", strings_info.len());
@@ -173,7 +173,7 @@ pub fn hitung_entropy_internal(
         warn!("Block size adalah 0, mengembalikan vector kosong");
         return Ok(entropies);
     }
-    let mut cursor = Cursor::new(&binary.file_bytes);
+    let mut cursor = Cursor::new(&binary.file_data);
     let mut buffer = vec![0; block_size];
     loop {
         match cursor.read(&mut buffer) {
@@ -201,7 +201,7 @@ pub fn deteksi_pattern_internal(
         "Mulai deteksi pattern regex: '{}' di file: {}",
         regex_str, binary.file_path
     );
-    let file_bytes = &binary.file_bytes;
+    let file_bytes = &binary.file_data;
     debug!("Ukuran file dibaca: {} bytes", file_bytes.len());
     let re = Regex::new(regex_str)?;
     let matches: Vec<String> = re
@@ -220,7 +220,7 @@ pub fn scan_yara_internal(
     let rules = yara::Compiler::new()?
         .add_rules_str(yara_rules)?
         .compile_rules()?;
-    let matches = rules.scan_mem(&binary.file_bytes, 10)?;
+    let matches = rules.scan_mem(&binary.file_data, 10)?;
     let results: Vec<YaraMatch> = matches.iter().map(|m| {
         YaraMatch {
             rule_name: m.identifier.to_string(),
@@ -246,7 +246,7 @@ pub fn deteksiHeuristicPacker_internal(
         binary.file_path, entropy_threshold
     );
     let mut results = Vec::new();
-    let file_len = binary.file_bytes.len();
+    let file_len = binary.file_data.len();
     const SHF_WRITE: u64 = 0x1;
     const SHF_EXECINSTR: u64 = 0x4;
     const IMAGE_SCN_MEM_WRITE: u64 = 0x80000000;
@@ -269,7 +269,7 @@ pub fn deteksiHeuristicPacker_internal(
             if start >= end {
                 continue;
             }
-            let section_bytes = &binary.file_bytes[start..end];
+            let section_bytes = &binary.file_data[start..end];
             let entropy = calculate_entropy_for_block(section_bytes);
             if entropy > entropy_threshold {
                 results.push(PackerHeuristicInfo {
@@ -313,7 +313,7 @@ pub fn identifikasiFungsiLibrary_internal(
                 continue;
             }
         };
-        for m in re.find_iter(&binary.file_bytes) {
+        for m in re.find_iter(&binary.file_data) {
             let hex_match = m
                 .as_bytes()
                 .iter()

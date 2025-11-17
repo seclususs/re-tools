@@ -1,8 +1,9 @@
 use crate::error::ReToolsError;
 use log::{debug, info, warn};
 use memchr::memmem::Finder;
+use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 
@@ -16,12 +17,13 @@ pub fn lihat_bytes_internal(
         filename, offset, length
     );
     let path = Path::new(filename);
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut buffer = vec![0; length];
-    let bytes_read = file.read(&mut buffer)?;
-    buffer.truncate(bytes_read);
-    debug!("Bytes dibaca: {}", bytes_read);
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let file_len = mmap.len();
+    let start = std::cmp::min(offset as usize, file_len);
+    let end = std::cmp::min(file_len, (offset + length as u64) as usize);
+    let buffer = &mmap[start..end];
+    debug!("Bytes dibaca: {}", buffer.len());
     let hex_strings: Vec<String> = buffer.iter().map(|b| format!("{:02X}", b)).collect();
     Ok(hex_strings.join(" "))
 }
@@ -58,14 +60,14 @@ pub fn cari_pattern_internal(
         warn!("Pattern pencarian kosong");
         return Ok(Vec::new());
     }
-    let file_data = std::fs::read(filename)?;
+    let file = File::open(filename)?;
+    let file_data = unsafe { Mmap::map(&file)? };
     debug!("Ukuran file dibaca: {}", file_data.len());
     let finder = Finder::new(pattern);
     let offsets: Vec<u64> = finder
         .find_iter(&file_data)
         .map(|i| i as u64)
         .collect();
-
     info!("Ditemukan {} cocok", offsets.len());
     Ok(offsets)
 }

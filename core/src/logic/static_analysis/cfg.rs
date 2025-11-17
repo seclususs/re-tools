@@ -58,13 +58,13 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         let text_data_size = section.size as usize;
         if text_data_offset
             .saturating_add(text_data_size)
-            > binary.file_bytes.len()
+            > binary.file_data.len()
         {
             return Err(ReToolsError::ParseError(
                 "Section .text di luar batas file".to_string(),
             ));
         }
-        let data_slice = &binary.file_bytes[text_data_offset..(text_data_offset + text_data_size)];
+        let data_slice = &binary.file_data[text_data_offset..(text_data_offset + text_data_size)];
         (data_slice, section.addr)
     } else {
         warn!("Section .text tidak ditemukan");

@@ -5,12 +5,13 @@ use crate::logic::static_analysis::analyzer::{
     deteksiHeuristicPacker_internal, deteksi_pattern_internal, ekstrak_strings_internal,
     hitung_entropy_internal, identifikasiFungsiLibrary_internal, scan_yara_internal,
 };
-use crate::logic::static_analysis::parser::Binary;
 use crate::logic::static_analysis::cfg::generate_cfg_internal;
 use crate::logic::static_analysis::diff::diff_binary_internal;
+use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::static_analysis::hexeditor::{
     cari_pattern_internal, lihat_bytes_internal, ubah_bytes_internal,
 };
+use crate::logic::static_analysis::parser::Binary;
 use crate::utils::strncpy_rs_from_bytes;
 
 use libc::{c_char, c_int};
@@ -53,6 +54,63 @@ where
             error_json
         }
     }
+}
+
+unsafe fn c_load_raw_binary_and_serialize<F, T>(
+    file_path_c: *const c_char,
+    arch_int: c_int,
+    base_addr: u64,
+    f: F,
+) -> *mut c_char
+where
+    F: FnOnce(&Binary) -> Result<T, ReToolsError>,
+    T: serde::Serialize,
+{
+    let error_json = CString::new("[]").unwrap().into_raw();
+    let path_str = match CStr::from_ptr(file_path_c).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e.into());
+            return error_json;
+        }
+    };
+    let arch = match arch_int {
+        1 => ArsitekturDisasm::ARCH_X86_32,
+        2 => ArsitekturDisasm::ARCH_X86_64,
+        3 => ArsitekturDisasm::ARCH_ARM_32,
+        4 => ArsitekturDisasm::ARCH_ARM_64,
+        _ => ArsitekturDisasm::ARCH_UNKNOWN,
+    };
+    let binary = match Binary::load_raw(path_str, arch, base_addr) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(e);
+            return error_json;
+        }
+    };
+    match f(&binary) {
+        Ok(data) => match serde_json::to_string(&data) {
+            Ok(json) => CString::new(json).unwrap_or_default().into_raw(),
+            Err(e) => {
+                set_last_error(ReToolsError::Generic(format!("Serialisasi JSON gagal: {}", e)));
+                error_json
+            }
+        },
+        Err(e) => {
+            set_last_error(e);
+            error_json
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getRawBinaryHeader_json(
+    file_path_c: *const c_char,
+    arch_int: c_int,
+    base_addr: u64,
+) -> *mut c_char {
+    c_load_raw_binary_and_serialize(file_path_c, arch_int, base_addr, |binary| Ok(binary.header))
 }
 
 #[allow(non_snake_case)]

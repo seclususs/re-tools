@@ -56,10 +56,10 @@ fn lift_function_to_ir(
         .ok_or_else(|| ReToolsError::Generic(format!("VA 0x{:x} tidak ditemukan di sections", func_va)))?;
     let start = func_offset as usize;
     let end = start.saturating_add(func_size as usize);
-    if start > binary.file_bytes.len() || end > binary.file_bytes.len() {
+    if start > binary.file_data.len() || end > binary.file_data.len() {
         return Err(ReToolsError::Generic(format!("Simbol 0x{:x} di luar batas file", func_va)));
     }
-    let func_bytes = &binary.file_bytes[start..end];
+    let func_bytes = &binary.file_data[start..end];
     let mut all_irs = Vec::new();
     let mut current_offset = 0;
     while current_offset < func_bytes.len() {
