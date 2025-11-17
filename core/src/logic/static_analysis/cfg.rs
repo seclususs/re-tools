@@ -1,5 +1,5 @@
 use crate::error::ReToolsError;
-use crate::logic::static_analysis::parser::Binary;
+use crate::logic::static_analysis::parser::{Binary, SectionInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
 use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
@@ -21,16 +21,67 @@ struct BasicBlock {
 
 impl fmt::Display for BasicBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.va_start == 0 && self.size == 0 && self.instructions.is_empty() {
+            return write!(f, "DYNAMIC_JUMP_TARGET\\n(unresolved)");
+        }
         let mut label = format!("0x{:x} (size: {} bytes):\\n", self.va_start, self.size);
         for (va, irs) in &self.instructions {
             for ir in irs {
                 let ir_str = format!("{:?}", ir)
                     .replace('"', "\\\"")
-                    .replace('\n', "\\n");
+                    .replace('\n', "\\n")
+                    .replace('<', "\\<")
+                    .replace('>', "\\>");
                 label.push_str(&format!("  0x{:x}: {}\\n", va, ir_str));
             }
         }
         write!(f, "{}", label)
+    }
+}
+
+fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
+    for sec in sections {
+        if va >= sec.addr && va < (sec.addr + sec.size) {
+            let relative_offset = va - sec.addr;
+            return Some(sec.offset + relative_offset);
+        }
+    }
+    None
+}
+
+fn read_pointer_at_va(va: u64, binary: &Binary) -> Option<u64> {
+    let offset = va_to_offset(va, &binary.sections)? as usize;
+    let data = &binary.file_data;
+    if binary.header.bits == 64 {
+        if offset + 8 <= data.len() {
+            let bytes: [u8; 8] = data[offset..offset + 8].try_into().ok()?;
+            Some(u64::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    } else {
+        if offset + 4 <= data.len() {
+            let bytes: [u8; 4] = data[offset..offset + 4].try_into().ok()?;
+            Some(u32::from_le_bytes(bytes) as u64)
+        } else {
+            None
+        }
+    }
+}
+
+fn resolve_jump_target_heuristic(expr: &IrExpression, binary: &Binary) -> Vec<u64> {
+    match expr {
+        IrExpression::Operand(IrOperand::Immediate(imm)) => {
+            vec![*imm]
+        }
+        IrExpression::Operand(IrOperand::Memory(mem_expr)) => {
+            if let IrExpression::Operand(IrOperand::Immediate(va)) = **mem_expr {
+                read_pointer_at_va(va, binary).map_or(vec![], |target| vec![target])
+            } else {
+                vec![] 
+            }
+        }
+        _ => vec![] 
     }
 }
 
@@ -43,7 +94,7 @@ fn get_target_va_from_expr(expr: &IrExpression) -> Option<u64> {
 }
 
 fn is_ir_branch(ir: &IrInstruction) -> bool {
-    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret)
+    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret | IrInstruction::Call(_))
 }
 
 pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
@@ -115,6 +166,12 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
     info!("Pass 1 selesai. Ditemukan {} leaders", leaders.len());
     let mut graph = DiGraph::<BasicBlock, &'static str>::new();
     let mut node_map = HashMap::<u64, NodeIndex>::new();
+    let dynamic_jump_node = graph.add_node(BasicBlock {
+        va_start: 0,
+        va_end: 0,
+        instructions: Vec::new(),
+        size: 0,
+    });
     let mut sorted_leaders: Vec<u64> = leaders.iter().cloned().collect();
     sorted_leaders.sort();
     debug!("Pass 2: Membuat basic blocks");
@@ -173,16 +230,26 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         }
         match last_ir.unwrap() {
             IrInstruction::Jmp(target_expr) => {
-                if let Some(target_va) = get_target_va_from_expr(target_expr) {
-                    if let Some(target_idx) = node_map.get(&target_va) {
-                        edges_to_add.push((node_idx, *target_idx, "Jump"));
+                let targets = resolve_jump_target_heuristic(target_expr, binary);
+                if targets.is_empty() {
+                    edges_to_add.push((node_idx, dynamic_jump_node, "Jump (Dynamic)"));
+                } else {
+                    for target_va in targets {
+                        if let Some(target_idx) = node_map.get(&target_va) {
+                            edges_to_add.push((node_idx, *target_idx, "Jump"));
+                        }
                     }
                 }
             }
             IrInstruction::JmpCond(_, target_expr) => {
-                if let Some(target_va) = get_target_va_from_expr(target_expr) {
-                    if let Some(target_idx) = node_map.get(&target_va) {
-                        edges_to_add.push((node_idx, *target_idx, "Jump (True)"));
+                let targets = resolve_jump_target_heuristic(target_expr, binary);
+                if targets.is_empty() {
+                    edges_to_add.push((node_idx, dynamic_jump_node, "Jump (True, Dynamic)"));
+                } else {
+                     for target_va in targets {
+                        if let Some(target_idx) = node_map.get(&target_va) {
+                            edges_to_add.push((node_idx, *target_idx, "Jump (True)"));
+                        }
                     }
                 }
                 if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {

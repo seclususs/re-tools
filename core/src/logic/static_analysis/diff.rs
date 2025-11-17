@@ -77,13 +77,51 @@ fn lift_function_to_ir(
     Ok(all_irs)
 }
 
-fn compare_ir_sequences(
-    irs1_res: Result<Vec<IrInstruction>, ReToolsError>,
-    irs2_res: Result<Vec<IrInstruction>, ReToolsError>,
+fn is_ir_branch(ir: &IrInstruction) -> bool {
+    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret | IrInstruction::Call(_))
+}
+
+fn get_ir_signature(ir: &IrInstruction) -> &'static str {
+    match ir {
+        IrInstruction::Set(_, _) => "Set",
+        IrInstruction::Push(_) => "Push",
+        IrInstruction::Pop(_) => "Pop",
+        IrInstruction::Jmp(_) => "Jmp",
+        IrInstruction::JmpCond(_, _) => "JmpCond",
+        IrInstruction::Call(_) => "Call",
+        IrInstruction::Ret => "Ret",
+        IrInstruction::Nop => "Nop",
+        IrInstruction::Syscall => "Syscall",
+        IrInstruction::Undefined => "Undefined",
+        IrInstruction::AturBendera(_, _) => "AturBendera",
+        IrInstruction::InstruksiVektor(_, _) => "InstruksiVektor",
+    }
+}
+
+fn generate_function_signature(irs: Vec<IrInstruction>) -> Vec<String> {
+    let mut all_block_sigs = Vec::new();
+    let mut current_block_sig = String::new();
+    for ir in irs {
+        current_block_sig.push_str(get_ir_signature(&ir));
+        current_block_sig.push(';');
+        if is_ir_branch(&ir) {
+            all_block_sigs.push(current_block_sig);
+            current_block_sig = String::new();
+        }
+    }
+    if !current_block_sig.is_empty() {
+        all_block_sigs.push(current_block_sig);
+    }
+    all_block_sigs
+}
+
+fn compare_function_signatures(
+    sig1_res: Result<Vec<String>, ReToolsError>,
+    sig2_res: Result<Vec<String>, ReToolsError>,
 ) -> c_int {
-    match (irs1_res, irs2_res) {
-        (Ok(irs1), Ok(irs2)) => {
-            if irs1 == irs2 {
+    match (sig1_res, sig2_res) {
+        (Ok(sig1), Ok(sig2)) => {
+            if sig1 == sig2 {
                 STATUS_MATCHED
             } else {
                 STATUS_MODIFIED
@@ -124,11 +162,11 @@ fn perform_diff_logic(
         processed_names.insert(name.clone(), true);
         let mut status_code = STATUS_REMOVED;
         let mut addr2 = 0;
-        let irs1 = lift_function_to_ir(binary1, sym1, arch1);
+        let sig1 = lift_function_to_ir(binary1, sym1, arch1).map(generate_function_signature);
         if let Some(sym2) = symbols2_map.get(name) {
             addr2 = sym2.addr;
-            let irs2 = lift_function_to_ir(binary2, sym2, arch2);
-            status_code = compare_ir_sequences(irs1, irs2);
+            let sig2 = lift_function_to_ir(binary2, sym2, arch2).map(generate_function_signature);
+            status_code = compare_function_signatures(sig1, sig2);
         }
         results.push(DiffResultInternal {
             function_name: name.clone(),
