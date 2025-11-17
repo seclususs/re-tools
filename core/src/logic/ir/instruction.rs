@@ -1,11 +1,22 @@
 use serde::Serialize;
+use std::fmt;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Hash)]
+pub struct SsaVariabel {
+    pub nama_dasar: String,
+    pub versi: u32,
+}
+
+impl fmt::Display for SsaVariabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}_{}", self.nama_dasar, self.versi)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrOperand {
-    Register(String),
-    Immediate(u64),
-    Memory(Box<IrExpression>),
+pub enum IrOperandSsa {
+    SsaVar(SsaVariabel),
+    Konstanta(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,35 +40,27 @@ pub enum IrBinOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrFlag {
-    BenderaNol,
-    BenderaBawa,
-    BenderaLimpah,
-    BenderaTanda,
-    BenderaParitas,
+pub enum IrExpressionSsa {
+    Operand(IrOperandSsa),
+    OperasiUnary(IrUnOp, Box<IrExpressionSsa>),
+    OperasiBiner(IrBinOp, Box<IrExpressionSsa>, Box<IrExpressionSsa>),
+    MuatMemori(Box<IrExpressionSsa>),
+    Bandingkan(Box<IrExpressionSsa>, Box<IrExpressionSsa>),
+    UjiBit(Box<IrExpressionSsa>, Box<IrExpressionSsa>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrExpression {
-    Operand(IrOperand),
-    UnaryOp(IrUnOp, Box<IrExpression>),
-    BinaryOp(IrBinOp, Box<IrExpression>, Box<IrExpression>),
-    Cmp(Box<IrExpression>, Box<IrExpression>),
-    Test(Box<IrExpression>, Box<IrExpression>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum IrInstruction {
-    Set(IrOperand, IrExpression),
-    Push(IrExpression),
-    Pop(IrOperand),
-    Jmp(IrExpression),
-    JmpCond(IrExpression, IrExpression),
-    Call(IrExpression),
-    Ret,
+pub enum IrInstructionSsa {
+    Assign(SsaVariabel, IrExpressionSsa),
+    SimpanMemori(IrExpressionSsa, IrExpressionSsa),
+    Dorong(IrExpressionSsa),
+    Ambil(SsaVariabel),
+    Lompat(IrExpressionSsa),
+    LompatKondisi(IrExpressionSsa, IrExpressionSsa),
+    Panggil(IrExpressionSsa),
+    Kembali,
     Nop,
     Syscall,
-    Undefined,
-    AturBendera(IrFlag, IrExpression),
-    InstruksiVektor(String, Vec<IrOperand>),
+    TidakTerdefinisi,
+    InstruksiVektor(String, Vec<IrOperandSsa>),
 }

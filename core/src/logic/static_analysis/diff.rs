@@ -6,8 +6,7 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::ir::instruction::IrInstruction;
-
+use crate::logic::ir::instruction::IrInstructionSsa;
 
 #[derive(Debug, serde::Serialize)]
 pub struct DiffResultInternal {
@@ -34,7 +33,7 @@ fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
 
 fn get_arch_from_binary(binary: &Binary) -> ArsitekturDisasm {
     match (binary.header.arch, binary.header.bits) {
-        ("x86-64", 64) => ArsitekturDisasm::ARCH_X86_64,
+        ("x86-66", 64) => ArsitekturDisasm::ARCH_X86_64,
         ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
         ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
         ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
@@ -46,7 +45,7 @@ fn lift_function_to_ir(
     binary: &Binary,
     sym: &SymbolInfo,
     arch: ArsitekturDisasm,
-) -> Result<Vec<IrInstruction>, ReToolsError> {
+) -> Result<Vec<IrInstructionSsa>, ReToolsError> {
     let func_va = sym.addr;
     let func_size = sym.size;
     if func_size == 0 {
@@ -66,7 +65,7 @@ fn lift_function_to_ir(
         let current_va = func_va + current_offset as u64;
         let (size, irs) = match angkat_blok_instruksi(&func_bytes[current_offset..], current_va, arch) {
             Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-            _ => (1, vec![IrInstruction::Undefined]),
+            _ => (1, vec![IrInstructionSsa::TidakTerdefinisi]),
         };
         all_irs.extend(irs);
         current_offset += size;
@@ -77,28 +76,28 @@ fn lift_function_to_ir(
     Ok(all_irs)
 }
 
-fn is_ir_branch(ir: &IrInstruction) -> bool {
-    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret | IrInstruction::Call(_))
+fn is_ir_branch(ir: &IrInstructionSsa) -> bool {
+    matches!(ir, IrInstructionSsa::Lompat(_) | IrInstructionSsa::LompatKondisi(_, _) | IrInstructionSsa::Kembali | IrInstructionSsa::Panggil(_))
 }
 
-fn get_ir_signature(ir: &IrInstruction) -> &'static str {
+fn get_ir_signature(ir: &IrInstructionSsa) -> &'static str {
     match ir {
-        IrInstruction::Set(_, _) => "Set",
-        IrInstruction::Push(_) => "Push",
-        IrInstruction::Pop(_) => "Pop",
-        IrInstruction::Jmp(_) => "Jmp",
-        IrInstruction::JmpCond(_, _) => "JmpCond",
-        IrInstruction::Call(_) => "Call",
-        IrInstruction::Ret => "Ret",
-        IrInstruction::Nop => "Nop",
-        IrInstruction::Syscall => "Syscall",
-        IrInstruction::Undefined => "Undefined",
-        IrInstruction::AturBendera(_, _) => "AturBendera",
-        IrInstruction::InstruksiVektor(_, _) => "InstruksiVektor",
+        IrInstructionSsa::Assign(_, _) => "Assign",
+        IrInstructionSsa::SimpanMemori(_, _) => "SimpanMemori",
+        IrInstructionSsa::Dorong(_) => "Dorong",
+        IrInstructionSsa::Ambil(_) => "Ambil",
+        IrInstructionSsa::Lompat(_) => "Lompat",
+        IrInstructionSsa::LompatKondisi(_, _) => "LompatKondisi",
+        IrInstructionSsa::Panggil(_) => "Panggil",
+        IrInstructionSsa::Kembali => "Kembali",
+        IrInstructionSsa::Nop => "Nop",
+        IrInstructionSsa::Syscall => "Syscall",
+        IrInstructionSsa::TidakTerdefinisi => "TidakTerdefinisi",
+        IrInstructionSsa::InstruksiVektor(_, _) => "InstruksiVektor",
     }
 }
 
-fn generate_function_signature(irs: Vec<IrInstruction>) -> Vec<String> {
+fn generate_function_signature(irs: Vec<IrInstructionSsa>) -> Vec<String> {
     let mut all_block_sigs = Vec::new();
     let mut current_block_sig = String::new();
     for ir in irs {

@@ -7,7 +7,7 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::Binary;
 use log::{debug, info, warn};
 use regex::bytes::Regex;
-
+use memchr::memmem::Finder;
 
 #[derive(Serialize)]
 pub struct StringInfo {
@@ -43,6 +43,13 @@ pub struct LibraryMatch {
     pub signature_name: String,
     pub offset: u64,
     pub matched_bytes_hex: String,
+}
+
+#[derive(Serialize)]
+pub struct CryptoMatch {
+    pub algorithm: String,
+    pub constant_name: String,
+    pub offset: u64,
 }
 
 pub fn ekstrak_strings_internal(
@@ -332,6 +339,61 @@ pub fn identifikasiFungsiLibrary_internal(
         results.len()
     );
     Ok(results)
+}
+
+pub fn scan_crypto_constants_internal(
+    binary: &Binary,
+) -> Result<Vec<CryptoMatch>, ReToolsError> {
+    info!("Mulai scan konstanta kriptografi: {}", binary.file_path);
+    let mut results = Vec::new();
+    let data = &binary.file_data;
+    let constants_db = [
+        ("AES", "S-Box (Forward)", &b"\x63\x7c\x77\x7b\xf2\x6b\x6f\xc5\x30\x01\x67\x2b\xfe\xd7\xab\x76"[..]),
+        ("AES", "S-Box (Inverse)", &b"\x52\x09\x6a\xd5\x30\x36\xa5\x38\xbf\x40\xa3\x9e\x81\xf3\xd7\xfb"[..]),
+        ("SHA-256", "H[0]-H[3]", &b"\x6a\x09\xe6\x67\xbb\x67\xae\x85\x3c\x6e\xf3\x72\xa5\x4f\xf5\x3a"[..]),
+        ("SHA-256", "H[4]-H[7]", &b"\x51\x0e\x27\xbc\x9b\x05\x68\x8c\x1f\x83\xd9\xab\x5b\xe0\xcd\x19"[..]),
+        ("SHA-256", "K[0]-K[3]", &b"\x42\x8a\x2f\x98\x71\x37\x44\x91\xb5\xc0\xfb\xcf\xe9\xb5\xdc\x8a"[..]),
+        ("SHA-1", "H[0]-H[4]", &b"\x67\x45\x23\x01\xef\xcd\xab\x89\x98\xba\xdc\xfe\x10\x32\x54\x76\xc3\xd2\xe1\xf0"[..]),
+        ("MD5", "A,B,C,D", &b"\x01\x23\x45\x67\x89\xab\xcd\xef\xfe\xdc\xba\x98\x76\x54\x32\x10"[..]),
+        ("SHA-512", "H[0]-H[3]", &b"\x6a\x09\xe6\x67\xf3\xbc\xc9\x08\xbb\x67\xae\x85\x84\xca\xa7\x3b\x3c\x6e\xf3\x72\xfe\x94\xf8\x2b\xa5\x4f\xf5\x3a\x5f\x1d\x36\xf1"[..]),
+    ];
+    for (algo, name, pattern) in constants_db.iter() {
+        let finder = Finder::new(pattern);
+        for offset in finder.find_iter(data) {
+            results.push(CryptoMatch {
+                algorithm: algo.to_string(),
+                constant_name: name.to_string(),
+                offset: offset as u64,
+            });
+        }
+    }
+    info!("Scan konstanta kripto selesai, {} match ditemukan", results.len());
+    Ok(results)
+}
+
+#[allow(non_snake_case)]
+pub fn getKodeAksesData_internal(
+    binary: &Binary,
+    data_address: u64,
+) -> Result<Vec<u64>, ReToolsError> {
+    match binary.data_access_graph.get(&data_address) {
+        Some(accessors) => Ok(accessors.clone()),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[allow(non_snake_case)]
+pub fn getPeneleponFungsi_internal(
+    binary: &Binary,
+    function_address: u64,
+) -> Result<Vec<u64>, ReToolsError> {
+    let mut callers = Vec::new();
+    for (caller_va, callee_vas) in &binary.call_graph {
+        if callee_vas.contains(&function_address) {
+            callers.push(*caller_va);
+        }
+    }
+    Ok(callers)
 }
 
 #[cfg(test)]

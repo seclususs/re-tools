@@ -23,7 +23,6 @@ use platform_unsupported::UnsupportedTracer;
 #[cfg(windows)]
 use platform_windows::WindowsTracer;
 
-
 pub type Debugger = Box<dyn PlatformTracer + Send + Sync>;
 
 pub fn new_debugger(pid: c_int) -> Result<Debugger, ReToolsError> {

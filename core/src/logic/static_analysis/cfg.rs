@@ -2,7 +2,7 @@ use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::{Binary, SectionInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
-use crate::logic::ir::instruction::{IrInstruction, IrOperand, IrExpression};
+use crate::logic::ir::instruction::{IrInstructionSsa, IrOperandSsa, IrExpressionSsa};
 
 use log::{debug, info, warn};
 use petgraph::dot::Dot;
@@ -10,12 +10,11 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-
 #[derive(Debug, Clone)]
 struct BasicBlock {
     va_start: u64,
     va_end: u64,
-    instructions: Vec<(u64, Vec<IrInstruction>)>,
+    instructions: Vec<(u64, Vec<IrInstructionSsa>)>,
     size: u64,
 }
 
@@ -49,7 +48,7 @@ fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
     None
 }
 
-fn read_pointer_at_va(va: u64, binary: &Binary) -> Option<u64> {
+fn baca_pointer_di_va(va: u64, binary: &Binary) -> Option<u64> {
     let offset = va_to_offset(va, &binary.sections)? as usize;
     let data = &binary.file_data;
     if binary.header.bits == 64 {
@@ -69,36 +68,86 @@ fn read_pointer_at_va(va: u64, binary: &Binary) -> Option<u64> {
     }
 }
 
-fn resolve_jump_target_heuristic(expr: &IrExpression, binary: &Binary) -> Vec<u64> {
+fn ekstrak_basis_tabel(expr: &IrExpressionSsa) -> Option<u64> {
     match expr {
-        IrExpression::Operand(IrOperand::Immediate(imm)) => {
-            vec![*imm]
+        IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => Some(*imm),
+        IrExpressionSsa::OperasiBiner(_, left, right) => {
+            ekstrak_basis_tabel(left).or_else(|| ekstrak_basis_tabel(right))
         }
-        IrExpression::Operand(IrOperand::Memory(mem_expr)) => {
-            if let IrExpression::Operand(IrOperand::Immediate(va)) = **mem_expr {
-                read_pointer_at_va(va, binary).map_or(vec![], |target| vec![target])
-            } else {
-                vec![] 
-            }
-        }
-        _ => vec![] 
+        IrExpressionSsa::Operand(IrOperandSsa::SsaVar(_)) => None,
+        IrExpressionSsa::MuatMemori(inner) => ekstrak_basis_tabel(inner),
+        _ => None,
     }
 }
 
-fn get_target_va_from_expr(expr: &IrExpression) -> Option<u64> {
-    if let IrExpression::Operand(IrOperand::Immediate(imm)) = expr {
+fn pindai_target_tabel(base_va: u64, binary: &Binary) -> Vec<u64> {
+    let mut targets = Vec::new();
+    let pointer_size = if binary.header.bits == 64 { 8 } else { 4 };
+    let text_section = binary.sections.iter().find(|s| s.name == ".text");
+    let (text_start, text_end) = if let Some(sec) = text_section {
+        (sec.addr, sec.addr + sec.size)
+    } else {
+        (0, u64::MAX)
+    };
+    for i in 0..256 {
+        let current_va = base_va + (i * pointer_size);
+        match baca_pointer_di_va(current_va, binary) {
+            Some(target_va) => {
+                if target_va >= text_start && target_va < text_end {
+                    targets.push(target_va);
+                } else {
+                    break;
+                }
+            }
+            None => {
+                break;
+            }
+        }
+    }
+    targets
+}
+
+fn tentukan_target_lompat(expr: &IrExpressionSsa, binary: &Binary) -> Vec<u64> {
+    match expr {
+        IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => {
+            vec![*imm]
+        }
+        IrExpressionSsa::MuatMemori(mem_expr) => {
+            match ekstrak_basis_tabel(mem_expr) {
+                Some(base_va) => {
+                    let targets = pindai_target_tabel(base_va, binary);
+                    if !targets.is_empty() {
+                        targets
+                    } else {
+                        if let IrExpressionSsa::Operand(IrOperandSsa::Konstanta(va)) = **mem_expr {
+                            baca_pointer_di_va(va, binary).map_or(vec![], |target| vec![target])
+                        } else {
+                            vec![]
+                        }
+                    }
+                }
+                None => vec![]
+            }
+        }
+        _ => vec![]
+    }
+}
+
+
+fn get_target_va_from_expr(expr: &IrExpressionSsa) -> Option<u64> {
+    if let IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) = expr {
         Some(*imm)
     } else {
         None
     }
 }
 
-fn is_ir_branch(ir: &IrInstruction) -> bool {
-    matches!(ir, IrInstruction::Jmp(_) | IrInstruction::JmpCond(_, _) | IrInstruction::Ret | IrInstruction::Call(_))
+fn is_ir_branch(ir: &IrInstructionSsa) -> bool {
+    matches!(ir, IrInstructionSsa::Lompat(_) | IrInstructionSsa::LompatKondisi(_, _) | IrInstructionSsa::Kembali | IrInstructionSsa::Panggil(_))
 }
 
-pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
-    info!("Mulai generate CFG (IR-based) untuk: {}", binary.file_path);
+pub fn buat_cfg(binary: &Binary) -> Result<String, ReToolsError> {
+    info!("Mulai buat CFG (IR-based) untuk: {}", binary.file_path);
     let text_section = binary.sections.iter().find(|s| s.name == ".text");
     let (text_data, base_addr) = if let Some(section) = text_section {
         info!(
@@ -124,7 +173,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         ));
     };
     let arch_disasm = match (binary.header.arch, binary.header.bits) {
-        ("x86-64", 64) => ArsitekturDisasm::ARCH_X86_64,
+        ("x86-66", 64) => ArsitekturDisasm::ARCH_X86_64,
         ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
         ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
         ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
@@ -139,7 +188,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         let va = base_addr + offset as u64;
         let (size, irs) = match angkat_blok_instruksi(&text_data[offset..], va, arch_disasm) {
             Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-            _ => (1, vec![IrInstruction::Undefined]),
+            _ => (1, vec![IrInstructionSsa::TidakTerdefinisi]),
         };
         lifted_instructions.insert(va, (irs.clone(), size));
         if let Some(last_ir) = irs.last() {
@@ -149,7 +198,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
                     leaders.insert(fallthrough_addr);
                 }
                 let target_addr_opt = match last_ir {
-                    IrInstruction::Jmp(expr) | IrInstruction::JmpCond(_, expr) | IrInstruction::Call(expr) => {
+                    IrInstructionSsa::Lompat(expr) | IrInstructionSsa::LompatKondisi(_, expr) | IrInstructionSsa::Panggil(expr) => {
                         get_target_va_from_expr(expr)
                     }
                     _ => None
@@ -179,13 +228,13 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
         if node_map.contains_key(&leader_va) {
             continue;
         }
-        let mut block_instrs: Vec<(u64, Vec<IrInstruction>)> = Vec::new();
+        let mut block_instrs: Vec<(u64, Vec<IrInstructionSsa>)> = Vec::new();
         let mut current_addr = leader_va;
         let mut block_size: u64 = 0;
         loop {
             let (irs, size) = match lifted_instructions.get(&current_addr) {
                 Some((irs, size)) => (irs.clone(), *size),
-                None => (vec![IrInstruction::Undefined], 1),
+                None => (vec![IrInstructionSsa::TidakTerdefinisi], 1),
             };
             if size == 0 {
                  break;
@@ -229,8 +278,8 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
             continue;
         }
         match last_ir.unwrap() {
-            IrInstruction::Jmp(target_expr) => {
-                let targets = resolve_jump_target_heuristic(target_expr, binary);
+            IrInstructionSsa::Lompat(target_expr) => {
+                let targets = tentukan_target_lompat(target_expr, binary);
                 if targets.is_empty() {
                     edges_to_add.push((node_idx, dynamic_jump_node, "Jump (Dynamic)"));
                 } else {
@@ -241,8 +290,8 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
                     }
                 }
             }
-            IrInstruction::JmpCond(_, target_expr) => {
-                let targets = resolve_jump_target_heuristic(target_expr, binary);
+            IrInstructionSsa::LompatKondisi(_, target_expr) => {
+                let targets = tentukan_target_lompat(target_expr, binary);
                 if targets.is_empty() {
                     edges_to_add.push((node_idx, dynamic_jump_node, "Jump (True, Dynamic)"));
                 } else {
@@ -256,7 +305,7 @@ pub fn generate_cfg_internal(binary: &Binary) -> Result<String, ReToolsError> {
                     edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough (False)"));
                 }
             }
-            IrInstruction::Ret => {
+            IrInstructionSsa::Kembali => {
             }
             _ => {
                 if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {

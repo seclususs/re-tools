@@ -11,7 +11,6 @@ use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::io::IoSliceMut;
 
-
 pub struct LinuxTracer {
     pid_target: Pid,
     breakpoints_map: HashMap<u64, u8>,
@@ -288,7 +287,6 @@ impl PlatformTracer for LinuxTracer {
                             }
                             _ => None
                         };
-                        
                         if let Some(tipe) = event_type {
                             (*event_out).tipe = tipe;
                             (*event_out).pid_thread = pid.as_raw();
@@ -425,6 +423,20 @@ impl PlatformTracer for LinuxTracer {
         }
         ptrace::setoptions(self.pid_target, options)?;
         Ok(())
+    }
+    fn hook_memory_api(
+        &mut self,
+        _api_name: &str,
+        _on_entry_callback: u64,
+        _on_exit_callback: u64,
+    ) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
 }
 

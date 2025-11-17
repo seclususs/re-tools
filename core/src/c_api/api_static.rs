@@ -3,9 +3,10 @@
 use crate::error::{set_last_error, ReToolsError};
 use crate::logic::static_analysis::analyzer::{
     deteksiHeuristicPacker_internal, deteksi_pattern_internal, ekstrak_strings_internal,
-    hitung_entropy_internal, identifikasiFungsiLibrary_internal, scan_yara_internal,
+    getKodeAksesData_internal, getPeneleponFungsi_internal, hitung_entropy_internal,
+    identifikasiFungsiLibrary_internal, scan_yara_internal, scan_crypto_constants_internal,
 };
-use crate::logic::static_analysis::cfg::generate_cfg_internal;
+use crate::logic::static_analysis::cfg::buat_cfg;
 use crate::logic::static_analysis::diff::diff_binary_internal;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::static_analysis::hexeditor::{
@@ -253,6 +254,16 @@ pub unsafe extern "C" fn c_scanYara_rs(
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_scanCryptoConstants_json(
+    file_path_c: *const c_char,
+) -> *mut c_char {
+    c_load_binary_and_serialize(file_path_c, |binary| {
+        scan_crypto_constants_internal(binary)
+    })
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_deteksiHeuristicPacker(
     file_path_c: *const c_char,
     entropy_threshold: f64,
@@ -319,7 +330,7 @@ pub unsafe extern "C" fn c_diffBinary_json(
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn c_generateCFG_rs(filename_c: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn c_buatCFG(filename_c: *const c_char) -> *mut c_char {
     let error_dot = "digraph G {{ error [label=\"Koneksi error\"]; }}";
     let path_str = match CStr::from_ptr(filename_c).to_str() {
         Ok(s) => s,
@@ -332,7 +343,7 @@ pub unsafe extern "C" fn c_generateCFG_rs(filename_c: *const c_char) -> *mut c_c
     };
     let binary_result = Binary::load(path_str);
     let dot_result = match binary_result {
-        Ok(binary) => match generate_cfg_internal(&binary) {
+        Ok(binary) => match buat_cfg(&binary) {
             Ok(dot) => dot,
             Err(e) => {
                 let err_msg = e.to_string();
@@ -455,4 +466,26 @@ pub unsafe extern "C" fn c_cariPattern_json(
             error_json
         }
     }
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getKodeAksesData_json(
+    file_path_c: *const c_char,
+    data_address: u64,
+) -> *mut c_char {
+    c_load_binary_and_serialize(file_path_c, |binary| {
+        getKodeAksesData_internal(binary, data_address)
+    })
+}
+
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn c_getPeneleponFungsi_json(
+    file_path_c: *const c_char,
+    function_address: u64,
+) -> *mut c_char {
+    c_load_binary_and_serialize(file_path_c, |binary| {
+        getPeneleponFungsi_internal(binary, function_address)
+    })
 }

@@ -1,12 +1,15 @@
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
+use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::instruction::{IrExpressionSsa, IrInstructionSsa, IrOperandSsa};
 use goblin::elf::dynamic;
 use goblin::elf::sym;
 use goblin::Object;
 use memmap2::Mmap;
 use serde::Serialize;
 use std::fs::File;
-
+use std::collections::HashMap;
+use log::{info, warn};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct InternalHeaderInfo {
@@ -90,6 +93,15 @@ impl InternalHeaderInfo {
             ArsitekturDisasm::ARCH_UNKNOWN => 0,
         }
     }
+    pub fn get_disasm_arch(&self) -> ArsitekturDisasm {
+        match (self.arch, self.bits) {
+            ("x86-64", 64) => ArsitekturDisasm::ARCH_X86_64,
+            ("x86", 32) => ArsitekturDisasm::ARCH_X86_32,
+            ("AArch64", 64) => ArsitekturDisasm::ARCH_ARM_64,
+            ("ARM", 32) => ArsitekturDisasm::ARCH_ARM_32,
+            _ => ArsitekturDisasm::ARCH_UNKNOWN,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,6 +150,8 @@ pub struct Binary {
     pub imports: Vec<ImportInfo>,
     pub exports: Vec<ExportInfo>,
     pub elf_dynamic_info: Vec<ElfDynamicInfo>,
+    pub call_graph: HashMap<u64, Vec<u64>>,
+    pub data_access_graph: HashMap<u64, Vec<u64>>,
 }
 
 impl Binary {
@@ -154,7 +168,7 @@ impl Binary {
         let imports = Self::parse_imports_internal(&obj)?;
         let exports = Self::parse_exports_internal(&obj)?;
         let elf_dynamic_info = Self::parse_elf_dynamic_info_internal(&obj)?;
-        Ok(Binary {
+        let mut binary = Binary {
             file_path: file_path_string,
             file_data,
             header,
@@ -163,9 +177,23 @@ impl Binary {
             imports,
             exports,
             elf_dynamic_info,
-        })
+            call_graph: HashMap::new(),
+            data_access_graph: HashMap::new(),
+        };
+        let arch = binary.header.get_disasm_arch();
+        if arch != ArsitekturDisasm::ARCH_UNKNOWN {
+            match Self::build_xrefs_internal(&binary, arch) {
+                Ok((cg, dag)) => {
+                    binary.call_graph = cg;
+                    binary.data_access_graph = dag;
+                }
+                Err(e) => {
+                    warn!("Gagal build XRefs: {}", e);
+                }
+            }
+        }
+        Ok(binary)
     }
-
     pub fn load_raw(
         file_path: &str,
         raw_arch: ArsitekturDisasm,
@@ -186,13 +214,13 @@ impl Binary {
             file_size,
         };
         let main_section = SectionInfo {
-            name: ".data".to_string(),
+            name: ".text".to_string(),
             addr: base_addr,
             size: file_size,
             offset: 0,
             flags: 0x1 | 0x2 | 0x4,
         };
-        Ok(Binary {
+        let mut binary = Binary {
             file_path: file_path_string,
             file_data,
             header,
@@ -201,9 +229,140 @@ impl Binary {
             imports: Vec::new(),
             exports: Vec::new(),
             elf_dynamic_info: Vec::new(),
-        })
+            call_graph: HashMap::new(),
+            data_access_graph: HashMap::new(),
+        };
+        let arch = binary.header.get_disasm_arch();
+        if arch != ArsitekturDisasm::ARCH_UNKNOWN {
+             match Self::build_xrefs_internal(&binary, arch) {
+                Ok((cg, dag)) => {
+                    binary.call_graph = cg;
+                    binary.data_access_graph = dag;
+                }
+                Err(e) => {
+                    warn!("Gagal build XRefs untuk raw: {}", e);
+                }
+            }
+        }
+        Ok(binary)
     }
-
+    fn build_xrefs_internal(
+        binary: &Binary,
+        arch: ArsitekturDisasm,
+    ) -> Result<(HashMap<u64, Vec<u64>>, HashMap<u64, Vec<u64>>), ReToolsError> {
+        info!("Mulai build XRefs untuk: {}", binary.file_path);
+        let mut call_graph: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut data_access_graph: HashMap<u64, Vec<u64>> = HashMap::new();
+        let executable_sections = binary.sections.iter().filter(|s| {
+            (s.name.starts_with(".text") || s.name.starts_with("INIT") || s.name.starts_with("PLT")) || (s.flags & 0x4) != 0 || (s.flags & 0x20000000) != 0
+        });
+        for section in executable_sections {
+            let data_offset = section.offset as usize;
+            let data_size = section.size as usize;
+            let base_addr = section.addr;
+            if data_offset.saturating_add(data_size) > binary.file_data.len() {
+                warn!("Seksi executable di luar batas file: {}", section.name);
+                continue;
+            }
+            let section_data = &binary.file_data[data_offset..(data_offset + data_size)];
+            let mut offset: usize = 0;
+            while offset < section_data.len() {
+                let va = base_addr + offset as u64;
+                let (size, irs) = match angkat_blok_instruksi(&section_data[offset..], va, arch) {
+                    Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
+                    _ => (1, vec![IrInstructionSsa::TidakTerdefinisi]),
+                };
+                if size == 0 { 
+                    warn!("Disasm size 0 pada 0x{:x}, break", va);
+                    break; 
+                }
+                for ir in irs {
+                    Self::analyze_ir_for_xrefs(ir, va, &mut call_graph, &mut data_access_graph, binary);
+                }
+                offset += size;
+            }
+        }
+        info!("Selesai build XRefs. Ditemukan {} calls, {} data refs", call_graph.len(), data_access_graph.len());
+        Ok((call_graph, data_access_graph))
+    }
+    fn analyze_ir_for_xrefs(
+        ir: IrInstructionSsa,
+        instr_va: u64,
+        call_graph: &mut HashMap<u64, Vec<u64>>,
+        data_access_graph: &mut HashMap<u64, Vec<u64>>,
+        binary: &Binary,
+    ) {
+        match ir {
+            IrInstructionSsa::Panggil(expr) => {
+                if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
+                    call_graph.entry(instr_va).or_default().push(target_va);
+                }
+                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+            }
+            IrInstructionSsa::Lompat(expr) => {
+                if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
+                    if binary.symbols.iter().any(|s| s.addr == target_va && s.symbol_type == "FUNC") {
+                        call_graph.entry(instr_va).or_default().push(target_va);
+                    }
+                }
+                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+            }
+            IrInstructionSsa::Assign(_, expr) |
+            IrInstructionSsa::Dorong(expr) => {
+                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+            }
+            IrInstructionSsa::LompatKondisi(cond_expr, target_expr) => {
+                Self::find_data_refs_in_expr(&cond_expr, instr_va, data_access_graph);
+                Self::find_data_refs_in_expr(&target_expr, instr_va, data_access_graph);
+            }
+            IrInstructionSsa::SimpanMemori(addr_expr, data_expr) => {
+                Self::find_data_refs_in_expr(&addr_expr, instr_va, data_access_graph);
+                Self::find_data_refs_in_expr(&data_expr, instr_va, data_access_graph);
+            }
+            _ => {}
+        }
+    }
+    fn find_data_refs_in_expr(
+        expr: &IrExpressionSsa,
+        instr_va: u64,
+        data_graph: &mut HashMap<u64, Vec<u64>>,
+    ) {
+        match expr {
+            IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => {
+                if *imm > 0x1000 {
+                    data_graph.entry(*imm).or_default().push(instr_va);
+                }
+            }
+            IrExpressionSsa::MuatMemori(inner) => {
+                if let Some(data_va) = Self::extract_constant_from_expr(inner) {
+                    if data_va > 0x1000 {
+                        data_graph.entry(data_va).or_default().push(instr_va);
+                    }
+                }
+                Self::find_data_refs_in_expr(inner, instr_va, data_graph);
+            }
+            IrExpressionSsa::OperasiUnary(_, inner) => {
+                Self::find_data_refs_in_expr(inner, instr_va, data_graph);
+            }
+            IrExpressionSsa::OperasiBiner(_, left, right) |
+            IrExpressionSsa::Bandingkan(left, right) |
+            IrExpressionSsa::UjiBit(left, right) => {
+                Self::find_data_refs_in_expr(left, instr_va, data_graph);
+                Self::find_data_refs_in_expr(right, instr_va, data_graph);
+            }
+            IrExpressionSsa::Operand(IrOperandSsa::SsaVar(_)) => {}
+        }
+    }
+    fn extract_constant_from_expr(expr: &IrExpressionSsa) -> Option<u64> {
+        match expr {
+            IrExpressionSsa::Operand(IrOperandSsa::Konstanta(imm)) => Some(*imm),
+            IrExpressionSsa::OperasiBiner(_, left, right) => {
+                Self::extract_constant_from_expr(left).or_else(|| Self::extract_constant_from_expr(right))
+            }
+            IrExpressionSsa::MuatMemori(inner) => Self::extract_constant_from_expr(inner),
+            _ => None,
+        }
+    }
     fn parse_header_internal(
         obj: &Object,
         file_size: u64,
@@ -511,7 +670,7 @@ impl Binary {
                         let vis = sym::st_visibility(sym.st_other);
                         if !sym.is_import()
                             && (bind == sym::STB_GLOBAL || bind == sym::STB_WEAK)
-                            && type_ == sym::STT_FUNC
+                            && (type_ == sym::STT_FUNC || type_ == sym::STT_OBJECT)
                             && vis != sym::STV_HIDDEN
                         {
                             elf.dynstrtab

@@ -5,7 +5,6 @@ use libc::c_int;
 
 pub struct UnsupportedTracer;
 
-
 impl UnsupportedTracer {
     pub fn new(_pid: c_int) -> Result<Self, ReToolsError> {
         Ok(UnsupportedTracer)
@@ -56,7 +55,6 @@ impl PlatformTracer for UnsupportedTracer {
     fn remove_hardware_breakpoint(&mut self, _index: usize) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-
     fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
         Err(Self::unsupported_err())
     }
@@ -70,6 +68,20 @@ impl PlatformTracer for UnsupportedTracer {
         Err(Self::unsupported_err())
     }
     fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn hook_memory_api(
+        &mut self,
+        _api_name: &str,
+        _on_entry_callback: u64,
+        _on_exit_callback: u64,
+    ) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
 }

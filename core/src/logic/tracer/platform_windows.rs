@@ -44,7 +44,6 @@ use windows_sys::Win32::System::Threading::{
     THREAD_GET_CONTEXT, THREAD_SET_CONTEXT,
 };
 
-
 pub struct WindowsTracer {
     pid_target: u32,
     handle_proses: HANDLE,
@@ -593,25 +592,25 @@ impl PlatformTracer for WindowsTracer {
                 let mut proteksi = 0;
                 if (mem_info.Protect & 0x02) != 0 {
                     proteksi |= 1;
-                } // PAGE_READONLY
+                } 
                 if (mem_info.Protect & 0x04) != 0 {
                     proteksi |= 3;
-                } // PAGE_READWRITE
+                } 
                 if (mem_info.Protect & 0x08) != 0 {
                     proteksi |= 3;
-                } // PAGE_WRITECOPY
+                } 
                 if (mem_info.Protect & 0x10) != 0 {
                     proteksi |= 5;
-                } // PAGE_EXECUTE
+                } 
                 if (mem_info.Protect & 0x20) != 0 {
                     proteksi |= 5;
-                } // PAGE_EXECUTE_READ
+                } 
                 if (mem_info.Protect & 0x40) != 0 {
                     proteksi |= 7;
-                } // PAGE_EXECUTE_READWRITE
+                } 
                 if (mem_info.Protect & 0x80) != 0 {
                     proteksi |= 7;
-                } // PAGE_EXECUTE_WRITECOPY
+                } 
                 let mut path_bytes = [0 as c_char; 260];
                 let mut path_buffer: [u8; 260] = [0; 260];
                 if GetModuleFileNameExA(
@@ -649,6 +648,20 @@ impl PlatformTracer for WindowsTracer {
     }
     fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
         Ok(())
+    }
+    fn hook_memory_api(
+        &mut self,
+        _api_name: &str,
+        _on_entry_callback: u64,
+        _on_exit_callback: u64,
+    ) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
 }
 

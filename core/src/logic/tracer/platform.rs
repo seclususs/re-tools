@@ -21,4 +21,12 @@ pub trait PlatformTracer: Send + Sync {
     fn set_pelacakan_syscall(&mut self, enable: bool) -> Result<(), ReToolsError>;
     fn get_info_syscall(&self, pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError>;
     fn set_options_multithread(&mut self) -> Result<(), ReToolsError>;
+    fn hook_memory_api(
+        &mut self,
+        api_name: &str,
+        on_entry_callback: u64,
+        on_exit_callback: u64,
+    ) -> Result<(), ReToolsError>;
+    fn remove_memory_api_hook(&mut self, api_name: &str) -> Result<(), ReToolsError>;
+    fn dump_memory_region(&self, address: u64, size: usize, file_path: &str) -> Result<(), ReToolsError>;
 }

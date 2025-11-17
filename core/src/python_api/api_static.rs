@@ -5,9 +5,10 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::analyzer::{
     deteksiHeuristicPacker_internal, deteksi_pattern_internal, ekstrak_strings_internal,
-    hitung_entropy_internal, identifikasiFungsiLibrary_internal, scan_yara_internal,
+    getKodeAksesData_internal, getPeneleponFungsi_internal, hitung_entropy_internal,
+    identifikasiFungsiLibrary_internal, scan_yara_internal, scan_crypto_constants_internal,
 };
-use crate::logic::static_analysis::cfg::generate_cfg_internal;
+use crate::logic::static_analysis::cfg::buat_cfg;
 use crate::logic::static_analysis::diff::diff_binary_internal;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
 use crate::logic::static_analysis::hexeditor::{
@@ -16,7 +17,6 @@ use crate::logic::static_analysis::hexeditor::{
 use crate::logic::static_analysis::parser::Binary;
 
 use log::{error, info};
-
 
 pub fn map_err_to_py(err: ReToolsError) -> PyErr {
     error!("Error pada boundary Python API: {}", err);
@@ -137,6 +137,22 @@ fn scan_yara_py(py: Python, file_path: &str, yara_rules: &str) -> PyResult<PyObj
     }
 }
 
+#[pyfunction(name = "scanCryptoConstants")]
+fn scan_crypto_constants_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    info!("py: scanCryptoConstants dipanggil untuk: {}", file_path);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match scan_crypto_constants_internal(&binary) {
+        Ok(results) => {
+            let json_str = serde_json::to_string(&results)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let json_module = PyModule::import_bound(py, "json")?;
+            let py_json = json_module.getattr("loads")?.call1((json_str,))?;
+            Ok(py_json.to_object(py))
+        }
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
 #[pyfunction(name = "deteksiHeuristicPacker")]
 fn deteksi_heuristic_packer_py(
     py: Python,
@@ -177,11 +193,11 @@ fn identifikasi_fungsi_library_py(
     }
 }
 
-#[pyfunction(name = "generateCFG")]
-fn generate_cfg_py(_py: Python, file_path: &str) -> PyResult<String> {
-    info!("py: generateCFG dipanggil untuk: {}", file_path);
+#[pyfunction(name = "buatCFG")]
+fn buat_cfg_py(_py: Python, file_path: &str) -> PyResult<String> {
+    info!("py: buatCFG dipanggil untuk: {}", file_path);
     let binary = Binary::load(file_path).map_err(map_err_to_py)?;
-    match generate_cfg_internal(&binary) {
+    match buat_cfg(&binary) {
         Ok(dot_str) => Ok(dot_str),
         Err(e) => Err(map_err_to_py(e)),
     }
@@ -316,6 +332,34 @@ fn parse_dynamic_section_elf_py(py: Python, file_path: &str) -> PyResult<PyObjec
     Ok(py_list.to_object(py))
 }
 
+#[pyfunction(name = "getKodeAksesData")]
+fn get_kode_akses_data_py(
+    _py: Python,
+    file_path: &str,
+    data_address: u64,
+) -> PyResult<Vec<u64>> {
+    info!("py: getKodeAksesData dipanggil untuk: {} @ 0x{:x}", file_path, data_address);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match getKodeAksesData_internal(&binary, data_address) {
+        Ok(results) => Ok(results),
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
+#[pyfunction(name = "getPeneleponFungsi")]
+fn get_penelepon_fungsi_py(
+    _py: Python,
+    file_path: &str,
+    function_address: u64,
+) -> PyResult<Vec<u64>> {
+    info!("py: getPeneleponFungsi dipanggil untuk: {} @ 0x{:x}", file_path, function_address);
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    match getPeneleponFungsi_internal(&binary, function_address) {
+        Ok(results) => Ok(results),
+        Err(e) => Err(map_err_to_py(e)),
+    }
+}
+
 pub fn register_static_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_header_info_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_header_info_raw_py, m)?)?;
@@ -325,7 +369,7 @@ pub fn register_static_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scan_yara_py, m)?)?;
     m.add_function(wrap_pyfunction!(deteksi_heuristic_packer_py, m)?)?;
     m.add_function(wrap_pyfunction!(identifikasi_fungsi_library_py, m)?)?;
-    m.add_function(wrap_pyfunction!(generate_cfg_py, m)?)?;
+    m.add_function(wrap_pyfunction!(buat_cfg_py, m)?)?;
     m.add_function(wrap_pyfunction!(diff_binary_py, m)?)?;
     m.add_function(wrap_pyfunction!(lihat_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(ubah_bytes_py, m)?)?;
@@ -335,5 +379,8 @@ pub fn register_static_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_imports_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_exports_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_dynamic_section_elf_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_kode_akses_data_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_penelepon_fungsi_py, m)?)?;
+    m.add_function(wrap_pyfunction!(scan_crypto_constants_py, m)?)?;
     Ok(())
 }
