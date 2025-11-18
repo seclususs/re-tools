@@ -45,6 +45,9 @@ impl PlatformTracer for UnsupportedTracer {
     fn tunggu_event(&mut self, _event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
         Err(Self::unsupported_err())
     }
+    fn poll_event(&mut self, _event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        Err(Self::unsupported_err())
+    }
     fn set_software_breakpoint(&mut self, _addr: u64) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
@@ -84,6 +87,9 @@ impl PlatformTracer for UnsupportedTracer {
         Err(Self::unsupported_err())
     }
     fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+        Err(Self::unsupported_err())
+    }
+    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
 }

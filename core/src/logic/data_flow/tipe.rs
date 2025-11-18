@@ -77,7 +77,7 @@ pub fn analisis_tipe_dasar(
 				if let Some(addr_expr) = addr_expr_opt {
 					let (base_reg, _, offset) = get_base_reg_and_offset(addr_expr);
 					if let Some(reg_name) = base_reg {
-						let reg_domain = state.get(&reg_name).cloned().unwrap_or_default();
+						let reg_domain = state.variables.get(&reg_name).cloned().unwrap_or_default();
 						match reg_domain {
 							ValueDomain::Constant(base_addr) => {
 								let struct_entry = struct_reconstruction
@@ -107,6 +107,12 @@ pub fn analisis_tipe_dasar(
 								var_tipe
 									.entry(reg_name.clone())
 									.or_insert(InferredTipe::Unknown);
+							}
+							ValueDomain::Pointer(_) | ValueDomain::PointerSet(_) => {
+								var_tipe.insert(
+									reg_name.clone(),
+									InferredTipe::Pointer(Box::new(InferredTipe::Unknown)),
+								);
 							}
 						}
 					}
@@ -165,6 +171,9 @@ pub fn verifikasi_batas_memori(
 								None,
 								format!("Potensi akses array, indeks [{}, {}]", min, max),
 							),
+							ValueDomain::Pointer(_) | ValueDomain::PointerSet(_) => {
+								(None, "Akses menggunakan pointer".to_string())
+							}
 						};
 						checks.push(MemoryAccessCheck {
 							va: *va,
@@ -237,7 +246,7 @@ fn find_array_access_inner(
 			};
 			let domain = match &**idx {
 				MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar: nama_dasar_ref, .. })) => {
-					state.get(nama_dasar_ref.as_str()).cloned().unwrap_or_default()
+					state.variables.get(nama_dasar_ref.as_str()).cloned().unwrap_or_default()
 				}
 				MicroExpr::Operand(MicroOperand::Konstanta(c)) => ValueDomain::Constant(*c),
 				_ => ValueDomain::Unknown,
@@ -245,7 +254,7 @@ fn find_array_access_inner(
 			(Some(domain), stride_val, 0)
 		}
 		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar: nama_dasar_ref, .. })) => {
-			(state.get(nama_dasar_ref.as_str()).cloned(), 1, 0)
+			(state.variables.get(nama_dasar_ref.as_str()).cloned(), 1, 0)
 		}
 		MicroExpr::Operand(MicroOperand::Konstanta(c)) => (Some(ValueDomain::Constant(*c)), 1, *c),
 		_ => (None, 1, 0),

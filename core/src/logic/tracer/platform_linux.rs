@@ -8,7 +8,7 @@ use nix::sys::ptrace;
 use nix::sys::ptrace::Options;
 use nix::sys::signal::Signal;
 use nix::sys::uio::{process_vm_readv, process_vm_writev, IoVec, RemoteIoVec};
-use nix::sys::wait::{waitpid, WaitStatus};
+use nix::sys::wait::{waitpid, WaitStatus, WaitPidFlag};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::io::IoSliceMut;
@@ -17,6 +17,7 @@ pub struct LinuxTracer {
     pid_target: Pid,
     breakpoints_map: HashMap<u64, u8>,
     syscall_tracing_enabled: bool,
+    stealth_mode: bool,
 }
 
 impl LinuxTracer {
@@ -25,6 +26,7 @@ impl LinuxTracer {
             pid_target: Pid::from_raw(pid),
             breakpoints_map: HashMap::new(),
             syscall_tracing_enabled: false,
+            stealth_mode: false,
         })
     }
     unsafe fn handle_breakpoint_logic(&mut self, pid: Pid, alamat_bp: u64) -> bool {
@@ -72,9 +74,10 @@ impl LinuxTracer {
         let mut regs = ptrace::getregs(self.pid_target)?;
         let dr7_val = regs.dr7;
         let local_enable_mask = 1 << (index * 2);
+        let global_enable_mask = 1 << (index * 2 + 1);
         let condition_mask = 0b00 << (16 + index * 4);
         let len_mask = 0b00 << (18 + index * 4);
-        let new_dr7 = (dr7_val | local_enable_mask | condition_mask | len_mask) & !0x200;
+        let new_dr7 = (dr7_val | local_enable_mask | global_enable_mask | condition_mask | len_mask) & !0x200;
         match index {
             0 => regs.dr0 = addr,
             1 => regs.dr1 = addr,
@@ -95,7 +98,8 @@ impl LinuxTracer {
         }
         let mut regs = ptrace::getregs(self.pid_target)?;
         let local_disable_mask = !(1 << (index * 2));
-        regs.dr7 &= local_disable_mask;
+        let global_disable_mask = !(1 << (index * 2 + 1));
+        regs.dr7 &= local_disable_mask & global_disable_mask;
         match index {
             0 => regs.dr0 = 0,
             1 => regs.dr1 = 0,
@@ -117,6 +121,99 @@ impl LinuxTracer {
         Err(ReToolsError::Generic(
             "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
         ))
+    }
+    fn process_wait_status(&mut self, status: WaitStatus, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        unsafe {
+            match status {
+                WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
+                    let regs = ptrace::getregs(pid)?;
+                    let alamat_breakpoint_potensial = regs.rip.saturating_sub(1);
+                    if self.breakpoints_map.contains_key(&alamat_breakpoint_potensial) {
+                        if self.handle_breakpoint_logic(pid, alamat_breakpoint_potensial) {
+                            (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                            (*event_out).pid_thread = pid.as_raw();
+                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                            return Ok(true);
+                        } else {
+                            set_last_error(ReToolsError::Generic(format!(
+                                "Gagal menangani breakpoint logic pada 0x{:x}",
+                                alamat_breakpoint_potensial
+                            )));
+                            (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                            return Ok(false);
+                        }
+                    } else {
+                        (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                        (*event_out).pid_thread = pid.as_raw();
+                        (*event_out).info_alamat = regs.rip;
+                        return Ok(true);
+                    }
+                }
+                WaitStatus::Stopped(pid, sig) if sig as c_int == (Signal::SIGTRAP as c_int | 0x80) => {
+                    if !self.syscall_tracing_enabled {
+                         ptrace::cont(pid, None).ok();
+                         return Ok(false);
+                    }
+                    let regs = ptrace::getregs(pid)?;
+                    if regs.orig_rax != u64::MAX {
+                        (*event_out).tipe = DebugEventTipe::EVENT_SYSCALL_ENTRY;
+                    } else {
+                        (*event_out).tipe = DebugEventTipe::EVENT_SYSCALL_EXIT;
+                    }
+                    (*event_out).pid_thread = pid.as_raw();
+                    (*event_out).info_alamat = regs.orig_rax;
+                    return Ok(true);
+                }
+                WaitStatus::PtraceEvent(pid, _signal, event) => {
+                     let event_type = match event {
+                        libc::PTRACE_EVENT_CLONE => {
+                            let new_pid_raw = ptrace::getevent(pid)? as c_int;
+                            (*event_out).info_alamat = new_pid_raw as u64;
+                            Some(DebugEventTipe::EVENT_THREAD_BARU)
+                        },
+                        libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK => {
+                            let new_pid_raw = ptrace::getevent(pid)? as c_int;
+                            (*event_out).info_alamat = new_pid_raw as u64;
+                            Some(DebugEventTipe::EVENT_THREAD_BARU)
+                        }
+                        libc::PTRACE_EVENT_EXIT => {
+                            (*event_out).info_alamat = 0;
+                            Some(DebugEventTipe::EVENT_THREAD_EXIT)
+                        }
+                        _ => None
+                    };
+                    if let Some(tipe) = event_type {
+                        (*event_out).tipe = tipe;
+                        (*event_out).pid_thread = pid.as_raw();
+                        ptrace::cont(pid, None).ok();
+                        return Ok(true);
+                    } else {
+                        ptrace::cont(pid, None).ok();
+                        return Ok(false);
+                    }
+                }
+                WaitStatus::Stopped(pid, sig) => {
+                    ptrace::cont(pid, Some(sig)).ok();
+                    return Ok(false);
+                }
+                WaitStatus::Exited(pid, status_code) => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*event_out).pid_thread = pid.as_raw();
+                    (*event_out).info_alamat = status_code as u64;
+                    return Ok(true);
+                }
+                WaitStatus::Signaled(pid, signal, _) => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*event_out).pid_thread = pid.as_raw();
+                    (*event_out).info_alamat = signal as u64;
+                    return Ok(true);
+                }
+                _ => {
+                    return Ok(false);
+                }
+            }
+        }
     }
 }
 
@@ -207,12 +304,10 @@ impl PlatformTracer for LinuxTracer {
         Ok(())
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
-        let sig = if self.syscall_tracing_enabled {
+        if self.syscall_tracing_enabled {
             ptrace::syscall(self.pid_target, None)?;
-            None
         } else {
             ptrace::cont(self.pid_target, None)?;
-            None
         };
         Ok(())
     }
@@ -220,106 +315,22 @@ impl PlatformTracer for LinuxTracer {
         self.single_step_internal(self.pid_target)
     }
     fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
-        unsafe {
-            loop {
-                let status = match waitpid(Pid::from_raw(-1), None) {
-                    Ok(s) => s,
-                    Err(e) => return Err(e.into()),
-                };
-                let pid = status.pid().unwrap_or(self.pid_target);
-                match status {
-                    WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
-                        let regs = ptrace::getregs(pid)?;
-                        let alamat_breakpoint_potensial = regs.rip.saturating_sub(1);
-                        if self
-                            .breakpoints_map
-                            .contains_key(&alamat_breakpoint_potensial)
-                        {
-                            if self.handle_breakpoint_logic(pid, alamat_breakpoint_potensial) {
-                                (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                                (*event_out).pid_thread = pid.as_raw();
-                                (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                return Ok(0);
-                            } else {
-                                set_last_error(ReToolsError::Generic(format!(
-                                    "Gagal menangani breakpoint logic pada 0x{:x}",
-                                    alamat_breakpoint_potensial
-                                )));
-                                (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                                (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                return Ok(-1);
-                            }
-                        } else {
-                            (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
-                            (*event_out).pid_thread = pid.as_raw();
-                            (*event_out).info_alamat = regs.rip;
-                            return Ok(0);
-                        }
-                    }
-                    WaitStatus::Stopped(pid, sig) if sig as c_int == (Signal::SIGTRAP as c_int | 0x80) => {
-                        if !self.syscall_tracing_enabled {
-                             ptrace::cont(pid, None).ok();
-                             continue;
-                        }
-                        let regs = ptrace::getregs(pid)?;
-                        if regs.orig_rax != u64::MAX {
-                            (*event_out).tipe = DebugEventTipe::EVENT_SYSCALL_ENTRY;
-                        } else {
-                            (*event_out).tipe = DebugEventTipe::EVENT_SYSCALL_EXIT;
-                        }
-                        (*event_out).pid_thread = pid.as_raw();
-                        (*event_out).info_alamat = regs.orig_rax;
-                        return Ok(0);
-                    }
-                    WaitStatus::PtraceEvent(pid, _signal, event) => {
-                         let event_type = match event {
-                            libc::PTRACE_EVENT_CLONE => {
-                                let new_pid_raw = ptrace::getevent(pid)? as c_int;
-                                (*event_out).info_alamat = new_pid_raw as u64;
-                                Some(DebugEventTipe::EVENT_THREAD_BARU)
-                            },
-                            libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK => {
-                                let new_pid_raw = ptrace::getevent(pid)? as c_int;
-                                (*event_out).info_alamat = new_pid_raw as u64;
-                                Some(DebugEventTipe::EVENT_THREAD_BARU)
-                            }
-                            libc::PTRACE_EVENT_EXIT => {
-                                (*event_out).info_alamat = 0;
-                                Some(DebugEventTipe::EVENT_THREAD_EXIT)
-                            }
-                            _ => None
-                        };
-                        if let Some(tipe) = event_type {
-                            (*event_out).tipe = tipe;
-                            (*event_out).pid_thread = pid.as_raw();
-                            ptrace::cont(pid, None).ok();
-                            return Ok(0);
-                        } else {
-                            ptrace::cont(pid, None).ok();
-                            continue;
-                        }
-                    }
-                    WaitStatus::Stopped(pid, sig) => {
-                        ptrace::cont(pid, Some(sig)).ok();
-                        continue;
-                    }
-                    WaitStatus::Exited(pid, status_code) => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                        (*event_out).pid_thread = pid.as_raw();
-                        (*event_out).info_alamat = status_code as u64;
-                        return Ok(0);
-                    }
-                    WaitStatus::Signaled(pid, signal, _) => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                        (*event_out).pid_thread = pid.as_raw();
-                        (*event_out).info_alamat = signal as u64;
-                        return Ok(0);
-                    }
-                    _ => {
-                        continue;
-                    }
-                }
+        loop {
+            let status = match waitpid(Pid::from_raw(-1), None) {
+                Ok(s) => s,
+                Err(e) => return Err(e.into()),
+            };
+            if self.process_wait_status(status, event_out)? {
+                return Ok(0);
             }
+        }
+    }
+    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => Ok(false),
+            Ok(status) => self.process_wait_status(status, event_out),
+            Err(nix::errno::Errno::ECHILD) => Ok(false),
+            Err(e) => Err(e.into()),
         }
     }
     fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
@@ -439,6 +450,10 @@ impl PlatformTracer for LinuxTracer {
     }
     fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
+        self.stealth_mode = true;
+        Ok(())
     }
 }
 

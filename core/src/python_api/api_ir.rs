@@ -7,6 +7,9 @@ use std::ffi::CStr;
 
 use super::api_static::map_err_to_py;
 use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::optimization::IrOptimizer;
+use crate::logic::static_analysis::cfg::bangun_cfg_internal;
+use crate::logic::static_analysis::parser::Binary;
 use crate::logic::static_analysis::disasm::{decode_satu_instruksi, ArsitekturDisasm};
 
 
@@ -86,8 +89,31 @@ fn get_ir_for_instruksi_py(
     }
 }
 
+#[pyfunction(name = "optimizeIrCfg")]
+fn optimize_ir_cfg_py(py: Python, file_path: &str) -> PyResult<PyObject> {
+    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
+    let mut cfg = bangun_cfg_internal(&binary).map_err(map_err_to_py)?;
+    
+    let mut optimizer = IrOptimizer::new();
+    optimizer.jalankan_optimasi(&mut cfg);
+
+    let mut result_map = std::collections::HashMap::new();
+    for node_idx in cfg.node_indices() {
+        let block = &cfg[node_idx];
+        let instrs: Vec<_> = block.instructions.iter().flat_map(|(_, irs)| irs.clone()).collect();
+        result_map.insert(block.va_start, instrs);
+    }
+
+    let json_str = serde_json::to_string(&result_map)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let json_module = PyModule::import_bound(py, "json")?;
+    let py_json = json_module.getattr("loads")?.call1((json_str,))?;
+    Ok(py_json.to_object(py))
+}
+
 pub fn register_ir_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(decode_instruksi_py, m)?)?;
     m.add_function(wrap_pyfunction!(get_ir_for_instruksi_py, m)?)?;
+    m.add_function(wrap_pyfunction!(optimize_ir_cfg_py, m)?)?;
     Ok(())
 }

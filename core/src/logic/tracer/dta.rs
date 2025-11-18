@@ -1,6 +1,8 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use petgraph::graph::{DiGraph, NodeIndex};
+use serde::Serialize;
 
 use crate::logic::ir::instruction::{
     MicroBinOp, MicroExpr, MicroInstruction, MicroOperand, SsaVariabel,
@@ -10,6 +12,7 @@ use crate::logic::tracer::platform::PlatformTracer;
 use crate::logic::tracer::types::{u64, C_Registers};
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
+use crate::logic::static_analysis::cfg::BasicBlock;
 
 #[derive(Debug, Clone, Default)]
 pub struct TaintState {
@@ -18,10 +21,18 @@ pub struct TaintState {
 }
 
 #[derive(Debug, Clone)]
+pub enum TaintSourceType {
+    NetworkPacket,
+    FileRead,
+    FunctionArgument(usize), 
+    EnvironmentVariable,
+    UserBuffer(u64, usize),
+}
+
+#[derive(Debug, Clone)]
 pub struct TaintSource {
-    pub alamat: u64,
-    pub ukuran: usize,
-    pub nama: String,
+    pub tipe: TaintSourceType,
+    pub deskripsi: String,
 }
 
 #[derive(Debug, Clone)]
@@ -31,11 +42,17 @@ pub struct TaintSink {
     pub cek_arg_regs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DtaReport {
     pub va: u64,
     pub instruksi_str: String,
     pub pesan: String,
+    pub static_block_id: Option<usize>, 
+}
+
+pub struct StaticTaintMapper<'a> {
+    pub cfg: Option<&'a DiGraph<BasicBlock, &'static str>>,
+    pub tainted_blocks: HashSet<NodeIndex>,
 }
 
 pub struct DtaEngine<'a> {
@@ -44,6 +61,7 @@ pub struct DtaEngine<'a> {
     pub sources: Vec<TaintSource>,
     pub sinks: Vec<TaintSink>,
     pub laporan_forensik: Vec<DtaReport>,
+    pub static_mapper: StaticTaintMapper<'a>,
     arsitektur: ArsitekturDisasm,
 }
 
@@ -58,42 +76,102 @@ impl<'a> DtaEngine<'a> {
             sources: Vec::new(),
             sinks: Vec::new(),
             laporan_forensik: Vec::new(),
+            static_mapper: StaticTaintMapper {
+                cfg: None,
+                tainted_blocks: HashSet::new(),
+            },
             arsitektur,
         }
     }
-    pub fn tambah_source(&mut self, source: TaintSource) {
-        self.sources.push(source);
+    pub fn attach_static_cfg(&mut self, cfg: &'a DiGraph<BasicBlock, &'static str>) {
+        self.static_mapper.cfg = Some(cfg);
+    }
+    pub fn tambah_source_eksternal(&mut self, tipe: TaintSourceType, deskripsi: &str) {
+        self.sources.push(TaintSource {
+            tipe,
+            deskripsi: deskripsi.to_string(),
+        });
     }
     pub fn tambah_sink(&mut self, sink: TaintSink) {
         self.sinks.push(sink);
     }
-    pub fn inisialisasi_sources(&mut self) -> Result<(), ReToolsError> {
-        for source in self.sources.iter() {
-            for i in 0..source.ukuran {
-                let alamat_mem = source.alamat + i as u64;
-                self.taint_state.memory_taint.insert(alamat_mem, true);
-            }
-            self.laporan_forensik.push(DtaReport {
-                va: source.alamat,
-                instruksi_str: "Taint Source".to_string(),
-                pesan: format!(
-                    "Menandai (mark) memory di 0x{:x} (size: {}) sebagai tainted from '{}'",
-                    source.alamat, source.ukuran, source.nama
-                ),
-            });
+    pub fn inject_taint_ke_region(&mut self, start_addr: u64, size: usize, label: &str) {
+        for i in 0..size {
+            self.taint_state.memory_taint.insert(start_addr + i as u64, true);
         }
-        Ok(())
+        self.laporan_forensik.push(DtaReport {
+            va: start_addr,
+            instruksi_str: "Manual Injection".to_string(),
+            pesan: format!("Inject taint pada 0x{:x} (len: {}) [{}]", start_addr, size, label),
+            static_block_id: None,
+        });
+    }
+    pub fn proses_sumber_awal(&mut self, regs: &C_Registers) {
+        let sources = std::mem::take(&mut self.sources);
+        for source in &sources {
+            match &source.tipe {
+                TaintSourceType::FunctionArgument(idx) => {
+                    let reg_name = self.get_arg_reg_name(*idx);
+                    if let Some(r) = reg_name {
+                         self.taint_state.register_taint.insert(r.to_string(), true);
+                         self.laporan_forensik.push(DtaReport {
+                             va: regs.rip,
+                             instruksi_str: "Source Init".to_string(),
+                             pesan: format!("Argumen fungsi #{} ({}) ditandai tainted", idx, r),
+                             static_block_id: None,
+                         });
+                    }
+                }
+                TaintSourceType::UserBuffer(addr, size) => {
+                    self.inject_taint_ke_region(*addr, *size, &source.deskripsi);
+                }
+                _ => {}
+            }
+        }
+        self.sources = sources;
+    }
+    fn get_arg_reg_name(&self, index: usize) -> Option<&'static str> {
+        match self.arsitektur {
+            ArsitekturDisasm::ARCH_X86_64 => match index {
+                0 => Some("rdi"),
+                1 => Some("rsi"),
+                2 => Some("rdx"),
+                3 => Some("rcx"),
+                4 => Some("r8"),
+                5 => Some("r9"),
+                _ => None,
+            },
+            ArsitekturDisasm::ARCH_ARM_64 => match index {
+                0 => Some("x0"),
+                1 => Some("x1"),
+                2 => Some("x2"),
+                3 => Some("x3"),
+                _ => None,
+            },
+            _ => None, 
+        }
+    }
+    fn map_runtime_ke_static(&mut self, runtime_va: u64) -> Option<NodeIndex> {
+        if let Some(cfg) = self.static_mapper.cfg {
+             for node_idx in cfg.node_indices() {
+                 let block = &cfg[node_idx];
+                 if runtime_va >= block.va_start && runtime_va < block.va_end {
+                     return Some(node_idx);
+                 }
+             }
+        }
+        None
     }
     fn ambil_nilai_register(&self, regs: &C_Registers, nama_reg: &str) -> u64 {
         match nama_reg.to_lowercase().as_str() {
-            "rax" => regs.rax,
-            "rbx" => regs.rbx,
-            "rcx" => regs.rcx,
-            "rdx" => regs.rdx,
-            "rsi" => regs.rsi,
-            "rdi" => regs.rdi,
-            "rbp" => regs.rbp,
-            "rsp" => regs.rsp,
+            "rax" | "x0" => regs.rax,
+            "rbx" | "x1" => regs.rbx,
+            "rcx" | "x2" => regs.rcx,
+            "rdx" | "x3" => regs.rdx,
+            "rsi" | "x4" => regs.rsi,
+            "rdi" | "x5" => regs.rdi,
+            "rbp" | "fp" => regs.rbp,
+            "rsp" | "sp" => regs.rsp,
             "r8" => regs.r8,
             "r9" => regs.r9,
             "r10" => regs.r10,
@@ -102,7 +180,7 @@ impl<'a> DtaEngine<'a> {
             "r13" => regs.r13,
             "r14" => regs.r14,
             "r15" => regs.r15,
-            "rip" => regs.rip,
+            "rip" | "pc" => regs.rip,
             _ => 0,
         }
     }
@@ -110,8 +188,10 @@ impl<'a> DtaEngine<'a> {
         &mut self,
         expr: &MicroExpr,
         regs: &C_Registers,
+        current_static_node: Option<NodeIndex>,
     ) -> (bool, Option<u64>) {
-        match expr {
+        let expr = expr.clone();
+        match &expr {
             MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
                 let tainted = self
                     .taint_state
@@ -123,17 +203,15 @@ impl<'a> DtaEngine<'a> {
                 (tainted, Some(value))
             }
             MicroExpr::Operand(MicroOperand::Konstanta(k)) => (false, Some(*k)),
-            MicroExpr::OperasiUnary(_, inner) => self.cek_ekspresi_taint(inner, regs),
+            MicroExpr::OperasiUnary(_, inner) => self.cek_ekspresi_taint(inner, regs, current_static_node),
             MicroExpr::OperasiBiner(op, left, right) => {
-                let (left_tainted, left_val_opt) = self.cek_ekspresi_taint(left, regs);
-                let (right_tainted, right_val_opt) = self.cek_ekspresi_taint(right, regs);
-                let result_tainted = left_tainted || right_tainted;
-                let result_val = if let (Some(l), Some(r)) = (left_val_opt, right_val_opt) {
-                    match op {
+                let (l_taint, l_val) = self.cek_ekspresi_taint(left, regs, current_static_node);
+                let (r_taint, r_val) = self.cek_ekspresi_taint(right, regs, current_static_node);
+                let res_val = if let (Some(l), Some(r)) = (l_val, r_val) {
+                     match op {
                         MicroBinOp::Add => Some(l.wrapping_add(r)),
                         MicroBinOp::Sub => Some(l.wrapping_sub(r)),
                         MicroBinOp::Mul => Some(l.wrapping_mul(r)),
-                        MicroBinOp::Div => Some(l.wrapping_div(r)),
                         MicroBinOp::And => Some(l & r),
                         MicroBinOp::Or => Some(l | r),
                         MicroBinOp::Xor => Some(l ^ r),
@@ -142,36 +220,29 @@ impl<'a> DtaEngine<'a> {
                 } else {
                     None
                 };
-                (result_tainted, result_val)
+                (l_taint || r_taint, res_val)
             }
             MicroExpr::MuatMemori(addr_expr) => {
-                let (addr_tainted, addr_val_opt) = self.cek_ekspresi_taint(addr_expr, regs);
+                let (addr_tainted, addr_val) = self.cek_ekspresi_taint(addr_expr, regs, current_static_node);
                 if addr_tainted {
-                    self.laporan_forensik.push(DtaReport {
+                     self.laporan_forensik.push(DtaReport {
                         va: regs.rip,
                         instruksi_str: "Memory Load".to_string(),
-                        pesan: "Alamat akses memory (pointer) adalah tainted.".to_string(),
+                        pesan: "Tainted pointer dereference detected!".to_string(),
+                        static_block_id: current_static_node.map(|n| n.index()),
                     });
                 }
-                if let Some(addr) = addr_val_opt {
-                    let mem_tainted = self
-                        .taint_state
-                        .memory_taint
-                        .get(&addr)
-                        .cloned()
-                        .unwrap_or(false);
-                    let val_bytes = self.tracer.baca_memory(addr, 8).unwrap_or(vec![0; 8]);
-                    let val = u64::from_le_bytes(val_bytes.try_into().unwrap_or([0; 8]));
-                    (mem_tainted, Some(val))
+                if let Some(addr) = addr_val {
+                    let val_tainted = self.taint_state.memory_taint.get(&addr).cloned().unwrap_or(false);
+                    let mem_val = self.tracer.baca_memory(addr, 8).ok()
+                        .and_then(|b| b.try_into().ok())
+                        .map(u64::from_le_bytes);
+                    (val_tainted, mem_val)
                 } else {
                     (false, None)
                 }
             }
-            MicroExpr::Bandingkan(left, right) | MicroExpr::UjiBit(left, right) => {
-                let (left_tainted, _) = self.cek_ekspresi_taint(left, regs);
-                let (right_tainted, _) = self.cek_ekspresi_taint(right, regs);
-                (left_tainted || right_tainted, Some(0))
-            }
+            _ => (false, None),
         }
     }
     fn propagate_taint(
@@ -180,107 +251,97 @@ impl<'a> DtaEngine<'a> {
         va: u64,
         regs: &C_Registers,
         instruksi_str: String,
+        static_node: Option<NodeIndex>,
     ) {
         match ir {
-            MicroInstruction::Assign(dest, src_expr) => {
-                let (src_tainted, _) = self.cek_ekspresi_taint(src_expr, regs);
-                let old_taint = self
-                    .taint_state
-                    .register_taint
-                    .insert(dest.nama_dasar.clone(), src_tainted)
-                    .unwrap_or(false);
-                if src_tainted && !old_taint {
+            MicroInstruction::Assign(dest, src) => {
+                let (is_tainted, _) = self.cek_ekspresi_taint(src, regs, static_node);
+                let old_status = self.taint_state.register_taint.insert(dest.nama_dasar.clone(), is_tainted).unwrap_or(false);
+                
+                if is_tainted && !old_status {
+                    if let Some(node_idx) = static_node {
+                        self.static_mapper.tainted_blocks.insert(node_idx);
+                    }
                     self.laporan_forensik.push(DtaReport {
                         va,
                         instruksi_str,
-                        pesan: format!("Taint disebar (propagated) ke register {}", dest.nama_dasar),
+                        pesan: format!("Taint menyebar ke register {}", dest.nama_dasar),
+                        static_block_id: static_node.map(|n| n.index()),
                     });
                 }
             }
-            MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
-                let (data_tainted, _) = self.cek_ekspresi_taint(data_expr, regs);
-                let (addr_tainted, addr_val_opt) = self.cek_ekspresi_taint(addr_expr, regs);
+            MicroInstruction::SimpanMemori(addr_expr, val_expr) => {
+                let (val_tainted, _) = self.cek_ekspresi_taint(val_expr, regs, static_node);
+                let (addr_tainted, addr_val) = self.cek_ekspresi_taint(addr_expr, regs, static_node);
                 if addr_tainted {
-                    self.laporan_forensik.push(DtaReport {
+                     self.laporan_forensik.push(DtaReport {
                         va,
                         instruksi_str: instruksi_str.clone(),
-                        pesan: "Arbitrary Write: Alamat penulisan memori adalah tainted!".to_string(),
+                        pesan: "Write to Tainted Address (Arbitrary Write Potential)".to_string(),
+                        static_block_id: static_node.map(|n| n.index()),
                     });
                 }
-                if let Some(addr) = addr_val_opt {
-                    let old_taint = self
-                        .taint_state
-                        .memory_taint
-                        .insert(addr, data_tainted)
-                        .unwrap_or(false);
-                    if data_tainted && !old_taint {
-                        self.laporan_forensik.push(DtaReport {
-                            va,
-                            instruksi_str,
-                            pesan: format!("Data tainted ditulis ke alamat memori 0x{:x}", addr),
-                        });
-                    }
+                if let Some(addr) = addr_val {
+                     if val_tainted {
+                         self.taint_state.memory_taint.insert(addr, true);
+                         if let Some(node_idx) = static_node {
+                            self.static_mapper.tainted_blocks.insert(node_idx);
+                         }
+                     } else {
+                         self.taint_state.memory_taint.remove(&addr);
+                     }
                 }
             }
-            MicroInstruction::LompatKondisi(cond_expr, _) => {
-                let (cond_tainted, _) = self.cek_ekspresi_taint(cond_expr, regs);
-                if cond_tainted {
-                    self.laporan_forensik.push(DtaReport {
+            MicroInstruction::LompatKondisi(cond, _) => {
+                 let (cond_tainted, _) = self.cek_ekspresi_taint(cond, regs, static_node);
+                 if cond_tainted {
+                      self.laporan_forensik.push(DtaReport {
                         va,
                         instruksi_str,
-                        pesan: "Control-Flow Hijack: Lompatan kondisional (conditional jump) bergantung pada data tainted.".to_string(),
+                        pesan: "Tainted Branch Condition (Control Flow Hijack Risk)".to_string(),
+                        static_block_id: static_node.map(|n| n.index()),
                     });
-                }
+                 }
             }
-            MicroInstruction::Lompat(target_expr) | MicroInstruction::Panggil(target_expr) => {
-                let (target_tainted, _) = self.cek_ekspresi_taint(target_expr, regs);
+            MicroInstruction::Lompat(target) | MicroInstruction::Panggil(target) => {
+                let (target_tainted, _) = self.cek_ekspresi_taint(target, regs, static_node);
                 if target_tainted {
-                    self.laporan_forensik.push(DtaReport {
+                     self.laporan_forensik.push(DtaReport {
                         va,
                         instruksi_str,
-                        pesan: "Control-Flow Hijack: Target lompatan (jump/call) adalah tainted.".to_string(),
+                        pesan: "Tainted Jump/Call Target (ROP/Hijack Risk)".to_string(),
+                        static_block_id: static_node.map(|n| n.index()),
                     });
                 }
             }
             _ => {}
         }
     }
-    fn cek_sinks(&mut self, va: u64, _regs: &C_Registers, instruksi_str: String) {
-        for sink in self.sinks.iter() {
+    fn cek_sink_safety(&mut self, va: u64, _regs: &C_Registers, static_node: Option<NodeIndex>) {
+        for sink in &self.sinks {
             if sink.alamat == va {
-                for reg_nama in &sink.cek_arg_regs {
-                    let tainted = self
-                        .taint_state
-                        .register_taint
-                        .get(reg_nama)
-                        .cloned()
-                        .unwrap_or(false);
-                    if tainted {
-                        self.laporan_forensik.push(DtaReport {
+                for reg in &sink.cek_arg_regs {
+                    if *self.taint_state.register_taint.get(reg).unwrap_or(&false) {
+                         self.laporan_forensik.push(DtaReport {
                             va,
-                            instruksi_str: instruksi_str.clone(),
-                            pesan: format!(
-                                "!!! VULNERABILITY DETECTED !!!\n    Data Tainted mencapai sink '{}' (0x{:x}) melalui register argumen {}.",
-                                sink.nama, sink.alamat, reg_nama
-                            ),
+                            instruksi_str: "Sink Check".to_string(),
+                            pesan: format!("VULNERABILITY: Data tainted mencapai sink '{}' via register {}", sink.nama, reg),
+                            static_block_id: static_node.map(|n| n.index()),
                         });
                     }
                 }
             }
         }
     }
-    pub fn proses_event_step(&mut self, regs: &C_Registers) -> Result<(), ReToolsError> {
+    pub fn step_and_analyze(&mut self, regs: &C_Registers) -> Result<(), ReToolsError> {
         let va = regs.rip;
-        let bytes_instruksi = self.tracer.baca_memory(va, 16)?;
-        let (size, irs) =
-            angkat_blok_instruksi(&bytes_instruksi, va, self.arsitektur)?;
-        if size == 0 {
-            return Err(ReToolsError::Generic(format!("Gagal mengangkat IR pada 0x{:x}", va)));
-        }
-        let instruksi_str = format!("0x{:x}: [IRs: {}]", va, irs.len());
-        self.cek_sinks(va, regs, instruksi_str.clone());
+        let static_node = self.map_runtime_ke_static(va);
+        let bytes = self.tracer.baca_memory(va, 16)?;
+        let (_, irs) = angkat_blok_instruksi(&bytes, va, self.arsitektur)?;
+        self.cek_sink_safety(va, regs, static_node);
         for ir in irs {
-            self.propagate_taint(&ir, va, regs, instruksi_str.clone());
+            let instr_debug = format!("{:?}", ir);
+            self.propagate_taint(&ir, va, regs, instr_debug, static_node);
         }
         Ok(())
     }

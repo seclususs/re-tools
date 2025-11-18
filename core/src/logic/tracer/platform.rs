@@ -14,6 +14,7 @@ pub trait PlatformTracer: Send + Sync {
     fn continue_proses(&self) -> Result<(), ReToolsError>;
     fn single_step(&mut self) -> Result<(), ReToolsError>;
     fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError>;
+    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError>;
     fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError>;
     fn remove_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError>;
     fn set_hardware_breakpoint(&mut self, addr: u64, index: usize) -> Result<(), ReToolsError>;
@@ -31,4 +32,5 @@ pub trait PlatformTracer: Send + Sync {
     ) -> Result<(), ReToolsError>;
     fn remove_memory_api_hook(&mut self, api_name: &str) -> Result<(), ReToolsError>;
     fn dump_memory_region(&self, address: u64, size: usize, file_path: &str) -> Result<(), ReToolsError>;
+    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError>;
 }

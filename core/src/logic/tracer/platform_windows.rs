@@ -52,6 +52,7 @@ pub struct WindowsTracer {
     breakpoints_map: HashMap<u64, u8>,
     last_event_thread_id: u32,
     handling_breakpoint_alamat: Option<u64>,
+    stealth_mode: bool,
 }
 
 impl WindowsTracer {
@@ -62,6 +63,7 @@ impl WindowsTracer {
             breakpoints_map: HashMap::new(),
             last_event_thread_id: 0,
             handling_breakpoint_alamat: None,
+            stealth_mode: false,
         })
     }
     unsafe fn enable_debug_privilege() -> bool {
@@ -216,6 +218,90 @@ impl WindowsTracer {
         context.Dr7 &= disable_mask;
         self.set_thread_context(self.last_event_thread_id, &context)?;
         Ok(())
+    }
+    fn proses_debug_event(&mut self, debug_event: DEBUG_EVENT, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        unsafe {
+            self.last_event_thread_id = debug_event.dwThreadId;
+            let mut continue_status = DBG_CONTINUE;
+            match debug_event.dwDebugEventCode {
+                EXCEPTION_DEBUG_EVENT => {
+                    let exception_record = &debug_event.u.Exception.ExceptionRecord;
+                    let alamat_exception = exception_record.ExceptionAddress as u64;
+                    if exception_record.ExceptionCode == EXCEPTION_BREAKPOINT {
+                        if self.breakpoints_map.contains_key(&alamat_exception) {
+                            if self.internal_handle_breakpoint_pre_step(
+                                &debug_event,
+                                alamat_exception,
+                            ) {
+                                continue_status = DBG_CONTINUE;
+                            } else {
+                                set_last_error(ReToolsError::Generic(
+                                    "Gagal pre-step breakpoint".to_string(),
+                                ));
+                                continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                            }
+                        } else {
+                            continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                        }
+                    } else if exception_record.ExceptionCode == EXCEPTION_SINGLE_STEP {
+                        if let Some(alamat_bp_ditangani) = self.handling_breakpoint_alamat {
+                            self.internal_handle_breakpoint_post_step(alamat_bp_ditangani);
+                            (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                            (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                            (*event_out).info_alamat = alamat_bp_ditangani;
+                            return Ok(true);
+                        } else {
+                            (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                            (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                            (*event_out).info_alamat = alamat_exception;
+                            return Ok(true);
+                        }
+                    } else {
+                        (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                        (*event_out).info_alamat = alamat_exception;
+                        continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                    }
+                }
+                CREATE_THREAD_DEBUG_EVENT => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_THREAD_BARU;
+                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                    (*event_out).info_alamat = debug_event
+                        .u
+                        .CreateThread
+                        .lpStartAddress
+                        .map_or(0, |addr| addr as usize)
+                        as u64;
+                    return Ok(true);
+                }
+                EXIT_THREAD_DEBUG_EVENT => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_THREAD_EXIT;
+                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                    (*event_out).info_alamat = debug_event.u.ExitThread.dwExitCode as u64;
+                    return Ok(true);
+                }
+                LOAD_DLL_DEBUG_EVENT => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_MODUL_LOAD;
+                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                    (*event_out).info_alamat = debug_event.u.LoadDll.lpBaseOfDll as u64;
+                    return Ok(true);
+                }
+                EXIT_PROCESS_DEBUG_EVENT => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
+                    (*event_out).info_alamat = debug_event.u.ExitProcess.dwExitCode as u64;
+                    self.handle_proses = 0;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            ContinueDebugEvent(
+                debug_event.dwProcessId,
+                debug_event.dwThreadId,
+                continue_status,
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -441,86 +527,19 @@ impl PlatformTracer for WindowsTracer {
                 if WaitForDebugEvent(&mut debug_event, u32::MAX) == 0 {
                     return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
                 }
-                self.last_event_thread_id = debug_event.dwThreadId;
-                let mut continue_status = DBG_CONTINUE;
-                match debug_event.dwDebugEventCode {
-                    EXCEPTION_DEBUG_EVENT => {
-                        let exception_record = &debug_event.u.Exception.ExceptionRecord;
-                        let alamat_exception = exception_record.ExceptionAddress as u64;
-                        if exception_record.ExceptionCode == EXCEPTION_BREAKPOINT {
-                            if self.breakpoints_map.contains_key(&alamat_exception) {
-                                if self.internal_handle_breakpoint_pre_step(
-                                    &debug_event,
-                                    alamat_exception,
-                                ) {
-                                    continue_status = DBG_CONTINUE;
-                                } else {
-                                    set_last_error(ReToolsError::Generic(
-                                        "Gagal pre-step breakpoint".to_string(),
-                                    ));
-                                    continue_status = DBG_EXCEPTION_NOT_HANDLED;
-                                }
-                            } else {
-                                continue_status = DBG_EXCEPTION_NOT_HANDLED;
-                            }
-                        } else if exception_record.ExceptionCode == EXCEPTION_SINGLE_STEP {
-                            if let Some(alamat_bp_ditangani) = self.handling_breakpoint_alamat {
-                                self.internal_handle_breakpoint_post_step(alamat_bp_ditangani);
-                                (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                                (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                                (*event_out).info_alamat = alamat_bp_ditangani;
-                                return Ok(0);
-                            } else {
-                                (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
-                                (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                                (*event_out).info_alamat = alamat_exception;
-                                return Ok(0);
-                            }
-                        } else {
-                            (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                            (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                            (*event_out).info_alamat = alamat_exception;
-                            continue_status = DBG_EXCEPTION_NOT_HANDLED;
-                        }
-                    }
-                    CREATE_THREAD_DEBUG_EVENT => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_THREAD_BARU;
-                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                        (*event_out).info_alamat = debug_event
-                            .u
-                            .CreateThread
-                            .lpStartAddress
-                            .map_or(0, |addr| addr as usize)
-                            as u64;
-                        return Ok(0);
-                    }
-                    EXIT_THREAD_DEBUG_EVENT => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_THREAD_EXIT;
-                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                        (*event_out).info_alamat = debug_event.u.ExitThread.dwExitCode as u64;
-                        return Ok(0);
-                    }
-                    LOAD_DLL_DEBUG_EVENT => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_MODUL_LOAD;
-                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                        (*event_out).info_alamat = debug_event.u.LoadDll.lpBaseOfDll as u64;
-                        return Ok(0);
-                    }
-                    EXIT_PROCESS_DEBUG_EVENT => {
-                        (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                        (*event_out).info_alamat = debug_event.u.ExitProcess.dwExitCode as u64;
-                        self.handle_proses = 0;
-                        return Ok(0);
-                    }
-                    _ => {}
+                if self.proses_debug_event(debug_event, event_out)? {
+                    return Ok(0);
                 }
-                ContinueDebugEvent(
-                    debug_event.dwProcessId,
-                    debug_event.dwThreadId,
-                    continue_status,
-                );
             }
+        }
+    }
+    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        unsafe {
+            let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
+            if WaitForDebugEvent(&mut debug_event, 0) == 0 {
+                 return Ok(false);
+            }
+            self.proses_debug_event(debug_event, event_out)
         }
     }
     fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
@@ -664,6 +683,10 @@ impl PlatformTracer for WindowsTracer {
     }
     fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
+        self.stealth_mode = true;
+        Ok(())
     }
 }
 

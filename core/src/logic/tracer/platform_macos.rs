@@ -6,7 +6,7 @@ use crate::error::{set_last_error, ReToolsError};
 use libc::c_int;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
-use nix::sys::wait::{waitpid, WaitStatus};
+use nix::sys::wait::{waitpid, WaitStatus, WaitPidFlag};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 
@@ -97,6 +97,67 @@ impl MacosTracer {
         Err(ReToolsError::Generic(
             "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
         ))
+    }
+    fn process_wait_status(&mut self, status: WaitStatus, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        unsafe {
+            match status {
+                WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
+                    let mut rip: u64 = 0;
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let regs = match ptrace::getregs(pid) {
+                            Ok(regs_any) => match regs_any.as_x86_64() {
+                                Some(r) => r.clone(),
+                                None => return Ok(false),
+                            },
+                            Err(_) => return Ok(false),
+                        };
+                        rip = regs.rip;
+                    }
+                    let alamat_breakpoint_potensial = rip.saturating_sub(1);
+                    if self.breakpoints_map.contains_key(&alamat_breakpoint_potensial) {
+                        if self.handle_breakpoint_logic(pid, alamat_breakpoint_potensial) {
+                            (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                            (*event_out).pid_thread = pid.as_raw();
+                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                            return Ok(true);
+                        } else {
+                            set_last_error(ReToolsError::Generic(format!(
+                                "Gagal menangani breakpoint logic pada 0x{:x}",
+                                alamat_breakpoint_potensial
+                            )));
+                            (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                            return Ok(false);
+                        }
+                    } else {
+                        (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                        (*event_out).pid_thread = pid.as_raw();
+                        (*event_out).info_alamat = rip;
+                        return Ok(true);
+                    }
+                }
+                WaitStatus::Stopped(pid, sig) => {
+                    ptrace::cont(pid, None).ok();
+                    return Ok(false);
+                }
+                WaitStatus::Exited(pid, status_code) => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*event_out).pid_thread = pid.as_raw();
+                    (*event_out).info_alamat = status_code as u64;
+                    return Ok(true);
+                }
+                WaitStatus::Signaled(pid, signal, _) => {
+                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*event_out).pid_thread = pid.as_raw();
+                    (*event_out).info_alamat = signal as u64;
+                    return Ok(true);
+                }
+                _ => {
+                    return Ok(false);
+                }
+            }
+        }
     }
 }
 
@@ -215,79 +276,22 @@ impl PlatformTracer for MacosTracer {
         }
     }
     fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
-        unsafe {
-            loop {
-                match waitpid(self.pid_target, None) {
-                    Ok(status) => {
-                        match status {
-                            WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
-                                let mut rip: u64 = 0;
-                                #[cfg(target_arch = "x86_64")]
-                                {
-                                    let regs = match ptrace::getregs(pid) {
-                                        Ok(regs_any) => match regs_any.as_x86_64() {
-                                            Some(r) => r.clone(),
-                                            None => continue,
-                                        },
-                                        Err(_) => continue,
-                                    };
-                                    rip = regs.rip;
-                                }
-                                let alamat_breakpoint_potensial = rip.saturating_sub(1);
-                                if self
-                                    .breakpoints_map
-                                    .contains_key(&alamat_breakpoint_potensial)
-                                {
-                                    if self.handle_breakpoint_logic(
-                                        pid,
-                                        alamat_breakpoint_potensial,
-                                    ) {
-                                        (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                                        (*event_out).pid_thread = pid.as_raw();
-                                        (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                        return Ok(0);
-                                    } else {
-                                        set_last_error(ReToolsError::Generic(format!(
-                                            "Gagal menangani breakpoint logic pada 0x{:x}",
-                                            alamat_breakpoint_potensial
-                                        )));
-                                        (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                                        (*event_out).info_alamat = alamat_breakpoint_potensial;
-                                        return Ok(-1);
-                                    }
-                                } else {
-                                    (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
-                                    (*event_out).pid_thread = pid.as_raw();
-                                    (*event_out).info_alamat = rip;
-                                    return Ok(0);
-                                }
-                            }
-                            WaitStatus::Stopped(pid, sig) => {
-                                ptrace::cont(pid, None).ok();
-                                continue;
-                            }
-                            WaitStatus::Exited(pid, status_code) => {
-                                (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                                (*event_out).pid_thread = pid.as_raw();
-                                (*event_out).info_alamat = status_code as u64;
-                                return Ok(0);
-                            }
-                            WaitStatus::Signaled(pid, signal, _) => {
-                                (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                                (*event_out).pid_thread = pid.as_raw();
-                                (*event_out).info_alamat = signal as u64;
-                                return Ok(0);
-                            }
-                            _ => {
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        return Err(e.into());
-                    }
-                }
+        loop {
+            let status = match waitpid(self.pid_target, None) {
+                Ok(s) => s,
+                Err(e) => return Err(e.into()),
+            };
+            if self.process_wait_status(status, event_out)? {
+                return Ok(0);
             }
+        }
+    }
+    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        match waitpid(self.pid_target, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => Ok(false),
+            Ok(status) => self.process_wait_status(status, event_out),
+            Err(nix::errno::Errno::ECHILD) => Ok(false),
+            Err(e) => Err(e.into()),
         }
     }
     fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
@@ -346,6 +350,9 @@ impl PlatformTracer for MacosTracer {
     }
     fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
+    }
+    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("Fitur anti-anti-debug belum diimplementasikan di macOS".to_string()))
     }
 }
 
