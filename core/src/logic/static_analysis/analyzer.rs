@@ -1,12 +1,15 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
 use encoding_rs::{UTF_16BE, UTF_16LE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::Binary;
+use crate::logic::static_analysis::disasm::{
+    buat_instance_capstone_by_arch, ArsitekturDisasm,
+};
 use log::{debug, info, warn};
 use regex::bytes::Regex;
 use memchr::memmem::Finder;
@@ -52,6 +55,33 @@ pub struct CryptoMatch {
     pub algorithm: String,
     pub constant_name: String,
     pub offset: u64,
+}
+
+#[derive(Deserialize)]
+struct FlirtSignatureInput {
+    pub name: String,
+    pub sig_hash: String, 
+    #[allow(dead_code)]
+    pub size_bound: u64,
+}
+
+struct Fnv1aHasher {
+    state: u64,
+}
+
+impl Fnv1aHasher {
+    fn new() -> Self {
+        Fnv1aHasher {
+            state: 0xcbf29ce484222325,
+        }
+    }
+    fn update(&mut self, byte: u8) {
+        self.state ^= byte as u64;
+        self.state = self.state.wrapping_mul(0x100000001b3);
+    }
+    fn finish(&self) -> u64 {
+        self.state
+    }
 }
 
 pub fn ekstrak_strings_internal(
@@ -299,41 +329,106 @@ pub fn deteksiHeuristicPacker_internal(
     Ok(results)
 }
 
+fn generate_fuzzy_signature(
+    code_bytes: &[u8],
+    address: u64,
+    arch: ArsitekturDisasm,
+) -> Option<String> {
+    let cs = match buat_instance_capstone_by_arch(arch) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    let insns = match cs.disasm_count(code_bytes, address, 0) {
+        Ok(i) => i,
+        Err(_) => return None,
+    };
+    if insns.len() < 3 {
+        return None;
+    }
+    let mut hasher = Fnv1aHasher::new();
+    for insn in insns.iter() {
+        let bytes = insn.bytes();
+        let mnemonic = insn.mnemonic().unwrap_or("").as_bytes();
+        if bytes.len() > 4 || mnemonic.starts_with(b"j") || mnemonic.starts_with(b"call") {
+            for &b in mnemonic {
+                hasher.update(b);
+            }
+            hasher.update(0xFF); 
+        } else {
+            for &b in bytes {
+                hasher.update(b);
+            }
+        }
+    }
+    let hash_val = hasher.finish();
+    Some(format!("{:016x}", hash_val))
+}
+
 #[allow(non_snake_case)]
 pub fn identifikasiFungsiLibrary_internal(
     binary: &Binary,
     signatures_json: &str,
 ) -> Result<Vec<LibraryMatch>, ReToolsError> {
     info!(
-        "Mulai identifikasi fungsi library untuk: {}",
+        "Mulai FLIRT-like identification untuk: {}",
         binary.file_path
     );
-    let signatures: HashMap<String, String> = serde_json::from_str(signatures_json)
-        .map_err(|e| ReToolsError::Generic(format!("Gagal parse JSON signatures: {}", e)))?;
+    let signatures: HashMap<String, String> = match serde_json::from_str(signatures_json) {
+        Ok(s) => s,
+        Err(_) => {
+            let list: Vec<FlirtSignatureInput> = serde_json::from_str(signatures_json)
+                .map_err(|e| ReToolsError::Generic(format!("JSON format error: {}", e)))?;
+            list.into_iter().map(|item| (item.sig_hash, item.name)).collect()
+        }
+    };
+    let arch = binary.header.get_disasm_arch();
+    if arch == ArsitekturDisasm::ARCH_UNKNOWN {
+        return Err(ReToolsError::Generic("Arsitektur tidak didukung untuk analisis FLIRT".to_string()));
+    }
     let mut results = Vec::new();
-    for (name, pattern) in signatures {
-        let re = match Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "Skipping signature '{}': Gagal compile regex: {}",
-                    name, e
-                );
+    for symbol in &binary.symbols {
+        if symbol.symbol_type == "FUNC" && symbol.size > 0 {
+            let start_offset = symbol.addr; 
+            let mut file_offset = 0;
+            let mut found = false;
+            for section in &binary.sections {
+                if start_offset >= section.addr && start_offset < (section.addr + section.size) {
+                    file_offset = section.offset + (start_offset - section.addr);
+                    found = true;
+                    break;
+                }
+            }
+            if !found || file_offset as usize >= binary.file_data.len() {
                 continue;
             }
-        };
-        for m in re.find_iter(&binary.file_data) {
-            let hex_match = m
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            results.push(LibraryMatch {
-                signature_name: name.clone(),
-                offset: m.start() as u64,
-                matched_bytes_hex: hex_match,
-            });
+            let size = std::cmp::min(symbol.size as usize, 256); 
+            let end = std::cmp::min(binary.file_data.len(), file_offset as usize + size);
+            let code_slice = &binary.file_data[file_offset as usize..end];
+            if let Some(generated_hash) = generate_fuzzy_signature(code_slice, start_offset, arch) {
+                if let Some(func_name) = signatures.get(&generated_hash) {
+                    debug!("Match FLIRT: {} di 0x{:x}", func_name, start_offset);
+                    results.push(LibraryMatch {
+                        signature_name: func_name.clone(),
+                        offset: start_offset,
+                        matched_bytes_hex: generated_hash,
+                    });
+                }
+            }
+        }
+    }
+    if results.is_empty() {
+        let simple_sigs: HashMap<String, String> = serde_json::from_str(signatures_json).unwrap_or_default();
+        for (name, pattern) in simple_sigs {
+            if let Ok(re) = Regex::new(&pattern) {
+                 for m in re.find_iter(&binary.file_data) {
+                    let hex_match = m.as_bytes().iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+                    results.push(LibraryMatch {
+                        signature_name: name.clone(),
+                        offset: m.start() as u64,
+                        matched_bytes_hex: hex_match,
+                    });
+                }
+            }
         }
     }
     info!(
