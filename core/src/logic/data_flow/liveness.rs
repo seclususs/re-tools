@@ -31,6 +31,7 @@ fn get_uses_in_expr(expr: &MicroExpr, uses: &mut HashSet<String>, defs: &HashSet
 		}
 		MicroExpr::MuatMemori(inner) => get_uses_in_expr(inner, uses, defs),
 		MicroExpr::Operand(MicroOperand::Konstanta(_)) => {}
+		MicroExpr::Operand(MicroOperand::Flag(_)) => {}
 	}
 }
 
@@ -59,6 +60,26 @@ fn get_uses_defs_block(
 				}
 				MicroInstruction::Panggil(expr) => {
 					get_uses_in_expr(expr, &mut uses, &defs);
+				}
+				MicroInstruction::AtomicRMW { op: _, alamat, nilai, tujuan_lama } => {
+					get_uses_in_expr(alamat, &mut uses, &defs);
+					get_uses_in_expr(nilai, &mut uses, &defs);
+					if let Some(old_val_var) = tujuan_lama {
+						defs.insert(old_val_var.nama_dasar.clone());
+					}
+				}
+				MicroInstruction::UpdateFlag(_flag_name, expr) => {
+					get_uses_in_expr(expr, &mut uses, &defs);
+				}
+				MicroInstruction::InstruksiVektor { tujuan, operand_1, operand_2, .. } => {
+					for op in operand_1.iter().chain(operand_2.iter()) {
+						if let MicroOperand::SsaVar(v) = op {
+							if !defs.contains(&v.nama_dasar) {
+								uses.insert(v.nama_dasar.clone());
+							}
+						}
+					}
+					defs.insert(tujuan.nama_dasar.clone());
 				}
 				_ => {}
 			}

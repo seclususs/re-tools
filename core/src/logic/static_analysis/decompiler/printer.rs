@@ -166,6 +166,12 @@ fn print_pernyataan(pernyataan: &PernyataanPseudo, state: &mut PrinterState) {
 		PernyataanPseudo::TidakTerdefinisi => {
 			state.write_line("// (instruksi tidak terdefinisi)");
 		}
+		PernyataanPseudo::AtomicOp { deskripsi } => {
+			writeln!(state.output, "__atomic_op(\"{}\");", deskripsi).unwrap();
+		}
+		PernyataanPseudo::Fence => {
+			state.write_line("__memory_fence();");
+		}
 	}
 }
 
@@ -173,6 +179,7 @@ fn print_ekspresi(ekspresi: &EkspresiPseudo) -> String {
 	match ekspresi {
 		EkspresiPseudo::Variabel(var) => var.nama_dasar.clone(),
 		EkspresiPseudo::Konstanta(k) => format!("0x{:x}", k),
+		EkspresiPseudo::Flag(f) => format!("FLAG_{}", f),
 		EkspresiPseudo::OperasiBiner { op, kiri, kanan } => {
 			format!(
 				"({} {} {})",

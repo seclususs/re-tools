@@ -19,11 +19,17 @@ impl fmt::Display for SsaVariabel {
 pub enum MicroOperand {
     SsaVar(SsaVariabel),
     Konstanta(u64),
+    Flag(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MicroUnOp {
     Not,
+    Neg,
+    ExtractZeroFlag,
+    ExtractSignFlag,
+    ExtractCarryFlag,
+    ExtractOverflowFlag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -32,13 +38,42 @@ pub enum MicroBinOp {
     Sub,
     Mul,
     Div,
+    Mod,
     And,
     Or,
     Xor,
+    Shl,
+    Shr,
+    Sar,
+    Rol,
+    Ror,
     TambahFloat,
     KurangFloat,
     KaliFloat,
     BagiFloat,
+    VecAddI8,
+    VecAddI16,
+    VecAddI32,
+    VecAddI64,
+    VecSubI8,
+    VecSubI16,
+    VecSubI32,
+    VecSubI64,
+    VecMulI32,
+    VecXor,
+    VecOr,
+    VecAnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum MicroAtomicOp {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    CompareExchange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,5 +97,19 @@ pub enum MicroInstruction {
     Nop,
     Syscall,
     TidakTerdefinisi,
-    InstruksiVektor(String, Vec<MicroOperand>),
+    AtomicRMW {
+        op: MicroAtomicOp,
+        alamat: MicroExpr,
+        nilai: MicroExpr,
+        tujuan_lama: Option<SsaVariabel>,
+    },
+    MemoryFence,
+    UpdateFlag(String, MicroExpr),
+    InstruksiVektor {
+        op: MicroBinOp,
+        tujuan: SsaVariabel,
+        elemen_size: u8,
+        operand_1: Vec<MicroOperand>,
+        operand_2: Vec<MicroOperand>,
+    },
 }

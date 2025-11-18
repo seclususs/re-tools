@@ -8,6 +8,7 @@ use crate::logic::ir::instruction::{MicroExpr, MicroOperand, SsaVariabel};
 pub enum EkspresiPseudo {
 	Variabel(SsaVariabel),
 	Konstanta(u64),
+	Flag(String),
 	OperasiBiner {
 		op: String,
 		kiri: Box<EkspresiPseudo>,
@@ -48,6 +49,10 @@ pub enum PernyataanPseudo {
 	Syscall,
 	BlokInstruksi(Vec<(u64, String)>),
 	TidakTerdefinisi,
+	AtomicOp {
+		deskripsi: String,
+	},
+	Fence,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +117,10 @@ pub fn map_ir_ke_pernyataan_pseudo(
 			PernyataanPseudo::Kembali(None)
 		}
 		crate::logic::ir::instruction::MicroInstruction::Syscall => PernyataanPseudo::Syscall,
+		crate::logic::ir::instruction::MicroInstruction::AtomicRMW { op, .. } => {
+			PernyataanPseudo::AtomicOp { deskripsi: format!("{:?}", op) }
+		},
+		crate::logic::ir::instruction::MicroInstruction::MemoryFence => PernyataanPseudo::Fence,
 		_ => PernyataanPseudo::TidakTerdefinisi,
 	}
 }
@@ -120,6 +129,7 @@ pub fn map_expr_ke_ekspresi_pseudo(expr: &MicroExpr) -> EkspresiPseudo {
 	match expr {
 		MicroExpr::Operand(MicroOperand::SsaVar(var)) => EkspresiPseudo::Variabel(var.clone()),
 		MicroExpr::Operand(MicroOperand::Konstanta(k)) => EkspresiPseudo::Konstanta(*k),
+		MicroExpr::Operand(MicroOperand::Flag(f)) => EkspresiPseudo::Flag(f.clone()),
 		MicroExpr::OperasiUnary(op, inner) => EkspresiPseudo::OperasiUnary {
 			op: format!("{:?}", op),
 			operand: Box::new(map_expr_ke_ekspresi_pseudo(inner)),

@@ -1,22 +1,22 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
 use super::instruction::{
-    MicroBinOp, MicroExpr, MicroInstruction, MicroOperand, MicroUnOp, SsaVariabel,
+    MicroAtomicOp, MicroBinOp, MicroExpr, MicroInstruction, MicroOperand, MicroUnOp, SsaVariabel,
 };
 use crate::error::ReToolsError;
-use crate::logic::static_analysis::disasm::{ArsitekturDisasm, buat_instance_capstone_by_arch};
-use capstone::prelude::*;
+use crate::logic::static_analysis::disasm::{buat_instance_capstone_by_arch, ArsitekturDisasm};
 use capstone::arch::{
     arm::{ArmInsnDetail, ArmOperand, ArmOperandType},
     arm64::{Arm64InsnDetail, Arm64OpMem, Arm64Operand, Arm64OperandType},
-    x86::{X86InsnDetail, X86OpMem, X86Operand, X86OperandType},
     mips::{MipsInsnDetail, MipsOpMem, MipsOperand},
     riscv::{RiscVInsnDetail, RiscVOpMem, RiscVOperand},
+    x86::{X86InsnDetail, X86OpMem, X86Operand, X86OperandType},
     ArchDetail,
 };
+use capstone::prelude::*;
 
 #[allow(non_snake_case)]
-fn buatSsaVariabel(reg_name: String) -> SsaVariabel {
+pub fn buatSsaVariabel(reg_name: String) -> SsaVariabel {
     SsaVariabel {
         nama_dasar: reg_name,
         versi: 0,
@@ -24,13 +24,13 @@ fn buatSsaVariabel(reg_name: String) -> SsaVariabel {
 }
 
 #[allow(non_snake_case)]
-fn buatSsaVariabelDariRegId(reg_id: RegId, cs: &Capstone) -> SsaVariabel {
+pub fn buatSsaVariabelDariRegId(reg_id: RegId, cs: &Capstone) -> SsaVariabel {
     let reg_name = cs.reg_name(reg_id).unwrap_or("unknown_reg".to_string());
     buatSsaVariabel(reg_name)
 }
 
 #[allow(non_snake_case)]
-fn petakanAlamatMemoriX86(mem_op: &X86OpMem, cs: &Capstone) -> MicroExpr {
+pub fn petakanAlamatMemoriX86(mem_op: &X86OpMem, cs: &Capstone) -> MicroExpr {
     let mut expr_opt: Option<Box<MicroExpr>> = None;
     if mem_op.base().0 != 0 {
         let base_var = buatSsaVariabelDariRegId(mem_op.base(), cs);
@@ -77,7 +77,7 @@ fn petakanAlamatMemoriX86(mem_op: &X86OpMem, cs: &Capstone) -> MicroExpr {
 }
 
 #[allow(non_snake_case)]
-fn petakanOperandKeEkspresiSsaX86(op: &X86Operand, cs: &Capstone) -> MicroExpr {
+pub fn petakanOperandKeEkspresiSsaX86(op: &X86Operand, cs: &Capstone) -> MicroExpr {
     match op.op_type {
         X86OperandType::Reg(reg_id) => {
             let var = buatSsaVariabelDariRegId(reg_id, cs);
@@ -98,12 +98,50 @@ fn petakanOperandKeEkspresiSsaX86(op: &X86Operand, cs: &Capstone) -> MicroExpr {
 fn petakanOperandKeMicroOperandX86(op: &X86Operand, cs: &Capstone) -> MicroOperand {
     match op.op_type {
         X86OperandType::Reg(reg_id) => {
-             let var = buatSsaVariabelDariRegId(reg_id, cs);
-             MicroOperand::SsaVar(var)
-        },
+            let var = buatSsaVariabelDariRegId(reg_id, cs);
+            MicroOperand::SsaVar(var)
+        }
         X86OperandType::Imm(val) => MicroOperand::Konstanta(val as u64),
         _ => MicroOperand::Konstanta(0),
     }
+}
+
+fn generate_eflags_update(
+    instrs: &mut Vec<MicroInstruction>,
+    res_expr: MicroExpr,
+    op1_expr: MicroExpr,
+    op2_expr: MicroExpr,
+    is_sub: bool,
+) {
+    let res_boxed = Box::new(res_expr.clone());
+    let op1_boxed = Box::new(op1_expr);
+    let op2_boxed = Box::new(op2_expr);
+    instrs.push(MicroInstruction::UpdateFlag(
+        "ZF".to_string(),
+        MicroExpr::OperasiUnary(MicroUnOp::ExtractZeroFlag, res_boxed.clone()),
+    ));
+    instrs.push(MicroInstruction::UpdateFlag(
+        "SF".to_string(),
+        MicroExpr::OperasiUnary(MicroUnOp::ExtractSignFlag, res_boxed.clone()),
+    ));
+    let overflow_op = if is_sub {
+        MicroExpr::OperasiBiner(MicroBinOp::Sub, op1_boxed.clone(), op2_boxed.clone()) 
+    } else {
+        MicroExpr::OperasiBiner(MicroBinOp::Add, op1_boxed.clone(), op2_boxed.clone())
+    };
+    instrs.push(MicroInstruction::UpdateFlag(
+        "OF".to_string(),
+        MicroExpr::OperasiUnary(MicroUnOp::ExtractOverflowFlag, Box::new(overflow_op)),
+    ));
+    let carry_expr = if is_sub {
+        MicroExpr::Bandingkan(op1_boxed, op2_boxed)
+    } else {
+        *res_boxed
+    };
+     instrs.push(MicroInstruction::UpdateFlag(
+        "CF".to_string(),
+        MicroExpr::OperasiUnary(MicroUnOp::ExtractCarryFlag, Box::new(carry_expr)),
+    ));
 }
 
 #[allow(non_snake_case)]
@@ -115,47 +153,62 @@ pub fn angkatSsaX86(
 ) -> Vec<MicroInstruction> {
     let mnem = insn.mnemonic().unwrap_or("");
     let operands: Vec<X86Operand> = detail.operands().collect();
+    let has_lock_prefix = detail.prefix().contains(&0xF0);
     macro_rules! angkatOperasiBiner {
-        ($op:expr) => {{
+        ($op:expr, $is_sub:expr) => {{
             let mut instrs = Vec::new();
-            let mut dest_var_opt: Option<SsaVariabel> = None;
             if operands.len() == 2 {
                 let dest_op = &operands[0];
                 let src_expr = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
-                match dest_op.op_type {
-                    X86OperandType::Reg(reg_id) => {
-                        let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                        let dest_expr =
-                            MicroExpr::Operand(MicroOperand::SsaVar(dest_var.clone()));
-                        instrs.push(MicroInstruction::Assign(
-                            dest_var.clone(),
-                            MicroExpr::OperasiBiner($op, Box::new(dest_expr), Box::new(src_expr)),
-                        ));
-                        dest_var_opt = Some(dest_var);
+                
+                if has_lock_prefix {
+                     match dest_op.op_type {
+                         X86OperandType::Mem(mem_op) => {
+                             let addr_expr = petakanAlamatMemoriX86(&mem_op, cs);
+                             let atomic_op = match $op {
+                                 MicroBinOp::Add => MicroAtomicOp::Add,
+                                 MicroBinOp::Sub => MicroAtomicOp::Sub,
+                                 MicroBinOp::And => MicroAtomicOp::And,
+                                 MicroBinOp::Or => MicroAtomicOp::Or,
+                                 MicroBinOp::Xor => MicroAtomicOp::Xor,
+                                 _ => MicroAtomicOp::Add,
+                             };
+                             instrs.push(MicroInstruction::AtomicRMW {
+                                 op: atomic_op,
+                                 alamat: addr_expr,
+                                 nilai: src_expr,
+                                 tujuan_lama: None,
+                             });
+                         },
+                         _ => instrs.push(MicroInstruction::TidakTerdefinisi),
+                     }
+                } else {
+                    match dest_op.op_type {
+                        X86OperandType::Reg(reg_id) => {
+                            let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
+                            let dest_expr = MicroExpr::Operand(MicroOperand::SsaVar(dest_var.clone()));
+                            let res_expr = MicroExpr::OperasiBiner($op, Box::new(dest_expr.clone()), Box::new(src_expr.clone()));
+                            instrs.push(MicroInstruction::Assign(dest_var.clone(), res_expr.clone()));
+                            generate_eflags_update(&mut instrs, res_expr, dest_expr, src_expr, $is_sub);
+                        }
+                        X86OperandType::Mem(mem_op) => {
+                            let addr_expr = petakanAlamatMemoriX86(&mem_op, cs);
+                            let dest_expr = MicroExpr::MuatMemori(Box::new(addr_expr.clone()));
+                            let res_expr = MicroExpr::OperasiBiner($op, Box::new(dest_expr.clone()), Box::new(src_expr.clone()));
+                            instrs.push(MicroInstruction::SimpanMemori(addr_expr, res_expr.clone()));
+                            generate_eflags_update(&mut instrs, res_expr, dest_expr, src_expr, $is_sub);
+                        }
+                        _ => instrs.push(MicroInstruction::TidakTerdefinisi),
                     }
-                    X86OperandType::Mem(mem_op) => {
-                        let addr_expr = petakanAlamatMemoriX86(&mem_op, cs);
-                        let dest_expr =
-                            MicroExpr::MuatMemori(Box::new(addr_expr.clone()));
-                        instrs.push(MicroInstruction::SimpanMemori(
-                            addr_expr,
-                            MicroExpr::OperasiBiner(
-                                $op,
-                                Box::new(dest_expr),
-                                Box::new(src_expr),
-                            ),
-                        ));
-                    }
-                    _ => instrs.push(MicroInstruction::TidakTerdefinisi),
                 }
             } else {
                 instrs.push(MicroInstruction::TidakTerdefinisi);
             }
-            (instrs, dest_var_opt)
+            instrs
         }};
     }
     match mnem {
-        "mov" | "movsx" | "movzx" | "movaps" | "movsd" | "movss" | "movdqa" | "movdqu" => {
+        "mov" | "movsx" | "movzx" | "movabs" => {
             if operands.len() == 2 {
                 let dest_op = &operands[0];
                 let src_expr = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
@@ -166,16 +219,46 @@ pub fn angkatSsaX86(
                     }
                     X86OperandType::Mem(mem_op) => {
                         let addr_expr = petakanAlamatMemoriX86(&mem_op, cs);
-                        vec![MicroInstruction::SimpanMemori(
-                            addr_expr,
-                            src_expr,
-                        )]
+                        vec![MicroInstruction::SimpanMemori(addr_expr, src_expr)]
                     }
                     _ => vec![MicroInstruction::TidakTerdefinisi],
                 }
             } else {
                 vec![MicroInstruction::TidakTerdefinisi]
             }
+        }
+        "xchg" => {
+             if operands.len() == 2 {
+                 if has_lock_prefix {
+                      let dest_op = &operands[0];
+                      let src_expr = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
+                      match dest_op.op_type {
+                          X86OperandType::Mem(mem_op) => {
+                               let addr_expr = petakanAlamatMemoriX86(&mem_op, cs);
+                               vec![MicroInstruction::AtomicRMW {
+                                   op: MicroAtomicOp::Xchg,
+                                   alamat: addr_expr,
+                                   nilai: src_expr,
+                                   tujuan_lama: None,
+                               }]
+                          },
+                          _ => vec![MicroInstruction::TidakTerdefinisi] 
+                      }
+                 } else {
+                     let op1 = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
+                     let op2 = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
+                     let mut instrs = Vec::new();
+                     if let X86OperandType::Reg(r1) = operands[0].op_type {
+                         instrs.push(MicroInstruction::Assign(buatSsaVariabelDariRegId(r1, cs), op2));
+                     }
+                     if let X86OperandType::Reg(r2) = operands[1].op_type {
+                          instrs.push(MicroInstruction::Assign(buatSsaVariabelDariRegId(r2, cs), op1));
+                     }
+                     instrs
+                 }
+             } else {
+                 vec![MicroInstruction::TidakTerdefinisi]
+             }
         }
         "lea" => {
             if operands.len() == 2 {
@@ -238,8 +321,10 @@ pub fn angkatSsaX86(
                         MicroOperand::SsaVar(reg_sp.clone()),
                     )));
                     let instr1 = MicroInstruction::Assign(t1.clone(), expr_load);
-                    let instr2 =
-                        MicroInstruction::Assign(dest_var, MicroExpr::Operand(MicroOperand::SsaVar(t1)));
+                    let instr2 = MicroInstruction::Assign(
+                        dest_var,
+                        MicroExpr::Operand(MicroOperand::SsaVar(t1)),
+                    );
                     let t2 = buatSsaVariabel("t_stack_adj".to_string());
                     let expr_add = MicroExpr::OperasiBiner(
                         MicroBinOp::Add,
@@ -247,8 +332,10 @@ pub fn angkatSsaX86(
                         Box::new(MicroExpr::Operand(MicroOperand::Konstanta(op_size))),
                     );
                     let instr3 = MicroInstruction::Assign(t2.clone(), expr_add);
-                    let instr4 =
-                        MicroInstruction::Assign(reg_sp, MicroExpr::Operand(MicroOperand::SsaVar(t2)));
+                    let instr4 = MicroInstruction::Assign(
+                        reg_sp,
+                        MicroExpr::Operand(MicroOperand::SsaVar(t2)),
+                    );
                     vec![instr1, instr2, instr3, instr4]
                 } else {
                     vec![MicroInstruction::TidakTerdefinisi]
@@ -257,104 +344,82 @@ pub fn angkatSsaX86(
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         }
-        "add" => {
-            let (mut base_instrs, dest_var_opt) = angkatOperasiBiner!(MicroBinOp::Add);
-            if let Some(dest_var) = dest_var_opt {
-                let flags_var = buatSsaVariabel("EFLAGS".to_string());
-                let flags_expr = MicroExpr::Bandingkan(
-                    Box::new(MicroExpr::Operand(MicroOperand::SsaVar(dest_var))),
-                    Box::new(MicroExpr::Operand(MicroOperand::Konstanta(0))),
-                );
-                base_instrs.push(MicroInstruction::Assign(flags_var, flags_expr));
-            }
-            base_instrs
-        }
-        "sub" => {
-            let (mut base_instrs, dest_var_opt) = angkatOperasiBiner!(MicroBinOp::Sub);
-            if let Some(dest_var) = dest_var_opt {
-                let flags_var = buatSsaVariabel("EFLAGS".to_string());
-                let flags_expr = MicroExpr::Bandingkan(
-                    Box::new(MicroExpr::Operand(MicroOperand::SsaVar(dest_var))),
-                    Box::new(MicroExpr::Operand(MicroOperand::Konstanta(0))),
-                );
-                base_instrs.push(MicroInstruction::Assign(flags_var, flags_expr));
-            }
-            base_instrs
-        }
-        "fadd" | "addss" | "addsd" => {
-             let (base_instrs, _) = angkatOperasiBiner!(MicroBinOp::TambahFloat);
-             base_instrs
-        }
-        "fsub" | "subss" | "subsd" => {
-             let (base_instrs, _) = angkatOperasiBiner!(MicroBinOp::KurangFloat);
-             base_instrs
-        }
-        "fmul" | "mulss" | "mulsd" => {
-             let (base_instrs, _) = angkatOperasiBiner!(MicroBinOp::KaliFloat);
-             base_instrs
-        }
-        "fdiv" | "divss" | "divsd" => {
-             let (base_instrs, _) = angkatOperasiBiner!(MicroBinOp::BagiFloat);
-             base_instrs
-        }
-        "and" => angkatOperasiBiner!(MicroBinOp::And).0,
-        "or" => angkatOperasiBiner!(MicroBinOp::Or).0,
-        "xor" => angkatOperasiBiner!(MicroBinOp::Xor).0,
-        "pxor" | "xorps" | "xorpd" | "vpxor" => {
-            let mut op_vec = Vec::new();
-            for op in &operands {
-                op_vec.push(petakanOperandKeMicroOperandX86(op, cs));
-            }
-            vec![MicroInstruction::InstruksiVektor("pxor".to_string(), op_vec)]
-        }
-        "paddb" | "paddw" | "paddd" | "paddq" | "vaddps" | "vaddpd" | "addps" | "addpd" => {
-             let mut op_vec = Vec::new();
-            for op in &operands {
-                op_vec.push(petakanOperandKeMicroOperandX86(op, cs));
-            }
-            vec![MicroInstruction::InstruksiVektor("vector_add".to_string(), op_vec)]
-        }
-        "not" => {
-            if operands.len() == 1 {
-                let dest_op = &operands[0];
-                match dest_op.op_type {
-                    X86OperandType::Reg(reg_id) => {
-                        let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                        let dest_expr =
-                            MicroExpr::Operand(MicroOperand::SsaVar(dest_var.clone()));
-                        vec![MicroInstruction::Assign(
-                            dest_var,
-                            MicroExpr::OperasiUnary(MicroUnOp::Not, Box::new(dest_expr)),
-                        )]
-                    }
-                    _ => vec![MicroInstruction::TidakTerdefinisi],
+        "add" => angkatOperasiBiner!(MicroBinOp::Add, false),
+        "sub" => angkatOperasiBiner!(MicroBinOp::Sub, true),
+        "and" => angkatOperasiBiner!(MicroBinOp::And, false),
+        "or" => angkatOperasiBiner!(MicroBinOp::Or, false),
+        "xor" => angkatOperasiBiner!(MicroBinOp::Xor, false),
+        "paddb" | "paddw" | "paddd" | "paddq" | "vpaddb" | "vpaddw" | "vpaddd" | "vpaddq" => {
+            if operands.len() >= 2 {
+                let op1_vec = operands.iter().map(|op| petakanOperandKeMicroOperandX86(op, cs)).collect();
+                let op2_vec = Vec::new(); 
+                if let X86OperandType::Reg(reg_id) = operands[0].op_type {
+                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
+                    let op_type = match mnem.chars().last().unwrap() {
+                        'b' => MicroBinOp::VecAddI8,
+                        'w' => MicroBinOp::VecAddI16,
+                        'd' => MicroBinOp::VecAddI32,
+                        'q' => MicroBinOp::VecAddI64,
+                        _ => MicroBinOp::VecAddI32,
+                    };
+                    vec![MicroInstruction::InstruksiVektor {
+                        op: op_type,
+                        tujuan: dest_var,
+                        elemen_size: 0, 
+                        operand_1: op1_vec,
+                        operand_2: op2_vec,
+                    }]
+                } else {
+                    vec![MicroInstruction::TidakTerdefinisi]
                 }
             } else {
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         }
-        "cmp" | "ucomiss" | "ucomisd" => {
+        "pxor" | "vpxor" => {
+             if let X86OperandType::Reg(reg_id) = operands[0].op_type {
+                 let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
+                 let op1_vec = operands.iter().map(|op| petakanOperandKeMicroOperandX86(op, cs)).collect();
+                 vec![MicroInstruction::InstruksiVektor {
+                        op: MicroBinOp::VecXor,
+                        tujuan: dest_var,
+                        elemen_size: 128,
+                        operand_1: op1_vec,
+                        operand_2: Vec::new(),
+                 }]
+             } else {
+                 vec![MicroInstruction::TidakTerdefinisi]
+             }
+        }
+        "cmp" => {
             if operands.len() == 2 {
                 let op1 = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
                 let op2 = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
-                let flags_var = buatSsaVariabel("EFLAGS".to_string());
-                vec![MicroInstruction::Assign(
-                    flags_var,
-                    MicroExpr::Bandingkan(Box::new(op1), Box::new(op2)),
-                )]
+                let res_expr = MicroExpr::OperasiBiner(MicroBinOp::Sub, Box::new(op1.clone()), Box::new(op2.clone()));
+                let mut instrs = Vec::new();
+                generate_eflags_update(&mut instrs, res_expr, op1, op2, true);
+                instrs
             } else {
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         }
         "test" => {
-            if operands.len() == 2 {
+             if operands.len() == 2 {
                 let op1 = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
                 let op2 = petakanOperandKeEkspresiSsaX86(&operands[1], cs);
-                let flags_var = buatSsaVariabel("EFLAGS".to_string());
-                vec![MicroInstruction::Assign(
-                    flags_var,
-                    MicroExpr::UjiBit(Box::new(op1), Box::new(op2)),
-                )]
+                let res_expr = MicroExpr::OperasiBiner(MicroBinOp::And, Box::new(op1.clone()), Box::new(op2.clone()));
+                let mut instrs = Vec::new();
+                instrs.push(MicroInstruction::UpdateFlag(
+                    "ZF".to_string(),
+                    MicroExpr::OperasiUnary(MicroUnOp::ExtractZeroFlag, Box::new(res_expr.clone())),
+                ));
+                instrs.push(MicroInstruction::UpdateFlag(
+                    "SF".to_string(),
+                    MicroExpr::OperasiUnary(MicroUnOp::ExtractSignFlag, Box::new(res_expr.clone())),
+                ));
+                instrs.push(MicroInstruction::UpdateFlag("CF".to_string(), MicroExpr::Operand(MicroOperand::Konstanta(0))));
+                instrs.push(MicroInstruction::UpdateFlag("OF".to_string(), MicroExpr::Operand(MicroOperand::Konstanta(0))));
+                instrs
             } else {
                 vec![MicroInstruction::TidakTerdefinisi]
             }
@@ -369,16 +434,15 @@ pub fn angkatSsaX86(
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         }
-        "je" | "jz" | "jne" | "jnz" | "jg" | "jl" | "jge" | "jle" | "ja" | "jb" | "jc" | "jnc"
-        | "jo" | "jno" | "jp" | "jnp" | "js" | "jns" => {
-            if operands.len() == 1 {
-                let flags_var = buatSsaVariabel("EFLAGS".to_string());
-                let cond_expr = MicroExpr::Operand(MicroOperand::SsaVar(flags_var));
-                let target_expr = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
-                vec![MicroInstruction::LompatKondisi(cond_expr, target_expr)]
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
+        "je" | "jz" => {
+             let cond = MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()));
+             let target = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
+             vec![MicroInstruction::LompatKondisi(cond, target)]
+        }
+        "jne" | "jnz" => {
+             let cond = MicroExpr::OperasiUnary(MicroUnOp::Not, Box::new(MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()))));
+             let target = petakanOperandKeEkspresiSsaX86(&operands[0], cs);
+             vec![MicroInstruction::LompatKondisi(cond, target)]
         }
         "call" => {
             if operands.len() == 1 {
@@ -393,29 +457,7 @@ pub fn angkatSsaX86(
         "ret" | "retn" => vec![MicroInstruction::Kembali],
         "nop" | "pause" => vec![MicroInstruction::Nop],
         "syscall" | "sysenter" | "int" => vec![MicroInstruction::Syscall],
-        "rdtsc" => {
-            let eax = buatSsaVariabel("eax".to_string());
-            let edx = buatSsaVariabel("edx".to_string());
-            let tsc = buatSsaVariabel("TSC".to_string()); 
-            vec![
-                MicroInstruction::Assign(eax, MicroExpr::Operand(MicroOperand::SsaVar(tsc.clone()))),
-                MicroInstruction::Assign(edx, MicroExpr::Operand(MicroOperand::SsaVar(tsc))),
-            ]
-        },
-        "cpuid" => {
-             let eax = buatSsaVariabel("eax".to_string());
-             let ebx = buatSsaVariabel("ebx".to_string());
-             let ecx = buatSsaVariabel("ecx".to_string());
-             let edx = buatSsaVariabel("edx".to_string());
-             let cpuid_src = buatSsaVariabel("CPUID_RESULT".to_string());
-             vec![
-                 MicroInstruction::Assign(eax, MicroExpr::Operand(MicroOperand::SsaVar(cpuid_src.clone()))),
-                 MicroInstruction::Assign(ebx, MicroExpr::Operand(MicroOperand::SsaVar(cpuid_src.clone()))),
-                 MicroInstruction::Assign(ecx, MicroExpr::Operand(MicroOperand::SsaVar(cpuid_src.clone()))),
-                 MicroInstruction::Assign(edx, MicroExpr::Operand(MicroOperand::SsaVar(cpuid_src))),
-             ]
-        },
-        "cli" | "sti" | "cld" | "std" => vec![MicroInstruction::Nop], 
+        "mfence" | "lfence" | "sfence" => vec![MicroInstruction::MemoryFence],
         _ => vec![MicroInstruction::TidakTerdefinisi],
     }
 }
@@ -523,7 +565,6 @@ pub fn angkatSsaAarch64(
 ) -> Vec<MicroInstruction> {
     let mnem = insn.mnemonic().unwrap_or("");
     let operands: Vec<Arm64Operand> = detail.operands().collect();
-    
     match mnem {
         "mov" | "fmov" => {
             if operands.len() == 2 {
@@ -559,7 +600,18 @@ pub fn angkatSsaAarch64(
                         for op in &operands {
                             op_vec.push(petakanOperandKeMicroOperandAarch64(op, cs));
                         }
-                        vec![MicroInstruction::InstruksiVektor("vector_add".to_string(), op_vec)]
+                         if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
+                             let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
+                             vec![MicroInstruction::InstruksiVektor {
+                                op: MicroBinOp::VecAddI64,
+                                tujuan: dest_var,
+                                elemen_size: 64,
+                                operand_1: op_vec,
+                                operand_2: Vec::new()
+                             }]
+                         } else {
+                             vec![MicroInstruction::TidakTerdefinisi]
+                         }
                      } else {
                          vec![MicroInstruction::TidakTerdefinisi]
                      }
@@ -568,159 +620,52 @@ pub fn angkatSsaAarch64(
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         }
-        "sub" | "fsub" => {
-            if operands.len() == 3 {
-                if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
-                    let src2_expr = petakanOperandKeEkspresiSsaAarch64(&operands[2], cs);
-                    let op = if mnem == "fsub" { MicroBinOp::KurangFloat } else { MicroBinOp::Sub };
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(
-                            op,
-                            Box::new(src1_expr),
-                            Box::new(src2_expr),
-                        ),
-                    )]
-                } else {
-                     if operands.len() == 3 {
-                         let mut op_vec = Vec::new();
-                        for op in &operands {
-                            op_vec.push(petakanOperandKeMicroOperandAarch64(op, cs));
-                        }
-                        vec![MicroInstruction::InstruksiVektor("vector_sub".to_string(), op_vec)]
-                     } else {
-                        vec![MicroInstruction::TidakTerdefinisi]
-                     }
-                }
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "mul" | "fmul" => {
+        "ldxr" => {
+             if operands.len() == 2 {
+                 if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
+                     let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
+                     let addr_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
+                     vec![
+                         MicroInstruction::MemoryFence,
+                         MicroInstruction::Assign(dest_var, MicroExpr::MuatMemori(Box::new(addr_expr)))
+                     ]
+                 } else {
+                     vec![MicroInstruction::TidakTerdefinisi]
+                 }
+             } else {
+                 vec![MicroInstruction::TidakTerdefinisi]
+             }
+        },
+        "stxr" => {
              if operands.len() == 3 {
-                if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
-                    let src2_expr = petakanOperandKeEkspresiSsaAarch64(&operands[2], cs);
-                    let op = if mnem == "fmul" { MicroBinOp::KaliFloat } else { MicroBinOp::Mul };
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(
-                            op,
-                            Box::new(src1_expr),
-                            Box::new(src2_expr),
-                        ),
-                    )]
-                } else {
-                    vec![MicroInstruction::TidakTerdefinisi]
-                }
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
+                 let addr_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
+                 let val_expr = petakanOperandKeEkspresiSsaAarch64(&operands[0], cs);
+                 if let Arm64OperandType::Reg(status_reg) = operands[2].op_type {
+                     let status_var = buatSsaVariabelDariRegId(status_reg, cs);
+                     vec![
+                         MicroInstruction::AtomicRMW {
+                             op: MicroAtomicOp::Xchg,
+                             alamat: addr_expr,
+                             nilai: val_expr,
+                             tujuan_lama: Some(status_var)
+                         },
+                         MicroInstruction::MemoryFence
+                     ]
+                 } else {
+                      vec![MicroInstruction::TidakTerdefinisi]
+                 }
+             } else {
+                 vec![MicroInstruction::TidakTerdefinisi]
+             }
         }
-        "udiv" | "sdiv" | "fdiv" => {
-             if operands.len() == 3 {
-                if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
-                    let src2_expr = petakanOperandKeEkspresiSsaAarch64(&operands[2], cs);
-                    let op = if mnem == "fdiv" { MicroBinOp::BagiFloat } else { MicroBinOp::Div };
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(
-                            op,
-                            Box::new(src1_expr),
-                            Box::new(src2_expr),
-                        ),
-                    )]
-                } else {
-                    vec![MicroInstruction::TidakTerdefinisi]
-                }
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "cmp" | "fcmp" => {
-            if operands.len() == 2 {
-                let op1 = petakanOperandKeEkspresiSsaAarch64(&operands[0], cs);
-                let op2 = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
-                let flags_var = buatSsaVariabel("NZCV".to_string());
-                vec![MicroInstruction::Assign(
-                    flags_var,
-                    MicroExpr::Bandingkan(Box::new(op1), Box::new(op2)),
-                )]
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "b" => {
-            if operands.len() == 1 {
-                vec![MicroInstruction::Lompat(
-                    petakanOperandKeEkspresiSsaAarch64(&operands[0], cs),
-                )]
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "b.eq" | "b.ne" | "b.cs" | "b.hs" | "b.cc" | "b.lo" | "b.mi" | "b.pl" | "b.vs" | "b.vc" | "b.hi" | "b.ls" | "b.ge" | "b.lt" | "b.gt" | "b.le" => {
-             if operands.len() == 1 {
-                let flags_var = buatSsaVariabel("NZCV".to_string());
-                let cond_expr = MicroExpr::Operand(MicroOperand::SsaVar(flags_var));
-                let target_expr = petakanOperandKeEkspresiSsaAarch64(&operands[0], cs);
-                vec![MicroInstruction::LompatKondisi(cond_expr, target_expr)]
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "bl" | "blr" => {
-            if operands.len() == 1 {
-                vec![MicroInstruction::Panggil(
-                    petakanOperandKeEkspresiSsaAarch64(&operands[0], cs),
-                )]
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
+        "dmb" | "dsb" | "isb" => vec![MicroInstruction::MemoryFence],
         "ret" => vec![MicroInstruction::Kembali],
-        "ldr" => {
-            if operands.len() == 2 {
-                if let Arm64OperandType::Reg(reg_id) = operands[0].op_type {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src_expr = petakanOperandKeEkspresiSsaAarch64(&operands[1], cs);
-                    vec![MicroInstruction::Assign(dest_var, src_expr)]
-                } else {
-                    vec![MicroInstruction::TidakTerdefinisi]
-                }
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "str" => {
-            if operands.len() == 2 {
-                let src_expr = petakanOperandKeEkspresiSsaAarch64(&operands[0], cs);
-                if let Arm64OperandType::Mem(mem_op) = operands[1].op_type {
-                    let addr_expr = petakanAlamatMemoriAarch64(&mem_op, cs);
-                    vec![MicroInstruction::SimpanMemori(
-                        addr_expr,
-                        src_expr,
-                    )]
-                } else {
-                    vec![MicroInstruction::TidakTerdefinisi]
-                }
-            } else {
-                vec![MicroInstruction::TidakTerdefinisi]
-            }
-        }
-        "svc" | "hvc" | "smc" => vec![MicroInstruction::Syscall],
-        "mrs" | "msr" => vec![MicroInstruction::Nop], // Privilege Access
         _ => vec![MicroInstruction::TidakTerdefinisi],
     }
 }
 
 #[allow(non_snake_case)]
-fn petakanAlamatMemoriMips(mem_op: &MipsOpMem, cs: &Capstone) -> MicroExpr {
+pub fn petakanAlamatMemoriMips(mem_op: &MipsOpMem, cs: &Capstone) -> MicroExpr {
     let mut expr_opt: Option<Box<MicroExpr>> = None;
     if mem_op.base().0 != 0 {
         let base_var = buatSsaVariabelDariRegId(mem_op.base(), cs);
@@ -742,7 +687,7 @@ fn petakanAlamatMemoriMips(mem_op: &MipsOpMem, cs: &Capstone) -> MicroExpr {
 }
 
 #[allow(non_snake_case)]
-fn petakanOperandKeEkspresiSsaMips(op: &MipsOperand, cs: &Capstone) -> MicroExpr {
+pub fn petakanOperandKeEkspresiSsaMips(op: &MipsOperand, cs: &Capstone) -> MicroExpr {
     match op {
         MipsOperand::Reg(reg_id) => {
             let var = buatSsaVariabelDariRegId(*reg_id, cs);
@@ -841,57 +786,6 @@ pub fn angkatSsaMips(
                  vec![MicroInstruction::TidakTerdefinisi]
              }
         },
-        "and" | "andi" => {
-             if operands.len() == 3 {
-                if let MipsOperand::Reg(reg_id) = operands[0] {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1 = petakanOperandKeEkspresiSsaMips(&operands[1], cs);
-                    let src2 = petakanOperandKeEkspresiSsaMips(&operands[2], cs);
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(MicroBinOp::And, Box::new(src1), Box::new(src2))
-                    )]
-                } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "or" | "ori" => {
-             if operands.len() == 3 {
-                if let MipsOperand::Reg(reg_id) = operands[0] {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1 = petakanOperandKeEkspresiSsaMips(&operands[1], cs);
-                    let src2 = petakanOperandKeEkspresiSsaMips(&operands[2], cs);
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(MicroBinOp::Or, Box::new(src1), Box::new(src2))
-                    )]
-                } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "xor" | "xori" => {
-             if operands.len() == 3 {
-                if let MipsOperand::Reg(reg_id) = operands[0] {
-                    let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                    let src1 = petakanOperandKeEkspresiSsaMips(&operands[1], cs);
-                    let src2 = petakanOperandKeEkspresiSsaMips(&operands[2], cs);
-                    vec![MicroInstruction::Assign(
-                        dest_var,
-                        MicroExpr::OperasiBiner(MicroBinOp::Xor, Box::new(src1), Box::new(src2))
-                    )]
-                } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
         "j" | "b" => {
             if operands.len() == 1 {
                 vec![MicroInstruction::Lompat(petakanOperandKeEkspresiSsaMips(&operands[0], cs))]
@@ -914,24 +808,15 @@ pub fn angkatSsaMips(
                  vec![MicroInstruction::Lompat(petakanOperandKeEkspresiSsaMips(&operands[0], cs))]
             }
         },
-        "beq" | "bne" | "bgtz" | "blez" => {
-             if operands.len() >= 2 {
-                 let cond = buatSsaVariabel("COND_BRANCH".to_string());
-                 let target = operands.last().unwrap();
-                 let target_expr = petakanOperandKeEkspresiSsaMips(target, cs);
-                 vec![MicroInstruction::LompatKondisi(MicroExpr::Operand(MicroOperand::SsaVar(cond)), target_expr)]
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
         "syscall" => vec![MicroInstruction::Syscall],
         "nop" => vec![MicroInstruction::Nop],
+        "sync" => vec![MicroInstruction::MemoryFence],
         _ => vec![MicroInstruction::TidakTerdefinisi],
     }
 }
 
 #[allow(non_snake_case)]
-fn petakanAlamatMemoriRiscv(mem_op: &RiscVOpMem, cs: &Capstone) -> MicroExpr {
+pub fn petakanAlamatMemoriRiscv(mem_op: &RiscVOpMem, cs: &Capstone) -> MicroExpr {
      let mut expr_opt: Option<Box<MicroExpr>> = None;
     if mem_op.base().0 != 0 {
         let base_var = buatSsaVariabelDariRegId(mem_op.base(), cs);
@@ -953,7 +838,7 @@ fn petakanAlamatMemoriRiscv(mem_op: &RiscVOpMem, cs: &Capstone) -> MicroExpr {
 }
 
 #[allow(non_snake_case)]
-fn petakanOperandKeEkspresiSsaRiscv(op: &RiscVOperand, cs: &Capstone) -> MicroExpr {
+pub fn petakanOperandKeEkspresiSsaRiscv(op: &RiscVOperand, cs: &Capstone) -> MicroExpr {
     match op {
         RiscVOperand::Reg(reg_id) => {
              let var = buatSsaVariabelDariRegId(*reg_id, cs);
@@ -1019,62 +904,7 @@ pub fn angkatSsaRiscv(
                  vec![MicroInstruction::TidakTerdefinisi]
              }
         },
-        "sub" | "subw" => {
-             if operands.len() == 3 {
-                 if let RiscVOperand::Reg(reg_id) = operands[0] {
-                     let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                     let src1 = petakanOperandKeEkspresiSsaRiscv(&operands[1], cs);
-                     let src2 = petakanOperandKeEkspresiSsaRiscv(&operands[2], cs);
-                     vec![MicroInstruction::Assign(dest_var, MicroExpr::OperasiBiner(MicroBinOp::Sub, Box::new(src1), Box::new(src2)))]
-                 } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                 }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "and" | "andi" => {
-             if operands.len() == 3 {
-                 if let RiscVOperand::Reg(reg_id) = operands[0] {
-                     let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                     let src1 = petakanOperandKeEkspresiSsaRiscv(&operands[1], cs);
-                     let src2 = petakanOperandKeEkspresiSsaRiscv(&operands[2], cs);
-                     vec![MicroInstruction::Assign(dest_var, MicroExpr::OperasiBiner(MicroBinOp::And, Box::new(src1), Box::new(src2)))]
-                 } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                 }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "or" | "ori" => {
-             if operands.len() == 3 {
-                 if let RiscVOperand::Reg(reg_id) = operands[0] {
-                     let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                     let src1 = petakanOperandKeEkspresiSsaRiscv(&operands[1], cs);
-                     let src2 = petakanOperandKeEkspresiSsaRiscv(&operands[2], cs);
-                     vec![MicroInstruction::Assign(dest_var, MicroExpr::OperasiBiner(MicroBinOp::Or, Box::new(src1), Box::new(src2)))]
-                 } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                 }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "xor" | "xori" => {
-             if operands.len() == 3 {
-                 if let RiscVOperand::Reg(reg_id) = operands[0] {
-                     let dest_var = buatSsaVariabelDariRegId(reg_id, cs);
-                     let src1 = petakanOperandKeEkspresiSsaRiscv(&operands[1], cs);
-                     let src2 = petakanOperandKeEkspresiSsaRiscv(&operands[2], cs);
-                     vec![MicroInstruction::Assign(dest_var, MicroExpr::OperasiBiner(MicroBinOp::Xor, Box::new(src1), Box::new(src2)))]
-                 } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                 }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
+        "fence" | "fence.i" => vec![MicroInstruction::MemoryFence],
         "jal" => {
             if operands.len() >= 1 {
                 let target = operands.last().unwrap();
@@ -1083,38 +913,7 @@ pub fn angkatSsaRiscv(
                 vec![MicroInstruction::TidakTerdefinisi]
             }
         },
-        "jalr" => {
-             if operands.len() >= 1 {
-                 let target = if operands.len() == 2 { &operands[1] } else { &operands[0] };
-                 vec![MicroInstruction::Panggil(petakanOperandKeEkspresiSsaRiscv(target, cs))]
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
-        "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" => {
-             if operands.len() == 3 {
-                 let cond = buatSsaVariabel("BRANCH_COND".to_string());
-                 let target = &operands[2];
-                 vec![MicroInstruction::LompatKondisi(MicroExpr::Operand(MicroOperand::SsaVar(cond)), petakanOperandKeEkspresiSsaRiscv(target, cs))]
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
         "ecall" | "ebreak" => vec![MicroInstruction::Syscall],
-        "nop" => vec![MicroInstruction::Nop],
-        "mv" => {
-             if operands.len() == 2 {
-                 if let RiscVOperand::Reg(reg_id) = operands[0] {
-                     let dest = buatSsaVariabelDariRegId(reg_id, cs);
-                     let src = petakanOperandKeEkspresiSsaRiscv(&operands[1], cs);
-                     vec![MicroInstruction::Assign(dest, src)]
-                 } else {
-                     vec![MicroInstruction::TidakTerdefinisi]
-                 }
-             } else {
-                 vec![MicroInstruction::TidakTerdefinisi]
-             }
-        },
         "ret" => vec![MicroInstruction::Kembali],
         _ => vec![MicroInstruction::TidakTerdefinisi],
     }

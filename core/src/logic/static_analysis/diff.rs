@@ -93,7 +93,10 @@ fn get_ir_signature(ir: &MicroInstruction) -> &'static str {
         MicroInstruction::Nop => "Nop",
         MicroInstruction::Syscall => "Syscall",
         MicroInstruction::TidakTerdefinisi => "TidakTerdefinisi",
-        MicroInstruction::InstruksiVektor(_, _) => "InstruksiVektor",
+        MicroInstruction::InstruksiVektor { .. } => "InstruksiVektor",
+        MicroInstruction::AtomicRMW { .. } => "Atomic",
+        MicroInstruction::MemoryFence => "Fence",
+        MicroInstruction::UpdateFlag(_, _) => "UpdateFlag",
     }
 }
 

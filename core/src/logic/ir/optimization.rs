@@ -66,6 +66,16 @@ impl IrOptimizer {
                                 }
                             }
                         }
+                        MicroInstruction::AtomicRMW { alamat, nilai, .. } => {
+                            let c1 = self.ganti_variabel_dengan_konstanta(alamat, &constants_map);
+                            let c2 = self.ganti_variabel_dengan_konstanta(nilai, &constants_map);
+                            if c1 || c2 { self.changed = true; }
+                        }
+                        MicroInstruction::UpdateFlag(_, expr) => {
+                            if self.ganti_variabel_dengan_konstanta(expr, &constants_map) {
+                                self.changed = true;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -92,8 +102,8 @@ impl IrOptimizer {
                 let m2 = self.ganti_variabel_dengan_konstanta(right, constants);
                 modified = m1 || m2;
             }
-            MicroExpr::Operand(MicroOperand::Konstanta(_)) => {
-            }
+            MicroExpr::Operand(MicroOperand::Konstanta(_)) => {}
+            MicroExpr::Operand(MicroOperand::Flag(_)) => {}
         }
         modified
     }
@@ -202,6 +212,20 @@ impl IrOptimizer {
                             }
                             MicroInstruction::Lompat(target) | MicroInstruction::Panggil(target) => {
                                 self.tambah_uses_ke_live(target, &mut live_vars);
+                                block_instrs_rev.push(instr.clone());
+                            }
+                            MicroInstruction::AtomicRMW { alamat, nilai, tujuan_lama, .. } => {
+                                self.tambah_uses_ke_live(alamat, &mut live_vars);
+                                self.tambah_uses_ke_live(nilai, &mut live_vars);
+                                if let Some(old) = tujuan_lama {
+                                    if live_vars.contains(&old.nama_dasar) {
+                                        live_vars.remove(&old.nama_dasar);
+                                    }
+                                }
+                                block_instrs_rev.push(instr.clone());
+                            }
+                            MicroInstruction::UpdateFlag(_, expr) => {
+                                self.tambah_uses_ke_live(expr, &mut live_vars);
                                 block_instrs_rev.push(instr.clone());
                             }
                             _ => {

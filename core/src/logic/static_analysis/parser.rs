@@ -320,6 +320,13 @@ impl Binary {
                 Self::find_data_refs_in_expr(&addr_expr, instr_va, data_access_graph);
                 Self::find_data_refs_in_expr(&data_expr, instr_va, data_access_graph);
             }
+            MicroInstruction::AtomicRMW { alamat, nilai, .. } => {
+                Self::find_data_refs_in_expr(&alamat, instr_va, data_access_graph);
+                Self::find_data_refs_in_expr(&nilai, instr_va, data_access_graph);
+            }
+            MicroInstruction::UpdateFlag(_, expr) => {
+                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+            }
             _ => {}
         }
     }
@@ -352,6 +359,7 @@ impl Binary {
                 Self::find_data_refs_in_expr(right, instr_va, data_graph);
             }
             MicroExpr::Operand(MicroOperand::SsaVar(_)) => {}
+            MicroExpr::Operand(MicroOperand::Flag(_)) => {}
         }
     }
     fn extract_constant_from_expr(expr: &MicroExpr) -> Option<u64> {
