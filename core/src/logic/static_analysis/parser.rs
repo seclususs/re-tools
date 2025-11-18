@@ -2,7 +2,7 @@
 
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
-use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::lifter::lift_blok_instr;
 use crate::logic::ir::instruction::{MicroExpr, MicroInstruction, MicroOperand};
 use goblin::elf::dynamic;
 use goblin::elf::sym;
@@ -19,10 +19,10 @@ pub struct InternalHeaderInfo {
     pub format: &'static str,
     pub arch: &'static str,
     pub bits: u16,
-    pub entry_point: u64,
+    pub addr_masuk: u64,
     pub machine_id: u64,
     pub is_lib: bool,
-    pub file_size: u64,
+    pub sz_berkas: u64,
 }
 
 impl InternalHeaderInfo {
@@ -32,10 +32,10 @@ impl InternalHeaderInfo {
             format: "Unknown",
             arch: "Unknown",
             bits: 0,
-            entry_point: 0,
+            addr_masuk: 0,
             machine_id: 0,
             is_lib: false,
-            file_size: 0,
+            sz_berkas: 0,
         }
     }
     pub fn arch_from_elf_machine(machine: u16) -> &'static str {
@@ -143,7 +143,7 @@ pub struct ElfDynamicInfo {
 
 #[derive(Debug, Serialize)]
 pub struct Binary {
-    pub file_path: String,
+    pub path_berkas: String,
     #[serde(skip)]
     pub file_data: Mmap,
     pub header: InternalHeaderInfo,
@@ -157,22 +157,22 @@ pub struct Binary {
 }
 
 impl Binary {
-    pub fn load(file_path: &str) -> Result<Self, ReToolsError> {
-        let file_path_string = file_path.to_string();
-        let file = File::open(file_path)?;
-        let file_data = unsafe { Mmap::map(&file)? };
-        let file_size = file_data.len() as u64;
-        let obj = Object::parse(&file_data)
+    pub fn load(path_berkas: &str) -> Result<Self, ReToolsError> {
+        let str_path = path_berkas.to_string();
+        let berkas = File::open(path_berkas)?;
+        let data_berkas = unsafe { Mmap::map(&berkas)? };
+        let sz_berkas = data_berkas.len() as u64;
+        let obj = Object::parse(&data_berkas)
             .map_err(|e| ReToolsError::ParseError(e.to_string()))?;
-        let header = Self::parse_header_internal(&obj, file_size)?;
-        let sections = Self::parse_sections_internal(&obj)?;
-        let symbols = Self::parse_symbols_internal(&obj)?;
-        let imports = Self::parse_imports_internal(&obj)?;
-        let exports = Self::parse_exports_internal(&obj)?;
-        let elf_dynamic_info = Self::parse_elf_dynamic_info_internal(&obj)?;
+        let header = Self::parse_header(&obj, sz_berkas)?;
+        let sections = Self::parse_sections(&obj)?;
+        let symbols = Self::parse_symbols(&obj)?;
+        let imports = Self::parse_imports(&obj)?;
+        let exports = Self::parse_exports(&obj)?;
+        let elf_dynamic_info = Self::parse_elf_dyn(&obj)?;
         let mut binary = Binary {
-            file_path: file_path_string,
-            file_data,
+            path_berkas: str_path,
+            file_data: data_berkas,
             header,
             sections,
             symbols,
@@ -184,7 +184,7 @@ impl Binary {
         };
         let arch = binary.header.get_disasm_arch();
         if arch != ArsitekturDisasm::ARCH_UNKNOWN {
-            match Self::build_xrefs_internal(&binary, arch) {
+            match Self::build_xrefs(&binary, arch) {
                 Ok((cg, dag)) => {
                     binary.call_graph = cg;
                     binary.data_access_graph = dag;
@@ -197,34 +197,34 @@ impl Binary {
         Ok(binary)
     }
     pub fn load_raw(
-        file_path: &str,
+        path_berkas: &str,
         raw_arch: ArsitekturDisasm,
-        base_addr: u64,
+        addr_basis: u64,
     ) -> Result<Self, ReToolsError> {
-        let file_path_string = file_path.to_string();
-        let file = File::open(file_path)?;
-        let file_data = unsafe { Mmap::map(&file)? };
-        let file_size = file_data.len() as u64;
+        let str_path = path_berkas.to_string();
+        let berkas = File::open(path_berkas)?;
+        let data_berkas = unsafe { Mmap::map(&berkas)? };
+        let sz_berkas = data_berkas.len() as u64;
         let header = InternalHeaderInfo {
             valid: true,
             format: "Raw",
             arch: InternalHeaderInfo::arch_from_disasm(raw_arch),
             bits: InternalHeaderInfo::bits_from_disasm(raw_arch),
-            entry_point: base_addr,
+            addr_masuk: addr_basis,
             machine_id: 0,
             is_lib: false,
-            file_size,
+            sz_berkas,
         };
         let main_section = SectionInfo {
             name: ".text".to_string(),
-            addr: base_addr,
-            size: file_size,
+            addr: addr_basis,
+            size: sz_berkas,
             offset: 0,
             flags: 0x1 | 0x2 | 0x4,
         };
         let mut binary = Binary {
-            file_path: file_path_string,
-            file_data,
+            path_berkas: str_path,
+            file_data: data_berkas,
             header,
             sections: vec![main_section],
             symbols: Vec::new(),
@@ -236,7 +236,7 @@ impl Binary {
         };
         let arch = binary.header.get_disasm_arch();
         if arch != ArsitekturDisasm::ARCH_UNKNOWN {
-             match Self::build_xrefs_internal(&binary, arch) {
+             match Self::build_xrefs(&binary, arch) {
                 Ok((cg, dag)) => {
                     binary.call_graph = cg;
                     binary.data_access_graph = dag;
@@ -248,133 +248,133 @@ impl Binary {
         }
         Ok(binary)
     }
-    fn build_xrefs_internal(
-        binary: &Binary,
+    fn build_xrefs(
+        biner: &Binary,
         arch: ArsitekturDisasm,
     ) -> Result<(HashMap<u64, Vec<u64>>, HashMap<u64, Vec<u64>>), ReToolsError> {
-        info!("Mulai build XRefs untuk: {}", binary.file_path);
+        info!("Mulai build XRefs untuk: {}", biner.path_berkas);
         let mut call_graph: HashMap<u64, Vec<u64>> = HashMap::new();
         let mut data_access_graph: HashMap<u64, Vec<u64>> = HashMap::new();
-        let executable_sections = binary.sections.iter().filter(|s| {
+        let executable_sections = biner.sections.iter().filter(|s| {
             (s.name.starts_with(".text") || s.name.starts_with("INIT") || s.name.starts_with("PLT")) || (s.flags & 0x4) != 0 || (s.flags & 0x20000000) != 0
         });
         for section in executable_sections {
-            let data_offset = section.offset as usize;
-            let data_size = section.size as usize;
-            let base_addr = section.addr;
-            if data_offset.saturating_add(data_size) > binary.file_data.len() {
+            let off_data = section.offset as usize;
+            let sz_data = section.size as usize;
+            let addr_basis = section.addr;
+            if off_data.saturating_add(sz_data) > biner.file_data.len() {
                 warn!("Seksi executable di luar batas file: {}", section.name);
                 continue;
             }
-            let section_data = &binary.file_data[data_offset..(data_offset + data_size)];
+            let data_section = &biner.file_data[off_data..(off_data + sz_data)];
             let mut offset: usize = 0;
-            while offset < section_data.len() {
-                let va = base_addr + offset as u64;
-                let (size, irs) = match angkat_blok_instruksi(&section_data[offset..], va, arch) {
-                    Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-                    _ => (1, vec![MicroInstruction::TidakTerdefinisi]),
+            while offset < data_section.len() {
+                let va = addr_basis + offset as u64;
+                let (sz_instr, irs) = match lift_blok_instr(&data_section[offset..], va, arch) {
+                    Ok((sz, ir_vec)) if sz > 0 => (sz, ir_vec),
+                    _ => (1, vec![MicroInstruction::Undefined]),
                 };
-                if size == 0 { 
+                if sz_instr == 0 { 
                     warn!("Disasm size 0 pada 0x{:x}, break", va);
                     break; 
                 }
                 for ir in irs {
-                    Self::analyze_ir_for_xrefs(ir, va, &mut call_graph, &mut data_access_graph, binary);
+                    Self::scan_ir_xrefs(ir, va, &mut call_graph, &mut data_access_graph, biner);
                 }
-                offset += size;
+                offset += sz_instr;
             }
         }
         info!("Selesai build XRefs. Ditemukan {} calls, {} data refs", call_graph.len(), data_access_graph.len());
         Ok((call_graph, data_access_graph))
     }
-    fn analyze_ir_for_xrefs(
+    fn scan_ir_xrefs(
         ir: MicroInstruction,
-        instr_va: u64,
+        va_instr: u64,
         call_graph: &mut HashMap<u64, Vec<u64>>,
         data_access_graph: &mut HashMap<u64, Vec<u64>>,
-        binary: &Binary,
+        biner: &Binary,
     ) {
         match ir {
-            MicroInstruction::Panggil(expr) => {
-                if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
-                    call_graph.entry(instr_va).or_default().push(target_va);
+            MicroInstruction::Call(expr) => {
+                if let Some(va_target) = Self::extract_const_expr(&expr) {
+                    call_graph.entry(va_instr).or_default().push(va_target);
                 }
-                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+                Self::scan_data_refs_expr(&expr, va_instr, data_access_graph);
             }
-            MicroInstruction::Lompat(expr) => {
-                if let Some(target_va) = Self::extract_constant_from_expr(&expr) {
-                    if binary.symbols.iter().any(|s| s.addr == target_va && s.symbol_type == "FUNC") {
-                        call_graph.entry(instr_va).or_default().push(target_va);
+            MicroInstruction::Jump(expr) => {
+                if let Some(va_target) = Self::extract_const_expr(&expr) {
+                    if biner.symbols.iter().any(|s| s.addr == va_target && s.symbol_type == "FUNC") {
+                        call_graph.entry(va_instr).or_default().push(va_target);
                     }
                 }
-                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+                Self::scan_data_refs_expr(&expr, va_instr, data_access_graph);
             }
             MicroInstruction::Assign(_, expr) => {
-                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+                Self::scan_data_refs_expr(&expr, va_instr, data_access_graph);
             }
-            MicroInstruction::LompatKondisi(cond_expr, target_expr) => {
-                Self::find_data_refs_in_expr(&cond_expr, instr_va, data_access_graph);
-                Self::find_data_refs_in_expr(&target_expr, instr_va, data_access_graph);
+            MicroInstruction::JumpKondisi(cond_expr, target_expr) => {
+                Self::scan_data_refs_expr(&cond_expr, va_instr, data_access_graph);
+                Self::scan_data_refs_expr(&target_expr, va_instr, data_access_graph);
             }
-            MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
-                Self::find_data_refs_in_expr(&addr_expr, instr_va, data_access_graph);
-                Self::find_data_refs_in_expr(&data_expr, instr_va, data_access_graph);
+            MicroInstruction::StoreMemori(addr_expr, data_expr) => {
+                Self::scan_data_refs_expr(&addr_expr, va_instr, data_access_graph);
+                Self::scan_data_refs_expr(&data_expr, va_instr, data_access_graph);
             }
-            MicroInstruction::AtomicRMW { alamat, nilai, .. } => {
-                Self::find_data_refs_in_expr(&alamat, instr_va, data_access_graph);
-                Self::find_data_refs_in_expr(&nilai, instr_va, data_access_graph);
+            MicroInstruction::AtomicRMW { addr_mem: alamat, nilai, .. } => {
+                Self::scan_data_refs_expr(&alamat, va_instr, data_access_graph);
+                Self::scan_data_refs_expr(&nilai, va_instr, data_access_graph);
             }
             MicroInstruction::UpdateFlag(_, expr) => {
-                Self::find_data_refs_in_expr(&expr, instr_va, data_access_graph);
+                Self::scan_data_refs_expr(&expr, va_instr, data_access_graph);
             }
             _ => {}
         }
     }
-    fn find_data_refs_in_expr(
+    fn scan_data_refs_expr(
         expr: &MicroExpr,
-        instr_va: u64,
-        data_graph: &mut HashMap<u64, Vec<u64>>,
+        va_instr: u64,
+        graph_data: &mut HashMap<u64, Vec<u64>>,
     ) {
         match expr {
             MicroExpr::Operand(MicroOperand::Konstanta(imm)) => {
                 if *imm > 0x1000 {
-                    data_graph.entry(*imm).or_default().push(instr_va);
+                    graph_data.entry(*imm).or_default().push(va_instr);
                 }
             }
-            MicroExpr::MuatMemori(inner) => {
-                if let Some(data_va) = Self::extract_constant_from_expr(inner) {
-                    if data_va > 0x1000 {
-                        data_graph.entry(data_va).or_default().push(instr_va);
+            MicroExpr::LoadMemori(inner) => {
+                if let Some(va_data) = Self::extract_const_expr(inner) {
+                    if va_data > 0x1000 {
+                        graph_data.entry(va_data).or_default().push(va_instr);
                     }
                 }
-                Self::find_data_refs_in_expr(inner, instr_va, data_graph);
+                Self::scan_data_refs_expr(inner, va_instr, graph_data);
             }
-            MicroExpr::OperasiUnary(_, inner) => {
-                Self::find_data_refs_in_expr(inner, instr_va, data_graph);
+            MicroExpr::UnaryOp(_, inner) => {
+                Self::scan_data_refs_expr(inner, va_instr, graph_data);
             }
-            MicroExpr::OperasiBiner(_, left, right) |
-            MicroExpr::Bandingkan(left, right) |
-            MicroExpr::UjiBit(left, right) => {
-                Self::find_data_refs_in_expr(left, instr_va, data_graph);
-                Self::find_data_refs_in_expr(right, instr_va, data_graph);
+            MicroExpr::BinaryOp(_, left, right) |
+            MicroExpr::Compare(left, right) |
+            MicroExpr::TestBit(left, right) => {
+                Self::scan_data_refs_expr(left, va_instr, graph_data);
+                Self::scan_data_refs_expr(right, va_instr, graph_data);
             }
             MicroExpr::Operand(MicroOperand::SsaVar(_)) => {}
             MicroExpr::Operand(MicroOperand::Flag(_)) => {}
         }
     }
-    fn extract_constant_from_expr(expr: &MicroExpr) -> Option<u64> {
+    fn extract_const_expr(expr: &MicroExpr) -> Option<u64> {
         match expr {
             MicroExpr::Operand(MicroOperand::Konstanta(imm)) => Some(*imm),
-            MicroExpr::OperasiBiner(_, left, right) => {
-                Self::extract_constant_from_expr(left).or_else(|| Self::extract_constant_from_expr(right))
+            MicroExpr::BinaryOp(_, left, right) => {
+                Self::extract_const_expr(left).or_else(|| Self::extract_const_expr(right))
             }
-            MicroExpr::MuatMemori(inner) => Self::extract_constant_from_expr(inner),
+            MicroExpr::LoadMemori(inner) => Self::extract_const_expr(inner),
             _ => None,
         }
     }
-    fn parse_header_internal(
+    fn parse_header(
         obj: &Object,
-        file_size: u64,
+        sz_berkas: u64,
     ) -> Result<InternalHeaderInfo, ReToolsError> {
         match obj {
             Object::Elf(elf) => {
@@ -384,10 +384,10 @@ impl Binary {
                     format: "ELF",
                     arch: InternalHeaderInfo::arch_from_elf_machine(machine_id),
                     bits: if elf.is_64 { 64 } else { 32 },
-                    entry_point: elf.entry,
+                    addr_masuk: elf.entry,
                     machine_id: machine_id as u64,
                     is_lib: elf.header.e_type == goblin::elf::header::ET_DYN,
-                    file_size,
+                    sz_berkas,
                 })
             }
             Object::PE(pe) => {
@@ -397,10 +397,10 @@ impl Binary {
                     format: "PE",
                     arch: InternalHeaderInfo::arch_from_pe_machine(machine_id),
                     bits: if pe.is_64 { 64 } else { 32 },
-                    entry_point: pe.entry as u64,
+                    addr_masuk: pe.entry as u64,
                     machine_id: machine_id as u64,
                     is_lib: pe.is_lib,
-                    file_size,
+                    sz_berkas,
                 })
             }
             Object::Mach(mach) => {
@@ -431,25 +431,25 @@ impl Binary {
                     format: format_str,
                     arch: InternalHeaderInfo::arch_from_macho_cputype(machine_id as u32),
                     bits,
-                    entry_point: entry,
+                    addr_masuk: entry,
                     machine_id,
                     is_lib,
-                    file_size,
+                    sz_berkas,
                 })
             }
             Object::Archive(_) => Ok(InternalHeaderInfo {
                 valid: true,
                 format: "Archive (.a/.lib)",
-                file_size,
+                sz_berkas,
                 ..InternalHeaderInfo::invalid()
             }),
             _ => Ok(InternalHeaderInfo {
-                file_size,
+                sz_berkas,
                 ..InternalHeaderInfo::invalid()
             }),
         }
     }
-    fn parse_sections_internal(obj: &Object) -> Result<Vec<SectionInfo>, ReToolsError> {
+    fn parse_sections(obj: &Object) -> Result<Vec<SectionInfo>, ReToolsError> {
         match obj {
             Object::Elf(elf) => {
                 let mut sections_vec = Vec::new();
@@ -545,7 +545,7 @@ impl Binary {
             _ => "OTHER_BIND",
         }
     }
-    fn parse_symbols_internal(obj: &Object) -> Result<Vec<SymbolInfo>, ReToolsError> {
+    fn parse_symbols(obj: &Object) -> Result<Vec<SymbolInfo>, ReToolsError> {
         match obj {
             Object::Elf(elf) => {
                 let mut all_symbols = Vec::new();
@@ -616,7 +616,7 @@ impl Binary {
             _ => Ok(Vec::new()),
         }
     }
-    fn parse_imports_internal(obj: &Object) -> Result<Vec<ImportInfo>, ReToolsError> {
+    fn parse_imports(obj: &Object) -> Result<Vec<ImportInfo>, ReToolsError> {
         let mut imports_vec = Vec::new();
         match obj {
             Object::Elf(elf) => {
@@ -645,7 +645,7 @@ impl Binary {
                             for import in imports {
                                 imports_vec.push(ImportInfo {
                                     name: import.name.to_string(),
-                                });
+                                    });
                             }
                         }
                     }
@@ -666,7 +666,7 @@ impl Binary {
         }
         Ok(imports_vec)
     }
-    fn parse_exports_internal(obj: &Object) -> Result<Vec<ExportInfo>, ReToolsError> {
+    fn parse_exports(obj: &Object) -> Result<Vec<ExportInfo>, ReToolsError> {
         let mut exports_vec = Vec::new();
         match obj {
             Object::Elf(elf) => {
@@ -780,7 +780,7 @@ impl Binary {
             _ => "DT_UNKNOWN",
         }
     }
-    fn parse_elf_dynamic_info_internal(obj: &Object) -> Result<Vec<ElfDynamicInfo>, ReToolsError> {
+    fn parse_elf_dyn(obj: &Object) -> Result<Vec<ElfDynamicInfo>, ReToolsError> {
         if let Object::Elf(elf) = obj {
             if let Some(dynamic) = &elf.dynamic {
                 let mut entries = Vec::new();

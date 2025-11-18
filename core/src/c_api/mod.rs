@@ -5,18 +5,18 @@ pub mod api_ir;
 pub mod api_static;
 pub mod api_data_flow;
 
-use crate::error::get_last_error_message;
-use crate::utils::c_free_string;
+use crate::error::fetch_err_msg;
+use crate::utils::free_str_ptr;
 use libc::c_char;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn c_freeString(ptr: *mut c_char) {
+pub unsafe extern "C" fn c_freeString(ptr_target: *mut c_char) {
 	unsafe {
-		c_free_string(ptr);
+		free_str_ptr(ptr_target);
 	}
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rt_get_last_error_message() -> *mut c_char {
-	get_last_error_message()
+	fetch_err_msg()
 }

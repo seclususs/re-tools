@@ -34,11 +34,11 @@ pub enum PernyataanPseudo {
 		tujuan: SsaVariabel,
 		sumber: EkspresiPseudo,
 	},
-	SimpanMemori {
+	StoreMem {
 		alamat: EkspresiPseudo,
 		nilai: EkspresiPseudo,
 	},
-	Lompat(u64),
+	JumpTarget(u64),
 	LompatKondisi {
 		kondisi: EkspresiPseudo,
 		target_true: u64,
@@ -85,20 +85,20 @@ pub fn map_ir_ke_pernyataan_pseudo(
 			tujuan: var.clone(),
 			sumber: map_expr_ke_ekspresi_pseudo(expr),
 		},
-		crate::logic::ir::instruction::MicroInstruction::SimpanMemori(addr, data) => {
-			PernyataanPseudo::SimpanMemori {
+		crate::logic::ir::instruction::MicroInstruction::StoreMemori(addr, data) => {
+			PernyataanPseudo::StoreMem {
 				alamat: map_expr_ke_ekspresi_pseudo(addr),
 				nilai: map_expr_ke_ekspresi_pseudo(data),
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::Lompat(expr) => {
+		crate::logic::ir::instruction::MicroInstruction::Jump(expr) => {
 			if let EkspresiPseudo::Konstanta(target) = map_expr_ke_ekspresi_pseudo(expr) {
-				PernyataanPseudo::Lompat(target)
+				PernyataanPseudo::JumpTarget(target)
 			} else {
 				PernyataanPseudo::TidakTerdefinisi
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::LompatKondisi(cond, target) => {
+		crate::logic::ir::instruction::MicroInstruction::JumpKondisi(cond, target) => {
 			if let EkspresiPseudo::Konstanta(target_true) = map_expr_ke_ekspresi_pseudo(target) {
 				PernyataanPseudo::LompatKondisi {
 					kondisi: map_expr_ke_ekspresi_pseudo(cond),
@@ -110,10 +110,10 @@ pub fn map_ir_ke_pernyataan_pseudo(
 				PernyataanPseudo::TidakTerdefinisi
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::Panggil(expr) => {
+		crate::logic::ir::instruction::MicroInstruction::Call(expr) => {
 			PernyataanPseudo::Panggil(map_expr_ke_ekspresi_pseudo(expr))
 		}
-		crate::logic::ir::instruction::MicroInstruction::Kembali => {
+		crate::logic::ir::instruction::MicroInstruction::Return => {
 			PernyataanPseudo::Kembali(None)
 		}
 		crate::logic::ir::instruction::MicroInstruction::Syscall => PernyataanPseudo::Syscall,
@@ -130,24 +130,24 @@ pub fn map_expr_ke_ekspresi_pseudo(expr: &MicroExpr) -> EkspresiPseudo {
 		MicroExpr::Operand(MicroOperand::SsaVar(var)) => EkspresiPseudo::Variabel(var.clone()),
 		MicroExpr::Operand(MicroOperand::Konstanta(k)) => EkspresiPseudo::Konstanta(*k),
 		MicroExpr::Operand(MicroOperand::Flag(f)) => EkspresiPseudo::Flag(f.clone()),
-		MicroExpr::OperasiUnary(op, inner) => EkspresiPseudo::OperasiUnary {
+		MicroExpr::UnaryOp(op, inner) => EkspresiPseudo::OperasiUnary {
 			op: format!("{:?}", op),
 			operand: Box::new(map_expr_ke_ekspresi_pseudo(inner)),
 		},
-		MicroExpr::OperasiBiner(op, l, r) => EkspresiPseudo::OperasiBiner {
+		MicroExpr::BinaryOp(op, l, r) => EkspresiPseudo::OperasiBiner {
 			op: format!("{:?}", op),
 			kiri: Box::new(map_expr_ke_ekspresi_pseudo(l)),
 			kanan: Box::new(map_expr_ke_ekspresi_pseudo(r)),
 		},
-		MicroExpr::MuatMemori(addr) => EkspresiPseudo::MuatMemori {
+		MicroExpr::LoadMemori(addr) => EkspresiPseudo::MuatMemori {
 			alamat: Box::new(map_expr_ke_ekspresi_pseudo(addr)),
 		},
-		MicroExpr::Bandingkan(l, r) => EkspresiPseudo::OperasiBiner {
+		MicroExpr::Compare(l, r) => EkspresiPseudo::OperasiBiner {
 			op: "==".to_string(),
 			kiri: Box::new(map_expr_ke_ekspresi_pseudo(l)),
 			kanan: Box::new(map_expr_ke_ekspresi_pseudo(r)),
 		},
-		MicroExpr::UjiBit(l, r) => EkspresiPseudo::OperasiBiner {
+		MicroExpr::TestBit(l, r) => EkspresiPseudo::OperasiBiner {
 			op: "&".to_string(),
 			kiri: Box::new(map_expr_ke_ekspresi_pseudo(l)),
 			kanan: Box::new(map_expr_ke_ekspresi_pseudo(r)),

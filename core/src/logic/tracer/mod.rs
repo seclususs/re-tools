@@ -11,7 +11,7 @@ pub mod platform;
 pub mod types;
 pub mod dta;
 
-use crate::error::{set_last_error, ReToolsError};
+use crate::error::{set_err_last, ReToolsError};
 use libc::c_int;
 use platform::PlatformTracer;
 
@@ -47,16 +47,16 @@ pub fn new_debugger(pid: c_int) -> Result<Debugger, ReToolsError> {
     };
     match tracer {
         Ok(mut t) => {
-            if let Err(e) = t.attach() {
-                set_last_error(e);
+            if let Err(e) = t.attach_sasaran() {
+                set_err_last(e);
                 return Err(ReToolsError::Generic(format!(
                     "Gagal attach ke PID {}",
                     pid
                 )));
             }
-            if let Err(e) = t.set_options_multithread() {
-                set_last_error(e);
-                t.detach().ok();
+            if let Err(e) = t.set_opsi_multithread() {
+                set_err_last(e);
+                t.detach_sasaran().ok();
                 return Err(ReToolsError::Generic(format!(
                     "Gagal set options multithread untuk PID {}",
                     pid
@@ -65,7 +65,7 @@ pub fn new_debugger(pid: c_int) -> Result<Debugger, ReToolsError> {
             Ok(t)
         }
         Err(e) => {
-            set_last_error(e);
+            set_err_last(e);
             Err(ReToolsError::Generic(format!(
                 "Gagal membuat tracer untuk PID {}",
                 pid

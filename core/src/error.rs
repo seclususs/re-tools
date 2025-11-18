@@ -21,7 +21,7 @@ pub enum ReToolsError {
     Generic(String),
 }
 
-pub fn set_last_error(err: ReToolsError) {
+pub fn set_err_last(err: ReToolsError) {
     let err_msg = err.to_string();
     LAST_ERROR.with(|cell| {
         if let Ok(c_string) = CString::new(err_msg) {
@@ -33,7 +33,7 @@ pub fn set_last_error(err: ReToolsError) {
     });
 }
 
-pub fn get_last_error_message() -> *mut libc::c_char {
+pub fn fetch_err_msg() -> *mut libc::c_char {
     LAST_ERROR.with(|cell| {
         cell.borrow_mut()
             .take()

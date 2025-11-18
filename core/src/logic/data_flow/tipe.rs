@@ -26,23 +26,23 @@ pub struct TipeAnalysisResult {
 	pub struct_reconstruction: HashMap<u64, InferredTipe>,
 }
 
-fn get_base_reg_and_offset(
-	expr: &MicroExpr,
+fn extract_base_offset(
+	ekspresi: &MicroExpr,
 ) -> (Option<String>, Option<ValueDomain>, u64) {
-	match expr {
-		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
-			(Some(nama_dasar.clone()), None, 0)
+	match ekspresi {
+		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg, .. })) => {
+			(Some(id_reg.clone()), None, 0)
 		}
-		MicroExpr::OperasiBiner(
+		MicroExpr::BinaryOp(
 			crate::logic::ir::instruction::MicroBinOp::Add,
-			left,
-			right,
+			kiri,
+			kanan,
 		) => {
-			if let MicroExpr::Operand(MicroOperand::Konstanta(offset)) = **right {
-				let (base, idx, _) = get_base_reg_and_offset(left);
+			if let MicroExpr::Operand(MicroOperand::Konstanta(offset)) = **kanan {
+				let (base, idx, _) = extract_base_offset(kiri);
 				(base, idx, offset)
-			} else if let MicroExpr::Operand(MicroOperand::Konstanta(offset)) = **left {
-				let (base, idx, _) = get_base_reg_and_offset(right);
+			} else if let MicroExpr::Operand(MicroOperand::Konstanta(offset)) = **kiri {
+				let (base, idx, _) = extract_base_offset(kanan);
 				(base, idx, offset)
 			} else {
 				(None, None, 0)
@@ -52,33 +52,33 @@ fn get_base_reg_and_offset(
 	}
 }
 
-pub fn analisis_tipe_dasar(
-	vsa_states: &HashMap<NodeIndex, VsaState>,
+pub fn infer_type_base(
+	peta_state_vsa: &HashMap<NodeIndex, VsaState>,
 	cfg: &DiGraph<BasicBlock, &'static str>,
 	_binary: &Binary,
 ) -> TipeAnalysisResult {
-	let mut var_tipe = HashMap::new();
+	let mut tipe_var = HashMap::new();
 	let mut struct_reconstruction = HashMap::new();
-	for (node_idx, state) in vsa_states {
-		let block = cfg.node_weight(*node_idx).unwrap();
-		for (_va, instructions) in &block.instructions {
-			for instruction in instructions {
-				let addr_expr_opt = match instruction {
-					MicroInstruction::SimpanMemori(addr_expr, _) => Some(addr_expr),
-					MicroInstruction::Assign(_, expr) => {
-						if let MicroExpr::MuatMemori(addr_expr) = expr {
-							Some(&**addr_expr)
+	for (idx_simpul, state) in peta_state_vsa {
+		let blok = cfg.node_weight(*idx_simpul).unwrap();
+		for (_va, list_instr) in &blok.instructions {
+			for instr in list_instr {
+				let addr_expr_opt = match instr {
+					MicroInstruction::StoreMemori(addr, _) => Some(addr),
+					MicroInstruction::Assign(_, ekspresi) => {
+						if let MicroExpr::LoadMemori(addr) = ekspresi {
+							Some(&**addr)
 						} else {
 							None
 						}
 					}
 					_ => None,
 				};
-				if let Some(addr_expr) = addr_expr_opt {
-					let (base_reg, _, offset) = get_base_reg_and_offset(addr_expr);
-					if let Some(reg_name) = base_reg {
-						let reg_domain = state.variables.get(&reg_name).cloned().unwrap_or_default();
-						match reg_domain {
+				if let Some(addr) = addr_expr_opt {
+					let (base_reg, _, offset) = extract_base_offset(addr);
+					if let Some(nama_reg) = base_reg {
+						let domain_reg = state.variables.get(&nama_reg).cloned().unwrap_or_default();
+						match domain_reg {
 							ValueDomain::Constant(base_addr) => {
 								let struct_entry = struct_reconstruction
 									.entry(base_addr)
@@ -88,29 +88,29 @@ pub fn analisis_tipe_dasar(
 										.entry(offset)
 										.or_insert(InferredTipe::Integer);
 								}
-								var_tipe
-									.insert(reg_name, InferredTipe::Pointer(Box::new(InferredTipe::Unknown)));
+								tipe_var
+									.insert(nama_reg, InferredTipe::Pointer(Box::new(InferredTipe::Unknown)));
 							}
 							ValueDomain::Range(min, max) => {
 								if min > 0x10000 && max > 0x10000 {
-									var_tipe.insert(
-										reg_name.clone(),
+									tipe_var.insert(
+										nama_reg.clone(),
 										InferredTipe::Pointer(Box::new(InferredTipe::Unknown)),
 									);
 								} else {
-									var_tipe
-										.entry(reg_name.clone())
+									tipe_var
+										.entry(nama_reg.clone())
 										.or_insert(InferredTipe::Integer);
 								}
 							}
 							ValueDomain::Unknown => {
-								var_tipe
-									.entry(reg_name.clone())
+								tipe_var
+									.entry(nama_reg.clone())
 									.or_insert(InferredTipe::Unknown);
 							}
 							ValueDomain::Pointer(_) | ValueDomain::PointerSet(_) => {
-								var_tipe.insert(
-									reg_name.clone(),
+								tipe_var.insert(
+									nama_reg.clone(),
 									InferredTipe::Pointer(Box::new(InferredTipe::Unknown)),
 								);
 							}
@@ -121,7 +121,7 @@ pub fn analisis_tipe_dasar(
 		}
 	}
 	TipeAnalysisResult {
-		var_tipe,
+		var_tipe: tipe_var,
 		struct_reconstruction,
 	}
 }
@@ -137,30 +137,30 @@ pub struct MemoryAccessCheck {
 	pub info: String,
 }
 
-pub fn verifikasi_batas_memori(
-	vsa_states: &HashMap<NodeIndex, VsaState>,
+pub fn verify_bound_mem(
+	peta_state_vsa: &HashMap<NodeIndex, VsaState>,
 	cfg: &DiGraph<BasicBlock, &'static str>,
 	_binary: &Binary,
 ) -> Vec<MemoryAccessCheck> {
-	let mut checks = Vec::new();
-	for (node_idx, state) in vsa_states {
-		let block = cfg.node_weight(*node_idx).unwrap();
-		for (va, instructions) in &block.instructions {
-			for instruction in instructions {
-				let addr_expr_opt = match instruction {
-					MicroInstruction::SimpanMemori(addr_expr, _) => Some(addr_expr),
-					MicroInstruction::Assign(_, expr) => {
-						if let MicroExpr::MuatMemori(addr_expr) = expr {
-							Some(&**addr_expr)
+	let mut list_cek = Vec::new();
+	for (idx_simpul, state) in peta_state_vsa {
+		let blok = cfg.node_weight(*idx_simpul).unwrap();
+		for (va, list_instr) in &blok.instructions {
+			for instr in list_instr {
+				let addr_expr_opt = match instr {
+					MicroInstruction::StoreMemori(addr, _) => Some(addr),
+					MicroInstruction::Assign(_, ekspresi) => {
+						if let MicroExpr::LoadMemori(addr) = ekspresi {
+							Some(&**addr)
 						} else {
 							None
 						}
 					}
 					_ => None,
 				};
-				if let Some(addr_expr) = addr_expr_opt {
+				if let Some(addr) = addr_expr_opt {
 					if let (Some(base), Some(index_domain), stride, offset) =
-						find_array_access(addr_expr, state)
+						detect_access_array(addr, state)
 					{
 						let (index_reg, info) = match index_domain {
 							ValueDomain::Unknown => (None, "Indeks tidak diketahui".to_string()),
@@ -175,7 +175,7 @@ pub fn verifikasi_batas_memori(
 								(None, "Akses menggunakan pointer".to_string())
 							}
 						};
-						checks.push(MemoryAccessCheck {
+						list_cek.push(MemoryAccessCheck {
 							va: *va,
 							base_reg: base,
 							index_reg,
@@ -189,53 +189,53 @@ pub fn verifikasi_batas_memori(
 			}
 		}
 	}
-	checks
+	list_cek
 }
 
-fn find_array_access(
-	expr: &MicroExpr,
+fn detect_access_array(
+	ekspresi: &MicroExpr,
 	state: &VsaState,
 ) -> (Option<String>, Option<ValueDomain>, u64, u64) {
-	if let MicroExpr::OperasiBiner(
+	if let MicroExpr::BinaryOp(
 		crate::logic::ir::instruction::MicroBinOp::Add,
-		left,
-		right,
-	) = expr
+		kiri,
+		kanan,
+	) = ekspresi
 	{
 		if let (Some(base), Some(index_domain), stride, offset) =
-			find_array_access_inner(&**left, &**right, state)
+			detect_access_array_inner(&**kiri, &**kanan, state)
 		{
 			return (Some(base), Some(index_domain), stride, offset);
 		}
 		if let (Some(base), Some(index_domain), stride, offset) =
-			find_array_access_inner(&**right, &**left, state)
+			detect_access_array_inner(&**kanan, &**kiri, state)
 		{
 			return (Some(base), Some(index_domain), stride, offset);
 		}
 		if let (Some(base), Some(index_domain), stride, offset) =
-			find_array_access_inner(right, left, state)
+			detect_access_array_inner(kanan, kiri, state)
 		{
 			return (Some(base), Some(index_domain), stride, offset);
 		}
-	} else if let MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) = expr {
-		return (Some(nama_dasar.clone()), Some(ValueDomain::Constant(0)), 1, 0);
+	} else if let MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg, .. })) = ekspresi {
+		return (Some(id_reg.clone()), Some(ValueDomain::Constant(0)), 1, 0);
 	}
 	(None, None, 0, 0)
 }
 
-fn find_array_access_inner(
+fn detect_access_array_inner(
 	base_expr: &MicroExpr,
 	index_expr: &MicroExpr,
 	state: &VsaState,
 ) -> (Option<String>, Option<ValueDomain>, u64, u64) {
 	let base_reg = match base_expr {
-		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
-			Some(nama_dasar.clone())
+		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg, .. })) => {
+			Some(id_reg.clone())
 		}
 		_ => None,
 	};
 	let (index_domain, stride, offset) = match index_expr {
-		MicroExpr::OperasiBiner(
+		MicroExpr::BinaryOp(
 			crate::logic::ir::instruction::MicroBinOp::Mul,
 			idx,
 			stride_expr,
@@ -245,7 +245,7 @@ fn find_array_access_inner(
 				_ => 1,
 			};
 			let domain = match &**idx {
-				MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar: nama_dasar_ref, .. })) => {
+				MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg: nama_dasar_ref, .. })) => {
 					state.variables.get(nama_dasar_ref.as_str()).cloned().unwrap_or_default()
 				}
 				MicroExpr::Operand(MicroOperand::Konstanta(c)) => ValueDomain::Constant(*c),
@@ -253,7 +253,7 @@ fn find_array_access_inner(
 			};
 			(Some(domain), stride_val, 0)
 		}
-		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar: nama_dasar_ref, .. })) => {
+		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg: nama_dasar_ref, .. })) => {
 			(state.variables.get(nama_dasar_ref.as_str()).cloned(), 1, 0)
 		}
 		MicroExpr::Operand(MicroOperand::Konstanta(c)) => (Some(ValueDomain::Constant(*c)), 1, *c),

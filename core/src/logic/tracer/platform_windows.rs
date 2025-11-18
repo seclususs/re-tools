@@ -6,7 +6,7 @@ use super::platform::PlatformTracer;
 use super::types::{
     u64, u8, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo, DebugEventTipe,
 };
-use crate::error::{set_last_error, ReToolsError};
+use crate::error::{set_err_last, ReToolsError};
 use libc::{c_char, c_int, c_void};
 use std::collections::HashMap;
 use std::ptr::{null, null_mut};
@@ -47,258 +47,258 @@ use windows_sys::Win32::System::Threading::{
 };
 
 pub struct WindowsTracer {
-    pid_target: u32,
-    handle_proses: HANDLE,
-    breakpoints_map: HashMap<u64, u8>,
-    last_event_thread_id: u32,
-    handling_breakpoint_alamat: Option<u64>,
-    stealth_mode: bool,
+    pid_sasaran: u32,
+    ptr_handle_proses: HANDLE,
+    map_titik_henti: HashMap<u64, u8>,
+    id_thread_terakhir: u32,
+    va_bp_sedang_ditangani: Option<u64>,
+    mode_senyap: bool,
 }
 
 impl WindowsTracer {
     pub fn new(pid: c_int) -> Result<Self, ReToolsError> {
         Ok(WindowsTracer {
-            pid_target: pid as u32,
-            handle_proses: 0,
-            breakpoints_map: HashMap::new(),
-            last_event_thread_id: 0,
-            handling_breakpoint_alamat: None,
-            stealth_mode: false,
+            pid_sasaran: pid as u32,
+            ptr_handle_proses: 0,
+            map_titik_henti: HashMap::new(),
+            id_thread_terakhir: 0,
+            va_bp_sedang_ditangani: None,
+            mode_senyap: false,
         })
     }
     unsafe fn enable_debug_privilege() -> bool {
-        let mut handle_token: HANDLE = 0;
+        let mut ptr_handle_token: HANDLE = 0;
         if OpenProcessToken(
             GetCurrentProcess(),
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut handle_token,
+            &mut ptr_handle_token,
         ) == 0
         {
             return false;
         }
         let mut luid_debug: LUID = std::mem::zeroed();
-        let debug_name = b"SeDebugPrivilege\0";
-        if LookupPrivilegeValueA(null(), debug_name.as_ptr(), &mut luid_debug) == 0 {
-            CloseHandle(handle_token);
+        let nama_debug = b"SeDebugPrivilege\0";
+        if LookupPrivilegeValueA(null(), nama_debug.as_ptr(), &mut luid_debug) == 0 {
+            CloseHandle(ptr_handle_token);
             return false;
         }
-        let mut token_privs: TOKEN_PRIVILEGES = std::mem::zeroed();
-        token_privs.PrivilegeCount = 1;
-        token_privs.Privileges[0].Luid = luid_debug;
-        token_privs.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        let mut priv_token: TOKEN_PRIVILEGES = std::mem::zeroed();
+        priv_token.PrivilegeCount = 1;
+        priv_token.Privileges[0].Luid = luid_debug;
+        priv_token.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
         let b_ok = AdjustTokenPrivileges(
-            handle_token,
+            ptr_handle_token,
             FALSE,
-            &token_privs,
+            &priv_token,
             0,
             null_mut(),
             null_mut(),
         );
-        CloseHandle(handle_token);
+        CloseHandle(ptr_handle_token);
         b_ok != 0
     }
-    unsafe fn get_thread_handle(
+    unsafe fn get_handle_thread(
         &self,
-        thread_id: u32,
-        access: u32,
+        id_thread: u32,
+        akses: u32,
     ) -> Result<HANDLE, ReToolsError> {
-        let h_thread = OpenThread(access, FALSE, thread_id);
-        if h_thread == 0 {
+        let ptr_h_thread = OpenThread(akses, FALSE, id_thread);
+        if ptr_h_thread == 0 {
             Err(ReToolsError::IoError(std::io::Error::last_os_error()))
         } else {
-            Ok(h_thread)
+            Ok(ptr_h_thread)
         }
     }
-    unsafe fn get_thread_context(
+    unsafe fn get_konteks_thread(
         &self,
-        thread_id: u32,
+        id_thread: u32,
         flags: u32,
     ) -> Result<CONTEXT, ReToolsError> {
-        let h_thread = self.get_thread_handle(thread_id, THREAD_GET_CONTEXT)?;
-        let mut context: CONTEXT = std::mem::zeroed();
-        context.ContextFlags = flags;
-        let result = GetThreadContext(h_thread, &mut context);
-        CloseHandle(h_thread);
-        if result == 0 {
+        let ptr_h_thread = self.get_handle_thread(id_thread, THREAD_GET_CONTEXT)?;
+        let mut konteks: CONTEXT = std::mem::zeroed();
+        konteks.ContextFlags = flags;
+        let hasil = GetThreadContext(ptr_h_thread, &mut konteks);
+        CloseHandle(ptr_h_thread);
+        if hasil == 0 {
             Err(ReToolsError::IoError(std::io::Error::last_os_error()))
         } else {
-            Ok(context)
+            Ok(konteks)
         }
     }
-    unsafe fn set_thread_context(
+    unsafe fn set_konteks_thread(
         &self,
-        thread_id: u32,
-        context: &CONTEXT,
+        id_thread: u32,
+        konteks: &CONTEXT,
     ) -> Result<(), ReToolsError> {
-        let h_thread = self.get_thread_handle(thread_id, THREAD_SET_CONTEXT)?;
-        let result = SetThreadContext(h_thread, context);
-        CloseHandle(h_thread);
-        if result == 0 {
+        let ptr_h_thread = self.get_handle_thread(id_thread, THREAD_SET_CONTEXT)?;
+        let hasil = SetThreadContext(ptr_h_thread, konteks);
+        CloseHandle(ptr_h_thread);
+        if hasil == 0 {
             Err(ReToolsError::IoError(std::io::Error::last_os_error()))
         } else {
             Ok(())
         }
     }
-    unsafe fn internal_handle_breakpoint_pre_step(
+    unsafe fn handle_bp_pre_step_internal(
         &mut self,
-        debug_event: &DEBUG_EVENT,
-        alamat_bp: u64,
+        event_debug: &DEBUG_EVENT,
+        va_bp: u64,
     ) -> bool {
-        let Some(&byte_asli) = self.breakpoints_map.get(&alamat_bp) else {
+        let Some(&byte_asli) = self.map_titik_henti.get(&va_bp) else {
             return false;
         };
-        if self.tulis_memory(alamat_bp, &[byte_asli]).is_err() {
+        if self.write_memori(va_bp, &[byte_asli]).is_err() {
             return false;
         }
-        let thread_id = debug_event.dwThreadId;
-        let mut context = match self.get_thread_context(thread_id, CONTEXT_FULL) {
+        let id_thread = event_debug.dwThreadId;
+        let mut konteks = match self.get_konteks_thread(id_thread, CONTEXT_FULL) {
             Ok(ctx) => ctx,
             Err(_) => return false,
         };
         #[cfg(target_arch = "x86_64")]
         {
-            context.Rip = alamat_bp;
+            konteks.Rip = va_bp;
         }
         #[cfg(target_arch = "x86")]
         {
-            context.Eip = alamat_bp as u32;
+            konteks.Eip = va_bp as u32;
         }
-        context.EFlags |= 0x100;
-        if self.set_thread_context(thread_id, &context).is_err() {
+        konteks.EFlags |= 0x100;
+        if self.set_konteks_thread(id_thread, &konteks).is_err() {
             return false;
         }
-        self.handling_breakpoint_alamat = Some(alamat_bp);
+        self.va_bp_sedang_ditangani = Some(va_bp);
         true
     }
-    unsafe fn internal_handle_breakpoint_post_step(&mut self, alamat_bp: u64) -> bool {
-        if self.tulis_memory(alamat_bp, &[0xCC]).is_err() {
+    unsafe fn handle_bp_post_step_internal(&mut self, va_bp: u64) -> bool {
+        if self.write_memori(va_bp, &[0xCC]).is_err() {
             return false;
         }
-        self.handling_breakpoint_alamat = None;
+        self.va_bp_sedang_ditangani = None;
         true
     }
-    unsafe fn set_hw_bp(&self, addr: u64, index: usize) -> Result<(), ReToolsError> {
-        if index > 3 {
+    unsafe fn set_bp_hw_internal(&self, va_target: u64, idx_slot: usize) -> Result<(), ReToolsError> {
+        if idx_slot > 3 {
             return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut context =
-            self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
-        match index {
-            0 => context.Dr0 = addr,
-            1 => context.Dr1 = addr,
-            2 => context.Dr2 = addr,
-            3 => context.Dr3 = addr,
+        let mut konteks =
+            self.get_konteks_thread(self.id_thread_terakhir, CONTEXT_DEBUG_REGISTERS)?;
+        match idx_slot {
+            0 => konteks.Dr0 = va_target,
+            1 => konteks.Dr1 = va_target,
+            2 => konteks.Dr2 = va_target,
+            3 => konteks.Dr3 = va_target,
             _ => unreachable!(),
         }
-        let enable_mask = 1 << (index * 2);
-        let condition_mask = 0b00 << (16 + index * 4);
-        let len_mask = 0b00 << (18 + index * 4);
-        context.Dr7 |= enable_mask | condition_mask | len_mask;
-        self.set_thread_context(self.last_event_thread_id, &context)?;
+        let mask_enable = 1 << (idx_slot * 2);
+        let mask_kondisi = 0b00 << (16 + idx_slot * 4);
+        let mask_len = 0b00 << (18 + idx_slot * 4);
+        konteks.Dr7 |= mask_enable | mask_kondisi | mask_len;
+        self.set_konteks_thread(self.id_thread_terakhir, &konteks)?;
         Ok(())
     }
-    unsafe fn remove_hw_bp(&self, index: usize) -> Result<(), ReToolsError> {
-        if index > 3 {
+    unsafe fn remove_bp_hw_internal(&self, idx_slot: usize) -> Result<(), ReToolsError> {
+        if idx_slot > 3 {
             return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut context =
-            self.get_thread_context(self.last_event_thread_id, CONTEXT_DEBUG_REGISTERS)?;
-        match index {
-            0 => context.Dr0 = 0,
-            1 => context.Dr1 = 0,
-            2 => context.Dr2 = 0,
-            3 => context.Dr3 = 0,
+        let mut konteks =
+            self.get_konteks_thread(self.id_thread_terakhir, CONTEXT_DEBUG_REGISTERS)?;
+        match idx_slot {
+            0 => konteks.Dr0 = 0,
+            1 => konteks.Dr1 = 0,
+            2 => konteks.Dr2 = 0,
+            3 => konteks.Dr3 = 0,
             _ => unreachable!(),
         }
-        let disable_mask = !(1 << (index * 2));
-        context.Dr7 &= disable_mask;
-        self.set_thread_context(self.last_event_thread_id, &context)?;
+        let mask_disable = !(1 << (idx_slot * 2));
+        konteks.Dr7 &= mask_disable;
+        self.set_konteks_thread(self.id_thread_terakhir, &konteks)?;
         Ok(())
     }
-    fn proses_debug_event(&mut self, debug_event: DEBUG_EVENT, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+    fn proses_event_debug(&mut self, event_debug: DEBUG_EVENT, ptr_event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
         unsafe {
-            self.last_event_thread_id = debug_event.dwThreadId;
-            let mut continue_status = DBG_CONTINUE;
-            match debug_event.dwDebugEventCode {
+            self.id_thread_terakhir = event_debug.dwThreadId;
+            let mut status_lanjut = DBG_CONTINUE;
+            match event_debug.dwDebugEventCode {
                 EXCEPTION_DEBUG_EVENT => {
-                    let exception_record = &debug_event.u.Exception.ExceptionRecord;
-                    let alamat_exception = exception_record.ExceptionAddress as u64;
-                    if exception_record.ExceptionCode == EXCEPTION_BREAKPOINT {
-                        if self.breakpoints_map.contains_key(&alamat_exception) {
-                            if self.internal_handle_breakpoint_pre_step(
-                                &debug_event,
-                                alamat_exception,
+                    let rekaman_eksepsi = &event_debug.u.Exception.ExceptionRecord;
+                    let va_eksepsi = rekaman_eksepsi.ExceptionAddress as u64;
+                    if rekaman_eksepsi.ExceptionCode == EXCEPTION_BREAKPOINT {
+                        if self.map_titik_henti.contains_key(&va_eksepsi) {
+                            if self.handle_bp_pre_step_internal(
+                                &event_debug,
+                                va_eksepsi,
                             ) {
-                                continue_status = DBG_CONTINUE;
+                                status_lanjut = DBG_CONTINUE;
                             } else {
-                                set_last_error(ReToolsError::Generic(
+                                set_err_last(ReToolsError::Generic(
                                     "Gagal pre-step breakpoint".to_string(),
                                 ));
-                                continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                                status_lanjut = DBG_EXCEPTION_NOT_HANDLED;
                             }
                         } else {
-                            continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                            status_lanjut = DBG_EXCEPTION_NOT_HANDLED;
                         }
-                    } else if exception_record.ExceptionCode == EXCEPTION_SINGLE_STEP {
-                        if let Some(alamat_bp_ditangani) = self.handling_breakpoint_alamat {
-                            self.internal_handle_breakpoint_post_step(alamat_bp_ditangani);
-                            (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                            (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                            (*event_out).info_alamat = alamat_bp_ditangani;
+                    } else if rekaman_eksepsi.ExceptionCode == EXCEPTION_SINGLE_STEP {
+                        if let Some(va_bp_ditangani) = self.va_bp_sedang_ditangani {
+                            self.handle_bp_post_step_internal(va_bp_ditangani);
+                            (*ptr_event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                            (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                            (*ptr_event_out).info_alamat = va_bp_ditangani;
                             return Ok(true);
                         } else {
-                            (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
-                            (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                            (*event_out).info_alamat = alamat_exception;
+                            (*ptr_event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                            (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                            (*ptr_event_out).info_alamat = va_eksepsi;
                             return Ok(true);
                         }
                     } else {
-                        (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                        (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                        (*event_out).info_alamat = alamat_exception;
-                        continue_status = DBG_EXCEPTION_NOT_HANDLED;
+                        (*ptr_event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                        (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                        (*ptr_event_out).info_alamat = va_eksepsi;
+                        status_lanjut = DBG_EXCEPTION_NOT_HANDLED;
                     }
                 }
                 CREATE_THREAD_DEBUG_EVENT => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_THREAD_BARU;
-                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                    (*event_out).info_alamat = debug_event
+                    (*ptr_event_out).tipe = DebugEventTipe::EVENT_THREAD_BARU;
+                    (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                    (*ptr_event_out).info_alamat = event_debug
                         .u
                         .CreateThread
                         .lpStartAddress
-                        .map_or(0, |addr| addr as usize)
+                        .map_or(0, |ptr| ptr as usize)
                         as u64;
                     return Ok(true);
                 }
                 EXIT_THREAD_DEBUG_EVENT => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_THREAD_EXIT;
-                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                    (*event_out).info_alamat = debug_event.u.ExitThread.dwExitCode as u64;
+                    (*ptr_event_out).tipe = DebugEventTipe::EVENT_THREAD_EXIT;
+                    (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                    (*ptr_event_out).info_alamat = event_debug.u.ExitThread.dwExitCode as u64;
                     return Ok(true);
                 }
                 LOAD_DLL_DEBUG_EVENT => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_MODUL_LOAD;
-                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                    (*event_out).info_alamat = debug_event.u.LoadDll.lpBaseOfDll as u64;
+                    (*ptr_event_out).tipe = DebugEventTipe::EVENT_MODUL_LOAD;
+                    (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                    (*ptr_event_out).info_alamat = event_debug.u.LoadDll.lpBaseOfDll as u64;
                     return Ok(true);
                 }
                 EXIT_PROCESS_DEBUG_EVENT => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                    (*event_out).pid_thread = debug_event.dwThreadId as c_int;
-                    (*event_out).info_alamat = debug_event.u.ExitProcess.dwExitCode as u64;
-                    self.handle_proses = 0;
+                    (*ptr_event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*ptr_event_out).pid_thread = event_debug.dwThreadId as c_int;
+                    (*ptr_event_out).info_alamat = event_debug.u.ExitProcess.dwExitCode as u64;
+                    self.ptr_handle_proses = 0;
                     return Ok(true);
                 }
                 _ => {}
             }
             ContinueDebugEvent(
-                debug_event.dwProcessId,
-                debug_event.dwThreadId,
-                continue_status,
+                event_debug.dwProcessId,
+                event_debug.dwThreadId,
+                status_lanjut,
             );
             Ok(false)
         }
@@ -306,129 +306,129 @@ impl WindowsTracer {
 }
 
 impl PlatformTracer for WindowsTracer {
-    fn attach(&mut self) -> Result<(), ReToolsError> {
+    fn attach_sasaran(&mut self) -> Result<(), ReToolsError> {
         unsafe {
             WindowsTracer::enable_debug_privilege();
-            let handle_proses = OpenProcess(PROCESS_ALL_ACCESS, FALSE, self.pid_target);
-            if handle_proses == 0 {
+            let ptr_h_proses = OpenProcess(PROCESS_ALL_ACCESS, FALSE, self.pid_sasaran);
+            if ptr_h_proses == 0 {
                 return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
             }
-            self.handle_proses = handle_proses;
-            if DebugActiveProcess(self.pid_target) == 0 {
-                CloseHandle(handle_proses);
+            self.ptr_handle_proses = ptr_h_proses;
+            if DebugActiveProcess(self.pid_sasaran) == 0 {
+                CloseHandle(ptr_h_proses);
                 return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
             }
-            let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
-            if WaitForDebugEvent(&mut debug_event, 5000) == 0 {
-                DebugActiveProcessStop(self.pid_target);
-                CloseHandle(handle_proses);
+            let mut event_debug: DEBUG_EVENT = std::mem::zeroed();
+            if WaitForDebugEvent(&mut event_debug, 5000) == 0 {
+                DebugActiveProcessStop(self.pid_sasaran);
+                CloseHandle(ptr_h_proses);
                 return Err(ReToolsError::Generic(
                     "Timeout menunggu event attach".to_string(),
                 ));
             }
-            self.last_event_thread_id = debug_event.dwThreadId;
+            self.id_thread_terakhir = event_debug.dwThreadId;
             ContinueDebugEvent(
-                debug_event.dwProcessId,
-                debug_event.dwThreadId,
+                event_debug.dwProcessId,
+                event_debug.dwThreadId,
                 DBG_CONTINUE,
             );
             Ok(())
         }
     }
-    fn detach(&mut self) -> Result<(), ReToolsError> {
+    fn detach_sasaran(&mut self) -> Result<(), ReToolsError> {
         unsafe {
-            for (addr, orig_byte) in &self.breakpoints_map {
-                self.tulis_memory(*addr, &[*orig_byte]).ok();
+            for (va, byte_asli) in &self.map_titik_henti {
+                self.write_memori(*va, &[*byte_asli]).ok();
             }
-            self.breakpoints_map.clear();
-            if self.handle_proses != 0 {
-                if DebugActiveProcessStop(self.pid_target) == 0 {
+            self.map_titik_henti.clear();
+            if self.ptr_handle_proses != 0 {
+                if DebugActiveProcessStop(self.pid_sasaran) == 0 {
                     return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
                 }
-                CloseHandle(self.handle_proses);
-                self.handle_proses = 0;
+                CloseHandle(self.ptr_handle_proses);
+                self.ptr_handle_proses = 0;
             }
             Ok(())
         }
     }
-    fn baca_memory(&self, addr: u64, size: c_int) -> Result<Vec<u8>, ReToolsError> {
-        let mut buffer = vec![0u8; size as usize];
-        let mut bytes_dibaca: usize = 0;
+    fn read_memori(&self, va_alamat: u64, sz_ukuran: c_int) -> Result<Vec<u8>, ReToolsError> {
+        let mut vec_buffer = vec![0u8; sz_ukuran as usize];
+        let mut sz_terbaca: usize = 0;
         unsafe {
             if ReadProcessMemory(
-                self.handle_proses,
-                addr as *const c_void,
-                buffer.as_mut_ptr() as *mut c_void,
-                size as usize,
-                &mut bytes_dibaca,
+                self.ptr_handle_proses,
+                va_alamat as *const c_void,
+                vec_buffer.as_mut_ptr() as *mut c_void,
+                sz_ukuran as usize,
+                &mut sz_terbaca,
             ) != 0
             {
-                buffer.truncate(bytes_dibaca);
-                Ok(buffer)
+                vec_buffer.truncate(sz_terbaca);
+                Ok(vec_buffer)
             } else {
                 Err(ReToolsError::IoError(std::io::Error::last_os_error()))
             }
         }
     }
-    fn tulis_memory(&self, addr: u64, data: &[u8]) -> Result<usize, ReToolsError> {
-        let mut bytes_ditulis: usize = 0;
+    fn write_memori(&self, va_alamat: u64, buf_data: &[u8]) -> Result<usize, ReToolsError> {
+        let mut sz_tertulis: usize = 0;
         unsafe {
             if WriteProcessMemory(
-                self.handle_proses,
-                addr as *mut c_void,
-                data.as_ptr() as *const c_void,
-                data.len(),
-                &mut bytes_ditulis,
+                self.ptr_handle_proses,
+                va_alamat as *mut c_void,
+                buf_data.as_ptr() as *const c_void,
+                buf_data.len(),
+                &mut sz_tertulis,
             ) != 0
             {
-                Ok(bytes_ditulis)
+                Ok(sz_tertulis)
             } else {
                 Err(ReToolsError::IoError(std::io::Error::last_os_error()))
             }
         }
     }
-    fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
+    fn get_register(&self) -> Result<C_Registers, ReToolsError> {
         unsafe {
-            if self.last_event_thread_id == 0 {
+            if self.id_thread_terakhir == 0 {
                 return Err(ReToolsError::Generic(
-                    "last_event_thread_id adalah 0".to_string(),
+                    "id_thread_terakhir adalah 0".to_string(),
                 ));
             }
-            let context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
+            let konteks = self.get_konteks_thread(self.id_thread_terakhir, CONTEXT_FULL)?;
             #[cfg(target_arch = "x86_64")]
             {
                 Ok(C_Registers {
-                    rax: context.Rax,
-                    rbx: context.Rbx,
-                    rcx: context.Rcx,
-                    rdx: context.Rdx,
-                    rsi: context.Rsi,
-                    rdi: context.Rdi,
-                    rbp: context.Rbp,
-                    rsp: context.Rsp,
-                    r8: context.R8,
-                    r9: context.R9,
-                    r10: context.R10,
-                    r11: context.R11,
-                    r12: context.R12,
-                    r13: context.R13,
-                    r14: context.R14,
-                    r15: context.R15,
-                    rip: context.Rip,
-                    eflags: context.EFlags as u64,
+                    rax: konteks.Rax,
+                    rbx: konteks.Rbx,
+                    rcx: konteks.Rcx,
+                    rdx: konteks.Rdx,
+                    rsi: konteks.Rsi,
+                    rdi: konteks.Rdi,
+                    rbp: konteks.Rbp,
+                    rsp: konteks.Rsp,
+                    r8: konteks.R8,
+                    r9: konteks.R9,
+                    r10: konteks.R10,
+                    r11: konteks.R11,
+                    r12: konteks.R12,
+                    r13: konteks.R13,
+                    r14: konteks.R14,
+                    r15: konteks.R15,
+                    rip: konteks.Rip,
+                    eflags: konteks.EFlags as u64,
                 })
             }
             #[cfg(target_arch = "x86")]
             {
                 Ok(C_Registers {
-                    rax: context.Eax as u64,
-                    rbx: context.Ebx as u64,
-                    rcx: context.Ecx as u64,
-                    rdx: context.Edx as u64,
-                    rsi: context.Esi as u64,
-                    rdi: context.Edi as u64,
-                    rbp: context.Ebp as u64,
-                    rsp: context.Esp as u64,
+                    rax: konteks.Eax as u64,
+                    rbx: konteks.Ebx as u64,
+                    rcx: konteks.Ecx as u64,
+                    rdx: konteks.Edx as u64,
+                    rsi: konteks.Esi as u64,
+                    rdi: konteks.Edi as u64,
+                    rbp: konteks.Ebp as u64,
+                    rsp: konteks.Esp as u64,
                     r8: 0,
                     r9: 0,
                     r10: 0,
@@ -437,67 +437,67 @@ impl PlatformTracer for WindowsTracer {
                     r13: 0,
                     r14: 0,
                     r15: 0,
-                    rip: context.Eip as u64,
-                    eflags: context.EFlags as u64,
+                    rip: konteks.Eip as u64,
+                    eflags: konteks.EFlags as u64,
                 })
             }
         }
     }
-    fn set_registers(&self, c_regs: &C_Registers) -> Result<(), ReToolsError> {
+    fn set_register(&self, reg_nilai: &C_Registers) -> Result<(), ReToolsError> {
         unsafe {
-            if self.last_event_thread_id == 0 {
+            if self.id_thread_terakhir == 0 {
                 return Err(ReToolsError::Generic(
-                    "last_event_thread_id adalah 0".to_string(),
+                    "id_thread_terakhir adalah 0".to_string(),
                 ));
             }
-            let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
+            let mut konteks = self.get_konteks_thread(self.id_thread_terakhir, CONTEXT_FULL)?;
             #[cfg(target_arch = "x86_64")]
             {
-                context.Rax = c_regs.rax;
-                context.Rbx = c_regs.rbx;
-                context.Rcx = c_regs.rcx;
-                context.Rdx = c_regs.rdx;
-                context.Rsi = c_regs.rsi;
-                context.Rdi = c_regs.rdi;
-                context.Rbp = c_regs.rbp;
-                context.Rsp = c_regs.rsp;
-                context.R8 = c_regs.r8;
-                context.R9 = c_regs.r9;
-                context.R10 = c_regs.r10;
-                context.R11 = c_regs.r11;
-                context.R12 = c_regs.r12;
-                context.R13 = c_regs.r13;
-                context.R14 = c_regs.r14;
-                context.R15 = c_regs.r15;
-                context.Rip = c_regs.rip;
-                context.EFlags = c_regs.eflags as u32;
+                konteks.Rax = reg_nilai.rax;
+                konteks.Rbx = reg_nilai.rbx;
+                konteks.Rcx = reg_nilai.rcx;
+                konteks.Rdx = reg_nilai.rdx;
+                konteks.Rsi = reg_nilai.rsi;
+                konteks.Rdi = reg_nilai.rdi;
+                konteks.Rbp = reg_nilai.rbp;
+                konteks.Rsp = reg_nilai.rsp;
+                konteks.R8 = reg_nilai.r8;
+                konteks.R9 = reg_nilai.r9;
+                konteks.R10 = reg_nilai.r10;
+                konteks.R11 = reg_nilai.r11;
+                konteks.R12 = reg_nilai.r12;
+                konteks.R13 = reg_nilai.r13;
+                konteks.R14 = reg_nilai.r14;
+                konteks.R15 = reg_nilai.r15;
+                konteks.Rip = reg_nilai.rip;
+                konteks.EFlags = reg_nilai.eflags as u32;
             }
             #[cfg(target_arch = "x86")]
             {
-                context.Eax = c_regs.rax as u32;
-                context.Ebx = c_regs.rbx as u32;
-                context.Ecx = c_regs.rcx as u32;
-                context.Edx = c_regs.rdx as u32;
-                context.Esi = c_regs.rsi as u32;
-                context.Edi = c_regs.rdi as u32;
-                context.Ebp = c_regs.rbp as u32;
-                context.Esp = c_regs.rsp as u32;
-                context.Eip = c_regs.rip as u32;
-                context.EFlags = c_regs.eflags as u32;
+                konteks.Eax = reg_nilai.rax as u32;
+                konteks.Ebx = reg_nilai.rbx as u32;
+                konteks.Ecx = reg_nilai.rcx as u32;
+                konteks.Edx = reg_nilai.rdx as u32;
+                konteks.Esi = reg_nilai.rsi as u32;
+                konteks.Edi = reg_nilai.rdi as u32;
+                konteks.Ebp = reg_nilai.rbp as u32;
+                konteks.Esp = reg_nilai.rsp as u32;
+                konteks.Eip = reg_nilai.rip as u32;
+                konteks.EFlags = reg_nilai.eflags as u32;
             }
-            self.set_thread_context(self.last_event_thread_id, &context)
+            self.set_konteks_thread(self.id_thread_terakhir, &konteks)
         }
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
         unsafe {
-            if self.last_event_thread_id == 0 {
+            if self.id_thread_terakhir == 0 {
                 return Err(ReToolsError::Generic(
-                    "last_event_thread_id adalah 0".to_string(),
+                    "id_thread_terakhir adalah 0".to_string(),
                 ));
             }
             if ContinueDebugEvent(
-                self.pid_target,
-                self.last_event_thread_id,
+                self.pid_sasaran,
+                self.id_thread_terakhir,
                 DBG_CONTINUE,
             ) == 0
             {
@@ -507,193 +507,193 @@ impl PlatformTracer for WindowsTracer {
             }
         }
     }
-    fn single_step(&mut self) -> Result<(), ReToolsError> {
+    fn step_instruksi(&mut self) -> Result<(), ReToolsError> {
         unsafe {
-            if self.last_event_thread_id == 0 {
+            if self.id_thread_terakhir == 0 {
                 return Err(ReToolsError::Generic(
-                    "last_event_thread_id adalah 0".to_string(),
+                    "id_thread_terakhir adalah 0".to_string(),
                 ));
             }
-            let mut context = self.get_thread_context(self.last_event_thread_id, CONTEXT_FULL)?;
-            context.EFlags |= 0x100;
-            self.set_thread_context(self.last_event_thread_id, &context)?;
+            let mut konteks = self.get_konteks_thread(self.id_thread_terakhir, CONTEXT_FULL)?;
+            konteks.EFlags |= 0x100;
+            self.set_konteks_thread(self.id_thread_terakhir, &konteks)?;
             self.continue_proses()
         }
     }
-    fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
+    fn wait_event(&mut self, ptr_event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
         unsafe {
-            let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
+            let mut event_debug: DEBUG_EVENT = std::mem::zeroed();
             loop {
-                if WaitForDebugEvent(&mut debug_event, u32::MAX) == 0 {
+                if WaitForDebugEvent(&mut event_debug, u32::MAX) == 0 {
                     return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
                 }
-                if self.proses_debug_event(debug_event, event_out)? {
+                if self.proses_event_debug(event_debug, ptr_event_out)? {
                     return Ok(0);
                 }
             }
         }
     }
-    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+    fn poll_event(&mut self, ptr_event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
         unsafe {
-            let mut debug_event: DEBUG_EVENT = std::mem::zeroed();
-            if WaitForDebugEvent(&mut debug_event, 0) == 0 {
+            let mut event_debug: DEBUG_EVENT = std::mem::zeroed();
+            if WaitForDebugEvent(&mut event_debug, 0) == 0 {
                  return Ok(false);
             }
-            self.proses_debug_event(debug_event, event_out)
+            self.proses_event_debug(event_debug, ptr_event_out)
         }
     }
-    fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
-        if self.breakpoints_map.contains_key(&addr) {
+    fn set_titik_henti_sw(&mut self, va_alamat: u64) -> Result<(), ReToolsError> {
+        if self.map_titik_henti.contains_key(&va_alamat) {
             return Ok(());
         }
-        let orig_bytes = self.baca_memory(addr, 1)?;
-        if orig_bytes.is_empty() {
+        let vec_byte_asli = self.read_memori(va_alamat, 1)?;
+        if vec_byte_asli.is_empty() {
             return Err(ReToolsError::Generic(format!(
                 "Gagal membaca byte asli di 0x{:x}",
-                addr
+                va_alamat
             )));
         }
-        let orig_byte = orig_bytes[0];
-        self.tulis_memory(addr, &[0xCC])?;
-        self.breakpoints_map.insert(addr, orig_byte);
+        let byte_asli = vec_byte_asli[0];
+        self.write_memori(va_alamat, &[0xCC])?;
+        self.map_titik_henti.insert(va_alamat, byte_asli);
         Ok(())
     }
-    fn remove_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
-        if let Some(orig_byte) = self.breakpoints_map.remove(&addr) {
-            self.tulis_memory(addr, &[orig_byte])?;
+    fn remove_titik_henti_sw(&mut self, va_alamat: u64) -> Result<(), ReToolsError> {
+        if let Some(byte_asli) = self.map_titik_henti.remove(&va_alamat) {
+            self.write_memori(va_alamat, &[byte_asli])?;
         }
         Ok(())
     }
-    fn set_hardware_breakpoint(&mut self, addr: u64, index: usize) -> Result<(), ReToolsError> {
-        unsafe { self.set_hw_bp(addr, index) }
+    fn set_titik_henti_hw(&mut self, va_alamat: u64, idx_slot: usize) -> Result<(), ReToolsError> {
+        unsafe { self.set_bp_hw_internal(va_alamat, idx_slot) }
     }
-    fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError> {
-        unsafe { self.remove_hw_bp(index) }
+    fn remove_titik_henti_hw(&mut self, idx_slot: usize) -> Result<(), ReToolsError> {
+        unsafe { self.remove_bp_hw_internal(idx_slot) }
     }
-    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
-        let mut threads = Vec::new();
+    fn list_thread(&self) -> Result<Vec<c_int>, ReToolsError> {
+        let mut vec_thread = Vec::new();
         unsafe {
-            let h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-            if h_snapshot == 0 {
+            let ptr_h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if ptr_h_snapshot == 0 {
                 return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
             }
             let mut te32: THREADENTRY32 = std::mem::zeroed();
             te32.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
-            if Thread32First(h_snapshot, &mut te32) == 0 {
-                CloseHandle(h_snapshot);
+            if Thread32First(ptr_h_snapshot, &mut te32) == 0 {
+                CloseHandle(ptr_h_snapshot);
                 return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
             }
             loop {
-                if te32.th32OwnerProcessID == self.pid_target {
-                    threads.push(te32.th32ThreadID as c_int);
+                if te32.th32OwnerProcessID == self.pid_sasaran {
+                    vec_thread.push(te32.th32ThreadID as c_int);
                 }
-                if Thread32Next(h_snapshot, &mut te32) == 0 {
+                if Thread32Next(ptr_h_snapshot, &mut te32) == 0 {
                     break;
                 }
             }
-            CloseHandle(h_snapshot);
+            CloseHandle(ptr_h_snapshot);
         }
-        Ok(threads)
+        Ok(vec_thread)
     }
-    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
-        let mut regions = Vec::new();
-        let mut current_addr: usize = 0;
+    fn get_region_memori(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+        let mut vec_region = Vec::new();
+        let mut ptr_va_saat_ini: usize = 0;
         unsafe {
             loop {
-                let mut mem_info: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-                let bytes_returned = VirtualQueryEx(
-                    self.handle_proses,
-                    current_addr as *const c_void,
-                    &mut mem_info,
+                let mut info_mem: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+                let sz_hasil = VirtualQueryEx(
+                    self.ptr_handle_proses,
+                    ptr_va_saat_ini as *const c_void,
+                    &mut info_mem,
                     std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
                 );
-                if bytes_returned == 0 {
+                if sz_hasil == 0 {
                     break;
                 }
-                let mut proteksi = 0;
-                if (mem_info.Protect & 0x02) != 0 {
-                    proteksi |= 1;
+                let mut flag_proteksi = 0;
+                if (info_mem.Protect & 0x02) != 0 {
+                    flag_proteksi |= 1;
                 } 
-                if (mem_info.Protect & 0x04) != 0 {
-                    proteksi |= 3;
+                if (info_mem.Protect & 0x04) != 0 {
+                    flag_proteksi |= 3;
                 } 
-                if (mem_info.Protect & 0x08) != 0 {
-                    proteksi |= 3;
+                if (info_mem.Protect & 0x08) != 0 {
+                    flag_proteksi |= 3;
                 } 
-                if (mem_info.Protect & 0x10) != 0 {
-                    proteksi |= 5;
+                if (info_mem.Protect & 0x10) != 0 {
+                    flag_proteksi |= 5;
                 } 
-                if (mem_info.Protect & 0x20) != 0 {
-                    proteksi |= 5;
+                if (info_mem.Protect & 0x20) != 0 {
+                    flag_proteksi |= 5;
                 } 
-                if (mem_info.Protect & 0x40) != 0 {
-                    proteksi |= 7;
+                if (info_mem.Protect & 0x40) != 0 {
+                    flag_proteksi |= 7;
                 } 
-                if (mem_info.Protect & 0x80) != 0 {
-                    proteksi |= 7;
+                if (info_mem.Protect & 0x80) != 0 {
+                    flag_proteksi |= 7;
                 } 
-                let mut path_bytes = [0 as c_char; 260];
-                let mut path_buffer: [u8; 260] = [0; 260];
+                let mut arr_path = [0 as c_char; 260];
+                let mut buf_path: [u8; 260] = [0; 260];
                 if GetModuleFileNameExA(
-                    self.handle_proses,
-                    mem_info.AllocationBase as _,
-                    path_buffer.as_mut_ptr(),
+                    self.ptr_handle_proses,
+                    info_mem.AllocationBase as _,
+                    buf_path.as_mut_ptr(),
                     260,
                 ) > 0
                 {
-                    let len = path_buffer.iter().position(|&r| r == 0).unwrap_or(259);
-                    for i in 0..len {
-                        path_bytes[i] = path_buffer[i] as c_char;
+                    let len_str = buf_path.iter().position(|&r| r == 0).unwrap_or(259);
+                    for i in 0..len_str {
+                        arr_path[i] = buf_path[i] as c_char;
                     }
                 }
-                regions.push(C_MemoryRegionInfo {
-                    alamat_basis: mem_info.BaseAddress as u64,
-                    ukuran: mem_info.RegionSize as u64,
-                    proteksi,
-                    path_modul: path_bytes,
+                vec_region.push(C_MemoryRegionInfo {
+                    alamat_basis: info_mem.BaseAddress as u64,
+                    ukuran: info_mem.RegionSize as u64,
+                    proteksi: flag_proteksi,
+                    path_modul: arr_path,
                 });
-                current_addr = (mem_info.BaseAddress as usize) + mem_info.RegionSize;
+                ptr_va_saat_ini = (info_mem.BaseAddress as usize) + info_mem.RegionSize;
             }
         }
-        Ok(regions)
+        Ok(vec_region)
     }
-    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
+    fn set_trace_syscall(&mut self, _status_aktif: bool) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic(
-            "set_pelacakan_syscall tidak didukung di Windows".to_string(),
+            "set_trace_syscall tidak didukung di Windows".to_string(),
         ))
     }
-    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+    fn get_info_syscall(&self, _id_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
         Err(ReToolsError::Generic(
             "get_info_syscall tidak didukung di Windows".to_string(),
         ))
     }
-    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+    fn set_opsi_multithread(&mut self) -> Result<(), ReToolsError> {
         Ok(())
     }
-    fn hook_memory_api(
+    fn hook_api_memori(
         &mut self,
-        _api_name: &str,
-        _on_entry_callback: u64,
-        _on_exit_callback: u64,
+        _nama_api: &str,
+        _va_entry: u64,
+        _va_exit: u64,
     ) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+    fn remove_hook_api_memori(&mut self, _nama_api: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+    fn dump_region_memori(&self, _va_alamat: u64, _sz_ukuran: usize, _jalur_berkas: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
-        self.stealth_mode = true;
+    fn hide_status_debugger(&mut self) -> Result<(), ReToolsError> {
+        self.mode_senyap = true;
         Ok(())
     }
 }
 
 impl Drop for WindowsTracer {
     fn drop(&mut self) {
-        if self.handle_proses != 0 {
-            self.detach().ok();
+        if self.ptr_handle_proses != 0 {
+            self.detach_sasaran().ok();
         }
     }
 }

@@ -15,122 +15,122 @@ pub struct LivenessInfo {
 	pub def_set: HashMap<NodeIndex, HashSet<String>>,
 }
 
-fn get_uses_in_expr(expr: &MicroExpr, uses: &mut HashSet<String>, defs: &HashSet<String>) {
-	match expr {
-		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
-			if !defs.contains(nama_dasar) {
-				uses.insert(nama_dasar.clone());
+fn scan_use_expr(ekspresi: &MicroExpr, set_guna: &mut HashSet<String>, set_def: &HashSet<String>) {
+	match ekspresi {
+		MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg, .. })) => {
+			if !set_def.contains(id_reg) {
+				set_guna.insert(id_reg.clone());
 			}
 		}
-		MicroExpr::OperasiUnary(_, inner) => get_uses_in_expr(inner, uses, defs),
-		MicroExpr::OperasiBiner(_, left, right)
-		| MicroExpr::Bandingkan(left, right)
-		| MicroExpr::UjiBit(left, right) => {
-			get_uses_in_expr(left, uses, defs);
-			get_uses_in_expr(right, uses, defs);
+		MicroExpr::UnaryOp(_, inner) => scan_use_expr(inner, set_guna, set_def),
+		MicroExpr::BinaryOp(_, kiri, kanan)
+		| MicroExpr::Compare(kiri, kanan)
+		| MicroExpr::TestBit(kiri, kanan) => {
+			scan_use_expr(kiri, set_guna, set_def);
+			scan_use_expr(kanan, set_guna, set_def);
 		}
-		MicroExpr::MuatMemori(inner) => get_uses_in_expr(inner, uses, defs),
+		MicroExpr::LoadMemori(inner) => scan_use_expr(inner, set_guna, set_def),
 		MicroExpr::Operand(MicroOperand::Konstanta(_)) => {}
 		MicroExpr::Operand(MicroOperand::Flag(_)) => {}
 	}
 }
 
-fn get_uses_defs_block(
-	block: &BasicBlock,
+fn scan_use_def_blok(
+	blok: &BasicBlock,
 ) -> (HashSet<String>, HashSet<String>) {
-	let mut uses = HashSet::new();
-	let mut defs = HashSet::new();
-	for (_, instructions) in &block.instructions {
-		for instruction in instructions {
-			match instruction {
-				MicroInstruction::Assign(SsaVariabel { nama_dasar, .. }, expr) => {
-					get_uses_in_expr(expr, &mut uses, &defs);
-					defs.insert(nama_dasar.clone());
+	let mut set_guna = HashSet::new();
+	let mut set_def = HashSet::new();
+	for (_, list_instr) in &blok.instructions {
+		for instr in list_instr {
+			match instr {
+				MicroInstruction::Assign(SsaVariabel { id_reg, .. }, ekspresi) => {
+					scan_use_expr(ekspresi, &mut set_guna, &set_def);
+					set_def.insert(id_reg.clone());
 				}
-				MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
-					get_uses_in_expr(addr_expr, &mut uses, &defs);
-					get_uses_in_expr(data_expr, &mut uses, &defs);
+				MicroInstruction::StoreMemori(addr, data) => {
+					scan_use_expr(addr, &mut set_guna, &set_def);
+					scan_use_expr(data, &mut set_guna, &set_def);
 				}
-				MicroInstruction::Lompat(expr) => {
-					get_uses_in_expr(expr, &mut uses, &defs);
+				MicroInstruction::Jump(ekspresi) => {
+					scan_use_expr(ekspresi, &mut set_guna, &set_def);
 				}
-				MicroInstruction::LompatKondisi(cond_expr, target_expr) => {
-					get_uses_in_expr(cond_expr, &mut uses, &defs);
-					get_uses_in_expr(target_expr, &mut uses, &defs);
+				MicroInstruction::JumpKondisi(kondisi, target) => {
+					scan_use_expr(kondisi, &mut set_guna, &set_def);
+					scan_use_expr(target, &mut set_guna, &set_def);
 				}
-				MicroInstruction::Panggil(expr) => {
-					get_uses_in_expr(expr, &mut uses, &defs);
+				MicroInstruction::Call(ekspresi) => {
+					scan_use_expr(ekspresi, &mut set_guna, &set_def);
 				}
-				MicroInstruction::AtomicRMW { op: _, alamat, nilai, tujuan_lama } => {
-					get_uses_in_expr(alamat, &mut uses, &defs);
-					get_uses_in_expr(nilai, &mut uses, &defs);
-					if let Some(old_val_var) = tujuan_lama {
-						defs.insert(old_val_var.nama_dasar.clone());
+				MicroInstruction::AtomicRMW { op: _, addr_mem, nilai, tujuan_lama } => {
+					scan_use_expr(addr_mem, &mut set_guna, &set_def);
+					scan_use_expr(nilai, &mut set_guna, &set_def);
+					if let Some(var_lama) = tujuan_lama {
+						set_def.insert(var_lama.id_reg.clone());
 					}
 				}
-				MicroInstruction::UpdateFlag(_flag_name, expr) => {
-					get_uses_in_expr(expr, &mut uses, &defs);
+				MicroInstruction::UpdateFlag(_flag_name, ekspresi) => {
+					scan_use_expr(ekspresi, &mut set_guna, &set_def);
 				}
-				MicroInstruction::InstruksiVektor { tujuan, operand_1, operand_2, .. } => {
-					for op in operand_1.iter().chain(operand_2.iter()) {
+				MicroInstruction::VectorOp { tujuan, op_1, op_2, .. } => {
+					for op in op_1.iter().chain(op_2.iter()) {
 						if let MicroOperand::SsaVar(v) = op {
-							if !defs.contains(&v.nama_dasar) {
-								uses.insert(v.nama_dasar.clone());
+							if !set_def.contains(&v.id_reg) {
+								set_guna.insert(v.id_reg.clone());
 							}
 						}
 					}
-					defs.insert(tujuan.nama_dasar.clone());
+					set_def.insert(tujuan.id_reg.clone());
 				}
 				_ => {}
 			}
 		}
 	}
-	(uses, defs)
+	(set_guna, set_def)
 }
 
-pub fn hitung_analisis_liveness(
-	graph: &DiGraph<BasicBlock, &'static str>,
+pub fn calc_live_var(
+	graf: &DiGraph<BasicBlock, &'static str>,
 ) -> LivenessInfo {
 	let mut live_in: HashMap<NodeIndex, HashSet<String>> = HashMap::new();
 	let mut live_out: HashMap<NodeIndex, HashSet<String>> = HashMap::new();
 	let mut use_set: HashMap<NodeIndex, HashSet<String>> = HashMap::new();
 	let mut def_set: HashMap<NodeIndex, HashSet<String>> = HashMap::new();
-	let nodes: Vec<NodeIndex> = graph.node_indices().collect();
-	for &node in &nodes {
-		let block = graph.node_weight(node).unwrap();
-		let (uses, defs) = get_uses_defs_block(block);
-		use_set.insert(node, uses);
-		def_set.insert(node, defs);
-		live_in.insert(node, HashSet::new());
-		live_out.insert(node, HashSet::new());
+	let list_simpul: Vec<NodeIndex> = graf.node_indices().collect();
+	for &idx_simpul in &list_simpul {
+		let blok = graf.node_weight(idx_simpul).unwrap();
+		let (set_guna, set_def) = scan_use_def_blok(blok);
+		use_set.insert(idx_simpul, set_guna);
+		def_set.insert(idx_simpul, set_def);
+		live_in.insert(idx_simpul, HashSet::new());
+		live_out.insert(idx_simpul, HashSet::new());
 	}
 	let mut changed = true;
 	while changed {
 		changed = false;
-		for &node in nodes.iter().rev() {
-			let mut new_out = HashSet::new();
-			for successor_edge in graph.edges_directed(node, Direction::Outgoing) {
-				let successor = successor_edge.target();
-				if let Some(in_set) = live_in.get(&successor) {
-					new_out.extend(in_set.iter().cloned());
+		for &idx_simpul in list_simpul.iter().rev() {
+			let mut set_keluar_baru = HashSet::new();
+			for sisi_suksesor in graf.edges_directed(idx_simpul, Direction::Outgoing) {
+				let suksesor = sisi_suksesor.target();
+				if let Some(set_masuk_suksesor) = live_in.get(&suksesor) {
+					set_keluar_baru.extend(set_masuk_suksesor.iter().cloned());
 				}
 			}
-			let old_out = live_out.get_mut(&node).unwrap();
-			if *old_out != new_out {
-				*old_out = new_out.clone();
+			let set_keluar_lama = live_out.get_mut(&idx_simpul).unwrap();
+			if *set_keluar_lama != set_keluar_baru {
+				*set_keluar_lama = set_keluar_baru.clone();
 				changed = true;
 			}
-			let current_uses = use_set.get(&node).unwrap();
-			let current_defs = def_set.get(&node).unwrap();
-			let mut out_minus_def = new_out.clone();
-			for def in current_defs {
-				out_minus_def.remove(def);
+			let set_guna_blok = use_set.get(&idx_simpul).unwrap();
+			let set_def_blok = def_set.get(&idx_simpul).unwrap();
+			let mut set_keluar_minus_def = set_keluar_baru.clone();
+			for def in set_def_blok {
+				set_keluar_minus_def.remove(def);
 			}
-			let mut new_in = current_uses.clone();
-			new_in.extend(out_minus_def.iter().cloned());
-			let old_in = live_in.get_mut(&node).unwrap();
-			if *old_in != new_in {
-				*old_in = new_in;
+			let mut set_masuk_baru = set_guna_blok.clone();
+			set_masuk_baru.extend(set_keluar_minus_def.iter().cloned());
+			let set_masuk_lama = live_in.get_mut(&idx_simpul).unwrap();
+			if *set_masuk_lama != set_masuk_baru {
+				*set_masuk_lama = set_masuk_baru;
 				changed = true;
 			}
 		}

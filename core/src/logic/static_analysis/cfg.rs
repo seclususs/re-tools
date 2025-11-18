@@ -4,7 +4,7 @@
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::{Binary, SectionInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
-use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::lifter::lift_blok_instr;
 use crate::logic::ir::instruction::{MicroInstruction, MicroOperand, MicroExpr};
 
 use log::{debug, info, warn};
@@ -53,7 +53,7 @@ fn va_to_offset(va: u64, sections: &[SectionInfo]) -> Option<u64> {
 	None
 }
 
-fn baca_pointer_di_va(va: u64, binary: &Binary) -> Option<u64> {
+fn read_ptr_at_va(va: u64, binary: &Binary) -> Option<u64> {
 	let offset = va_to_offset(va, &binary.sections)? as usize;
 	let data = &binary.file_data;
 	if binary.header.bits == 64 {
@@ -73,36 +73,36 @@ fn baca_pointer_di_va(va: u64, binary: &Binary) -> Option<u64> {
 	}
 }
 
-fn ekstrak_basis_tabel(expr: &MicroExpr) -> Option<u64> {
+fn extract_base_table(expr: &MicroExpr) -> Option<u64> {
 	match expr {
 		MicroExpr::Operand(MicroOperand::Konstanta(imm)) => Some(*imm),
-		MicroExpr::OperasiBiner(_, left, right) => {
-			ekstrak_basis_tabel(left).or_else(|| ekstrak_basis_tabel(right))
+		MicroExpr::BinaryOp(_, left, right) => {
+			extract_base_table(left).or_else(|| extract_base_table(right))
 		}
 		MicroExpr::Operand(MicroOperand::SsaVar(_)) => None,
-		MicroExpr::MuatMemori(inner) => ekstrak_basis_tabel(inner),
+		MicroExpr::LoadMemori(inner) => extract_base_table(inner),
 		_ => None,
 	}
 }
 
-fn pindai_target_tabel(base_va: u64, binary: &Binary) -> Vec<u64> {
-	let mut targets = Vec::new();
-	let pointer_size = if binary.header.bits == 64 { 8 } else { 4 };
-	let text_section = binary.sections.iter().find(|s| s.name.starts_with(".text"));
-	let (text_start, text_end) = if let Some(sec) = text_section {
+fn scan_target_table(va_basis: u64, binary: &Binary) -> Vec<u64> {
+	let mut list_target = Vec::new();
+	let sz_ptr = if binary.header.bits == 64 { 8 } else { 4 };
+	let seksi_teks = binary.sections.iter().find(|s| s.name.starts_with(".text"));
+	let (va_mulai, va_akhir) = if let Some(sec) = seksi_teks {
 		(sec.addr, sec.addr + sec.size)
 	} else {
 		(0, u64::MAX)
 	};
 	for i in 0..256 {
-		let current_va = base_va + (i * pointer_size);
-		match baca_pointer_di_va(current_va, binary) {
-			Some(target_va) => {
-				if target_va >= text_start && target_va < text_end {
-					if targets.contains(&target_va) {
+		let va_kini = va_basis + (i * sz_ptr);
+		match read_ptr_at_va(va_kini, binary) {
+			Some(va_target) => {
+				if va_target >= va_mulai && va_target < va_akhir {
+					if list_target.contains(&va_target) {
 						continue;
 					}
-					targets.push(target_va);
+					list_target.push(va_target);
 				} else {
 					break;
 				}
@@ -112,23 +112,23 @@ fn pindai_target_tabel(base_va: u64, binary: &Binary) -> Vec<u64> {
 			}
 		}
 	}
-	targets
+	list_target
 }
 
-fn tentukan_target_lompat(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
+fn determine_target_jump(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
 	match expr {
 		MicroExpr::Operand(MicroOperand::Konstanta(imm)) => {
 			vec![*imm]
 		}
-		MicroExpr::MuatMemori(mem_expr) => {
-			match ekstrak_basis_tabel(mem_expr) {
-				Some(base_va) => {
-					let targets = pindai_target_tabel(base_va, binary);
-					if !targets.is_empty() {
-						targets
+		MicroExpr::LoadMemori(mem_expr) => {
+			match extract_base_table(mem_expr) {
+				Some(va_basis) => {
+					let list_target = scan_target_table(va_basis, binary);
+					if !list_target.is_empty() {
+						list_target
 					} else {
 						if let MicroExpr::Operand(MicroOperand::Konstanta(va)) = **mem_expr {
-							baca_pointer_di_va(va, binary).map_or(vec![], |target| vec![target])
+							read_ptr_at_va(va, binary).map_or(vec![], |target| vec![target])
 						} else {
 							vec![]
 						}
@@ -137,275 +137,275 @@ fn tentukan_target_lompat(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
 				None => vec![]
 			}
 		}
-		MicroExpr::OperasiBiner(_, left, right) => {
-			let mut targets = tentukan_target_lompat(left, binary);
-			targets.extend(tentukan_target_lompat(right, binary));
-			targets
+		MicroExpr::BinaryOp(_, left, right) => {
+			let mut list_target = determine_target_jump(left, binary);
+			list_target.extend(determine_target_jump(right, binary));
+			list_target
 		}
 		_ => vec![],
 	}
 }
 
 fn is_ir_branch(ir: &MicroInstruction) -> bool {
-	matches!(ir, MicroInstruction::Lompat(_) | MicroInstruction::LompatKondisi(_, _) | MicroInstruction::Kembali | MicroInstruction::Panggil(_))
+	matches!(ir, MicroInstruction::Jump(_) | MicroInstruction::JumpKondisi(_, _) | MicroInstruction::Return | MicroInstruction::Call(_))
 }
 
-pub fn bangun_cfg_internal(binary: &Binary) -> Result<DiGraph<BasicBlock, &'static str>, ReToolsError> {
-	info!("Mulai bangun CFG (IR-based) untuk: {}", binary.file_path);
-	let text_section = binary
+pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static str>, ReToolsError> {
+	info!("Mulai bangun CFG (IR-based) untuk: {}", biner.path_berkas);
+	let seksi_teks = biner
 		.sections
 		.iter()
 		.find(|s| s.name.starts_with(".text") || (s.flags & 0x4) != 0 || (s.flags & 0x20000000) != 0);
-	let (text_data, base_addr) = if let Some(section) = text_section {
+	let (data_teks, va_basis) = if let Some(section) = seksi_teks {
 		info!(
 			"Section executable ditemukan: {} addr=0x{:x}, size=0x{:x}",
 			section.name, section.addr, section.size
 		);
-		let text_data_offset = section.offset as usize;
-		let text_data_size = section.size as usize;
-		if text_data_offset
-			.saturating_add(text_data_size)
-			> binary.file_data.len()
+		let off_data = section.offset as usize;
+		let sz_data = section.size as usize;
+		if off_data
+			.saturating_add(sz_data)
+			> biner.file_data.len()
 		{
 			return Err(ReToolsError::ParseError(
 				"Section .text di luar batas file".to_string(),
 			));
 		}
-		let data_slice = &binary.file_data[text_data_offset..(text_data_offset + text_data_size)];
-		(data_slice, section.addr)
+		let slice_data = &biner.file_data[off_data..(off_data + sz_data)];
+		(slice_data, section.addr)
 	} else {
 		warn!("Section .text tidak ditemukan");
 		return Err(ReToolsError::ParseError(
 			"Section .text tidak ditemukan".to_string(),
 		));
 	};
-	let arch_disasm = binary.header.get_disasm_arch();
+	let arch_disasm = biner.header.get_disasm_arch();
 	if arch_disasm == ArsitekturDisasm::ARCH_UNKNOWN {
 		return Err(ReToolsError::ParseError(format!(
 			"Arsitektur tidak didukung untuk CFG: {}/{} bits",
-			binary.header.arch, binary.header.bits
+			biner.header.arch, biner.header.bits
 		)));
 	}
-	let mut lifted_instructions = HashMap::new();
-	let mut offset: usize = 0;
-	while offset < text_data.len() {
-		let va = base_addr + offset as u64;
-		let (size, irs) = match angkat_blok_instruksi(&text_data[offset..], va, arch_disasm) {
+	let mut map_instr_lifted: HashMap<u64, (Vec<MicroInstruction>, usize)> = HashMap::new();
+	let mut off_set: usize = 0;
+	while off_set < data_teks.len() {
+		let va_kini = va_basis + off_set as u64;
+		let (sz_instr, vec_ir) = match lift_blok_instr(&data_teks[off_set..], va_kini, arch_disasm) {
 			Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-			_ => (1, vec![MicroInstruction::TidakTerdefinisi]),
+			_ => (1, vec![MicroInstruction::Undefined]),
 		};
-		if size == 0 { 
-			warn!("Disasm size 0 pada 0x{:x}, break", va);
+		if sz_instr == 0 { 
+			warn!("Disasm size 0 pada 0x{:x}, break", va_kini);
 			break; 
 		}
-		lifted_instructions.insert(va, (irs, size));
-		offset += size;
+		map_instr_lifted.insert(va_kini, (vec_ir, sz_instr));
+		off_set += sz_instr;
 	}
-	info!("Pass 0 (Angkat IR) selesai. {} instruksi diangkat.", lifted_instructions.len());
-	let mut leaders = HashSet::new();
-	let mut worklist = Vec::new();
-	let entry_point = binary.header.entry_point;
-	let text_end_va = base_addr + text_data.len() as u64;
-	if entry_point >= base_addr && entry_point < text_end_va {
-		 worklist.push(entry_point);
-		 leaders.insert(entry_point);
+	info!("Pass 0 (Angkat IR) selesai. {} instruksi diangkat.", map_instr_lifted.len());
+	let mut set_leader = HashSet::new();
+	let mut list_kerja = Vec::new();
+	let entry_point = biner.header.addr_masuk;
+	let va_akhir_teks = va_basis + data_teks.len() as u64;
+	if entry_point >= va_basis && entry_point < va_akhir_teks {
+		 list_kerja.push(entry_point);
+		 set_leader.insert(entry_point);
 	} else {
-		warn!("Entry point 0x{:x} di luar .text section (0x{:x} - 0x{:x}). Mulai dari basis .text.", entry_point, base_addr, text_end_va);
-		worklist.push(base_addr);
-		leaders.insert(base_addr);
+		warn!("Entry point 0x{:x} di luar .text section (0x{:x} - 0x{:x}). Mulai dari basis .text.", entry_point, va_basis, va_akhir_teks);
+		list_kerja.push(va_basis);
+		set_leader.insert(va_basis);
 	}
-	for sym in &binary.symbols {
-		if sym.symbol_type == "FUNC" && sym.addr >= base_addr && sym.addr < text_end_va {
-			if leaders.insert(sym.addr) {
-				worklist.push(sym.addr);
+	for sym in &biner.symbols {
+		if sym.symbol_type == "FUNC" && sym.addr >= va_basis && sym.addr < va_akhir_teks {
+			if set_leader.insert(sym.addr) {
+				list_kerja.push(sym.addr);
 			}
 		}
 	}
-	info!("Pass 1 (Leader Discovery) mulai dengan {} entries...", worklist.len());
-	while let Some(current_va) = worklist.pop() {
-		let mut va = current_va;
+	info!("Pass 1 (Leader Discovery) mulai dengan {} entries...", list_kerja.len());
+	while let Some(va_saat_ini) = list_kerja.pop() {
+		let mut va_kini = va_saat_ini;
 		loop {
-			let (irs, size) = match lifted_instructions.get(&va) {
+			let (vec_ir, sz_instr) = match map_instr_lifted.get(&va_kini) {
 				Some((irs, size)) => (irs.clone(), *size),
 				None => {
 					break;
 				}
 			};
-			if size == 0 { break; }
-			if let Some(last_ir) = irs.last() {
-				if is_ir_branch(last_ir) {
-					let fallthrough_va = va + size as u64;
-					if fallthrough_va < text_end_va && leaders.insert(fallthrough_va) {
-						worklist.push(fallthrough_va);
+			if sz_instr == 0 { break; }
+			if let Some(ir_akhir) = vec_ir.last() {
+				if is_ir_branch(ir_akhir) {
+					let va_lanjut = va_kini + sz_instr as u64;
+					if va_lanjut < va_akhir_teks && set_leader.insert(va_lanjut) {
+						list_kerja.push(va_lanjut);
 					}
-					let targets = match last_ir {
-						MicroInstruction::Lompat(expr) => tentukan_target_lompat(expr, binary),
-						MicroInstruction::LompatKondisi(_, expr) => tentukan_target_lompat(expr, binary),
-						MicroInstruction::Panggil(expr) => tentukan_target_lompat(expr, binary),
+					let list_target = match ir_akhir {
+						MicroInstruction::Jump(expr) => determine_target_jump(expr, biner),
+						MicroInstruction::JumpKondisi(_, expr) => determine_target_jump(expr, biner),
+						MicroInstruction::Call(expr) => determine_target_jump(expr, biner),
 						_ => vec![]
 					};
-					for target_va in targets {
-						if target_va >= base_addr && target_va < text_end_va && leaders.insert(target_va) {
-							worklist.push(target_va);
+					for va_target in list_target {
+						if va_target >= va_basis && va_target < va_akhir_teks && set_leader.insert(va_target) {
+							list_kerja.push(va_target);
 						}
 					}
 					break;
 				}
 			}
-			va += size as u64;
-			if va >= text_end_va || leaders.contains(&va) {
+			va_kini += sz_instr as u64;
+			if va_kini >= va_akhir_teks || set_leader.contains(&va_kini) {
 				break;
 			}
 		}
 	}
-	info!("Pass 1 selesai. Ditemukan {} leaders", leaders.len());
-	let mut graph = DiGraph::<BasicBlock, &'static str>::new();
-	let mut node_map = HashMap::<u64, NodeIndex>::new();
-	let dynamic_jump_node = graph.add_node(BasicBlock {
+	info!("Pass 1 selesai. Ditemukan {} leaders", set_leader.len());
+	let mut graf = DiGraph::<BasicBlock, &'static str>::new();
+	let mut peta_simpul = HashMap::<u64, NodeIndex>::new();
+	let simpul_lompat_dinamis = graf.add_node(BasicBlock {
 		va_start: 0,
 		va_end: 0,
 		instructions: Vec::new(),
 		size: 0,
 	});
-	let mut sorted_leaders: Vec<u64> = leaders.iter().cloned().collect();
-	sorted_leaders.sort();
+	let mut list_leader_urut: Vec<u64> = set_leader.iter().cloned().collect();
+	list_leader_urut.sort();
 	debug!("Pass 2: Membuat basic blocks");
-	for &leader_va in &sorted_leaders {
-		if node_map.contains_key(&leader_va) {
+	for &va_leader in &list_leader_urut {
+		if peta_simpul.contains_key(&va_leader) {
 			continue;
 		}
-		let mut block_instrs: Vec<(u64, Vec<MicroInstruction>)> = Vec::new();
-		let mut current_addr = leader_va;
-		let mut block_size: u64 = 0;
+		let mut vec_instr_blok: Vec<(u64, Vec<MicroInstruction>)> = Vec::new();
+		let mut va_kini = va_leader;
+		let mut sz_blok: u64 = 0;
 		loop {
-			let (irs, size) = match lifted_instructions.get(&current_addr) {
+			let (vec_ir, sz_instr) = match map_instr_lifted.get(&va_kini) {
 				Some((irs, size)) => (irs.clone(), *size),
 				None => {
 					break;
 				}
 			};
-			if size == 0 {
+			if sz_instr == 0 {
 				 break;
 			}
-			let last_ir = irs.last().cloned();
-			block_instrs.push((current_addr, irs));
-			block_size += size as u64;
-			current_addr += size as u64;
-			if let Some(ir) = last_ir {
+			let ir_akhir = vec_ir.last().cloned();
+			vec_instr_blok.push((va_kini, vec_ir));
+			sz_blok += sz_instr as u64;
+			va_kini += sz_instr as u64;
+			if let Some(ir) = ir_akhir {
 				if is_ir_branch(&ir) {
 					break;
 				}
 			}
-			if leaders.contains(&current_addr) || current_addr >= text_end_va {
+			if set_leader.contains(&va_kini) || va_kini >= va_akhir_teks {
 				break;
 			}
 		}
-		let block = BasicBlock {
-			va_start: leader_va,
-			va_end: current_addr,
-			instructions: block_instrs,
-			size: block_size,
+		let blok = BasicBlock {
+			va_start: va_leader,
+			va_end: va_kini,
+			instructions: vec_instr_blok,
+			size: sz_blok,
 		};
-		let node_idx = graph.add_node(block);
-		node_map.insert(leader_va, node_idx);
+		let idx_simpul = graf.add_node(blok);
+		peta_simpul.insert(va_leader, idx_simpul);
 	}
-	info!("Pass 2 selesai. Dibuat {} nodes", graph.node_count());
+	info!("Pass 2 selesai. Dibuat {} nodes", graf.node_count());
 	debug!("Pass 3: Menghubungkan edges");
-	let mut edges_to_add = Vec::new();
-	for (&_va, &node_idx) in &node_map {
-		let block = match graph.node_weight(node_idx) {
+	let mut list_sisi = Vec::new();
+	for (&_va, &idx_simpul) in &peta_simpul {
+		let blok = match graf.node_weight(idx_simpul) {
 			Some(b) => b,
 			None => continue,
 		};
-		let fallthrough_va = block.va_end;
-		let last_ir = block.instructions.last().and_then(|(_, irs)| irs.last());
-		if last_ir.is_none() {
-			if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-				edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough"));
+		let va_lanjut = blok.va_end;
+		let ir_akhir = blok.instructions.last().and_then(|(_, irs)| irs.last());
+		if ir_akhir.is_none() {
+			if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
+				list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough"));
 			}
 			continue;
 		}
-		match last_ir.unwrap() {
-			MicroInstruction::Lompat(target_expr) => {
-				let targets = tentukan_target_lompat(target_expr, binary);
-				if targets.is_empty() {
-					edges_to_add.push((node_idx, dynamic_jump_node, "Jump (Dynamic)"));
+		match ir_akhir.unwrap() {
+			MicroInstruction::Jump(expr_target) => {
+				let list_target = determine_target_jump(expr_target, biner);
+				if list_target.is_empty() {
+					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (Dynamic)"));
 				} else {
-					for target_va in targets {
-						if let Some(target_idx) = node_map.get(&target_va) {
-							edges_to_add.push((node_idx, *target_idx, "Jump"));
+					for va_target in list_target {
+						if let Some(idx_target) = peta_simpul.get(&va_target) {
+							list_sisi.push((idx_simpul, *idx_target, "Jump"));
 						}
 					}
 				}
 			}
-			MicroInstruction::LompatKondisi(_, target_expr) => {
-				let targets = tentukan_target_lompat(target_expr, binary);
-				if targets.is_empty() {
-					edges_to_add.push((node_idx, dynamic_jump_node, "Jump (True, Dynamic)"));
+			MicroInstruction::JumpKondisi(_, expr_target) => {
+				let list_target = determine_target_jump(expr_target, biner);
+				if list_target.is_empty() {
+					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (True, Dynamic)"));
 				} else {
-					 for target_va in targets {
-						if let Some(target_idx) = node_map.get(&target_va) {
-							edges_to_add.push((node_idx, *target_idx, "Jump (True)"));
+					 for va_target in list_target {
+						if let Some(idx_target) = peta_simpul.get(&va_target) {
+							list_sisi.push((idx_simpul, *idx_target, "Jump (True)"));
 						}
 					}
 				}
-				if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-					edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough (False)"));
+				if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
+					list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough (False)"));
 				}
 			}
-			MicroInstruction::Kembali => {
+			MicroInstruction::Return => {
 			}
-			MicroInstruction::Panggil(_) => {
-				 if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-					edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough (Call)"));
+			MicroInstruction::Call(_) => {
+				 if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
+					list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough (Call)"));
 				}
 			}
 			_ => {
-				if let Some(fallthrough_idx) = node_map.get(&fallthrough_va) {
-					edges_to_add.push((node_idx, *fallthrough_idx, "Fallthrough"));
+				if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
+					list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough"));
 				}
 			}
 		}
 	}
-	for (source, target, label) in edges_to_add {
-		graph.add_edge(source, target, label);
+	for (sumber, target, label) in list_sisi {
+		graf.add_edge(sumber, target, label);
 	}
-	info!("Pass 3 selesai. Dibuat {} edges", graph.edge_count());
-	Ok(graph)
+	info!("Pass 3 selesai. Dibuat {} edges", graf.edge_count());
+	Ok(graf)
 }
 
-pub fn generateCfgGraph(binary: &Binary) -> Result<String, ReToolsError> {
-	let graph = bangun_cfg_internal(binary)?;
-	let dot_str = Dot::with_config(&graph, &[]);
+pub fn create_graf_cfg(biner: &Binary) -> Result<String, ReToolsError> {
+	let graf = build_cfg_internal(biner)?;
+	let dot_str = Dot::with_config(&graf, &[]);
 	Ok(format!("{}", dot_str))
 }
 
-pub fn hitungDominators(graph: &DiGraph<BasicBlock, &'static str>, entry_node: NodeIndex) -> Dominators<NodeIndex> {
-	dominators::simple_fast(graph, entry_node)
+pub fn calc_dominators(graf: &DiGraph<BasicBlock, &'static str>, idx_simpul_entry: NodeIndex) -> Dominators<NodeIndex> {
+	dominators::simple_fast(graf, idx_simpul_entry)
 }
 
-pub fn deteksiNaturalLoops(graph: &DiGraph<BasicBlock, &'static str>, doms: &Dominators<NodeIndex>) -> Vec<NodeIndex> {
-	let mut headers = HashSet::new();
-	for edge in graph.edge_references() {
-		let source_node = edge.source();
-		let target_node = edge.target();
-		if doms.dominators(source_node).map_or(false, |mut iter| iter.any(|d| d == target_node)) {
-			headers.insert(target_node);
+pub fn detect_loop_natural(graf: &DiGraph<BasicBlock, &'static str>, doms: &Dominators<NodeIndex>) -> Vec<NodeIndex> {
+	let mut set_header = HashSet::new();
+	for sisi in graf.edge_references() {
+		let simpul_sumber = sisi.source();
+		let simpul_target = sisi.target();
+		if doms.dominators(simpul_sumber).map_or(false, |mut iter| iter.any(|d| d == simpul_target)) {
+			set_header.insert(simpul_target);
 		}
 	}
-	headers.into_iter().collect()
+	set_header.into_iter().collect()
 }
 
-pub fn cariFunctionExits(graph: &DiGraph<BasicBlock, &'static str>) -> Vec<NodeIndex> {
-	let mut exit_nodes = Vec::new();
-	for node_idx in graph.node_identifiers() {
-		if let Some(block) = graph.node_weight(node_idx) {
-			if let Some((_, last_irs)) = block.instructions.last() {
-				if let Some(MicroInstruction::Kembali) = last_irs.last() {
-					exit_nodes.push(node_idx);
+pub fn find_exit_func(graf: &DiGraph<BasicBlock, &'static str>) -> Vec<NodeIndex> {
+	let mut list_simpul_exit = Vec::new();
+	for idx_simpul in graf.node_identifiers() {
+		if let Some(blok) = graf.node_weight(idx_simpul) {
+			if let Some((_, irs_akhir)) = blok.instructions.last() {
+				if let Some(MicroInstruction::Return) = irs_akhir.last() {
+					list_simpul_exit.push(idx_simpul);
 				}
 			}
 		}
 	}
-	exit_nodes
+	list_simpul_exit
 }

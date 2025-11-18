@@ -5,7 +5,7 @@ use libc::{c_char, c_int};
 use std::slice;
 
 use crate::error::ReToolsError;
-use crate::utils::strncpy_rs;
+use crate::utils::copy_str_safe;
 use log::{debug, error};
 
 
@@ -34,18 +34,18 @@ pub struct C_Instruksi {
     pub valid: c_int,
 }
 
-pub fn instruksi_tidak_valid(size: c_int) -> C_Instruksi {
+pub fn create_instr_invalid(sz: c_int) -> C_Instruksi {
     let mut instr = C_Instruksi {
         mnemonic_instruksi: [0; 32],
         str_operand: [0; 64],
-        ukuran: size,
+        ukuran: sz,
         valid: 0,
     };
-    strncpy_rs("(invalid)", &mut instr.mnemonic_instruksi);
+    copy_str_safe("(invalid)", &mut instr.mnemonic_instruksi);
     instr
 }
 
-pub fn buat_instance_capstone_by_arch(
+pub fn create_instance_capstone_by_arch(
     arch: ArsitekturDisasm,
 ) -> Result<Capstone, ReToolsError> {
     debug!("Membuat instance Capstone untuk arsitektur: {:?}", arch);
@@ -102,32 +102,32 @@ pub fn buat_instance_capstone_by_arch(
     cs_builder_result.map_err(ReToolsError::from)
 }
 
-pub fn decode_satu_instruksi(
+pub fn decode_instr_single(
     ptr_data: *const u8,
     len_data: usize,
-    offset: usize,
-    instruction_base_va: u64,
+    off_set: usize,
+    va_basis: u64,
     arch: ArsitekturDisasm,
 ) -> C_Instruksi {
-    if offset >= len_data {
-        debug!("Offset di luar batas: {} >= {}", offset, len_data);
-        return instruksi_tidak_valid(0);
+    if off_set >= len_data {
+        debug!("Offset di luar batas: {} >= {}", off_set, len_data);
+        return create_instr_invalid(0);
     }
-    let data_slice = unsafe { slice::from_raw_parts(ptr_data, len_data) };
-    let code_slice = &data_slice[offset..];
-    if code_slice.is_empty() {
-        debug!("Code slice kosong pada offset: {}", offset);
-        return instruksi_tidak_valid(0);
+    let slice_data = unsafe { slice::from_raw_parts(ptr_data, len_data) };
+    let slice_kode = &slice_data[off_set..];
+    if slice_kode.is_empty() {
+        debug!("Code slice kosong pada offset: {}", off_set);
+        return create_instr_invalid(0);
     }
-    let cs_instance = match buat_instance_capstone_by_arch(arch) {
+    let obj_capstone = match create_instance_capstone_by_arch(arch) {
         Ok(cs) => cs,
         Err(e) => {
             error!("Gagal membuat instance Capstone: {}", e);
-            return instruksi_tidak_valid(1);
+            return create_instr_invalid(1);
         }
     };
-    let insns_result = cs_instance.disasm_count(code_slice, instruction_base_va, 1);
-    match insns_result {
+    let res_insns = obj_capstone.disasm_count(slice_kode, va_basis, 1);
+    match res_insns {
         Ok(insns) => {
             if let Some(insn) = insns.first() {
                 let mut c_instr = C_Instruksi {
@@ -136,11 +136,11 @@ pub fn decode_satu_instruksi(
                     ukuran: insn.bytes().len() as c_int,
                     valid: 1,
                 };
-                strncpy_rs(insn.mnemonic().unwrap_or(""), &mut c_instr.mnemonic_instruksi);
-                strncpy_rs(insn.op_str().unwrap_or(""), &mut c_instr.str_operand);
+                copy_str_safe(insn.mnemonic().unwrap_or(""), &mut c_instr.mnemonic_instruksi);
+                copy_str_safe(insn.op_str().unwrap_or(""), &mut c_instr.str_operand);
                 debug!(
                     "Disasm sukses: VA=0x{:x}, Mnem={}, Ops={}",
-                    instruction_base_va,
+                    va_basis,
                     insn.mnemonic().unwrap_or(""),
                     insn.op_str().unwrap_or("")
                 );
@@ -148,17 +148,17 @@ pub fn decode_satu_instruksi(
             } else {
                 debug!(
                     "Capstone tidak mengembalikan instruksi pada VA=0x{:x}",
-                    instruction_base_va
+                    va_basis
                 );
-                instruksi_tidak_valid(1)
+                create_instr_invalid(1)
             }
         }
         Err(e) => {
             error!(
                 "Capstone disasm error pada VA=0x{:x}: {}",
-                instruction_base_va, e
+                va_basis, e
             );
-            instruksi_tidak_valid(1)
+            create_instr_invalid(1)
         }
     }
 }

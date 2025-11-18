@@ -1,19 +1,19 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
 use crate::logic::ir::instruction::{MicroExpr, MicroInstruction, MicroOperand, SsaVariabel};
-use crate::logic::static_analysis::cfg::{hitungDominators, BasicBlock};
+use crate::logic::static_analysis::cfg::{calc_dominators, BasicBlock};
 use petgraph::algo::dominators::Dominators;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::IntoNodeIdentifiers;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
-struct RenameState {
-    var_stacks: HashMap<String, Vec<u32>>,
-    var_counters: HashMap<String, u32>,
+struct StateRename {
+    stack_var: HashMap<String, Vec<u32>>,
+    cnt_var: HashMap<String, u32>,
 }
 
-impl RenameState {
+impl StateRename {
     fn new(vars: &HashSet<String>) -> Self {
         let mut stacks = HashMap::new();
         let mut counters = HashMap::new();
@@ -21,126 +21,126 @@ impl RenameState {
             stacks.insert(var.clone(), vec![0]);
             counters.insert(var.clone(), 0);
         }
-        RenameState {
-            var_stacks: stacks,
-            var_counters: counters,
+        StateRename {
+            stack_var: stacks,
+            cnt_var: counters,
         }
     }
 }
 
 pub struct SsaBuilder<'a> {
-    cfg: &'a mut DiGraph<BasicBlock, &'static str>,
-    dominators: Dominators<NodeIndex>,
-    dominance_frontiers: HashMap<NodeIndex, HashSet<NodeIndex>>,
-    def_sites: HashMap<String, HashSet<NodeIndex>>,
-    original_vars: HashSet<String>,
+    graf_cfg: &'a mut DiGraph<BasicBlock, &'static str>,
+    doms: Dominators<NodeIndex>,
+    peta_frontier: HashMap<NodeIndex, HashSet<NodeIndex>>,
+    peta_situs_def: HashMap<String, HashSet<NodeIndex>>,
+    set_var_asli: HashSet<String>,
 }
 
 impl<'a> SsaBuilder<'a> {
     pub fn new(cfg: &'a mut DiGraph<BasicBlock, &'static str>) -> Self {
-        let start_node = cfg.node_identifiers().next().unwrap();
-        let doms = hitungDominators(cfg, start_node);
+        let idx_simpul_mulai = cfg.node_identifiers().next().unwrap();
+        let doms = calc_dominators(cfg, idx_simpul_mulai);
         SsaBuilder {
-            cfg,
-            dominators: doms,
-            dominance_frontiers: HashMap::new(),
-            def_sites: HashMap::new(),
-            original_vars: HashSet::new(),
+            graf_cfg: cfg,
+            doms,
+            peta_frontier: HashMap::new(),
+            peta_situs_def: HashMap::new(),
+            set_var_asli: HashSet::new(),
         }
     }
-    pub fn jalankan_konstruksi_ssa(&mut self) {
-        self.hitung_dominance_frontiers();
-        self.kumpulkan_variable_defs();
-        self.sisipkan_phi_nodes();
-        let mut state = RenameState::new(&self.original_vars);
-        let root = self.cfg.node_identifiers().next().unwrap();
-        self.rename_recursive(root, &mut state);
+    pub fn run_construct_ssa(&mut self) {
+        self.calc_dom_frontiers();
+        self.collect_var_defs();
+        self.insert_node_phi();
+        let mut state = StateRename::new(&self.set_var_asli);
+        let root = self.graf_cfg.node_identifiers().next().unwrap();
+        self.rename_rekursif(root, &mut state);
     }
-    fn hitung_dominance_frontiers(&mut self) {
+    fn calc_dom_frontiers(&mut self) {
         let mut frontiers: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
-        for node in self.cfg.node_indices() {
-            frontiers.insert(node, HashSet::new());
+        for idx_simpul in self.graf_cfg.node_indices() {
+            frontiers.insert(idx_simpul, HashSet::new());
         }
-        for node in self.cfg.node_indices() {
-            let predecessors: Vec<NodeIndex> = self.cfg
-                .neighbors_directed(node, Direction::Incoming)
+        for idx_simpul in self.graf_cfg.node_indices() {
+            let list_pred: Vec<NodeIndex> = self.graf_cfg
+                .neighbors_directed(idx_simpul, Direction::Incoming)
                 .collect();
-            if predecessors.len() >= 2 {
-                for &p in &predecessors {
-                    let mut runner = p;
-                    while runner != self.dominators.immediate_dominator(node).unwrap_or(runner) && runner != node {
-                        if let Some(set) = frontiers.get_mut(&runner) {
-                            set.insert(node);
+            if list_pred.len() >= 2 {
+                for &p in &list_pred {
+                    let mut simpul_jalan = p;
+                    while simpul_jalan != self.doms.immediate_dominator(idx_simpul).unwrap_or(simpul_jalan) && simpul_jalan != idx_simpul {
+                        if let Some(set) = frontiers.get_mut(&simpul_jalan) {
+                            set.insert(idx_simpul);
                         }
-                        match self.dominators.immediate_dominator(runner) {
-                            Some(idom) if idom != runner => runner = idom,
+                        match self.doms.immediate_dominator(simpul_jalan) {
+                            Some(idom) if idom != simpul_jalan => simpul_jalan = idom,
                             _ => break,
                         }
                     }
                 }
             }
         }
-        self.dominance_frontiers = frontiers;
+        self.peta_frontier = frontiers;
     }
-    fn kumpulkan_variable_defs(&mut self) {
-        for node in self.cfg.node_indices() {
-            let block = &self.cfg[node];
-            for (_, instrs) in &block.instructions {
-                for instr in instrs {
+    fn collect_var_defs(&mut self) {
+        for idx_simpul in self.graf_cfg.node_indices() {
+            let blok = &self.graf_cfg[idx_simpul];
+            for (_, list_instr) in &blok.instructions {
+                for instr in list_instr {
                     if let MicroInstruction::Assign(dest, _) = instr {
-                        self.def_sites
-                            .entry(dest.nama_dasar.clone())
+                        self.peta_situs_def
+                            .entry(dest.id_reg.clone())
                             .or_default()
-                            .insert(node);
-                        self.original_vars.insert(dest.nama_dasar.clone());
+                            .insert(idx_simpul);
+                        self.set_var_asli.insert(dest.id_reg.clone());
                     } else if let MicroInstruction::AtomicRMW { tujuan_lama: Some(dest), .. } = instr {
-                        self.def_sites
-                             .entry(dest.nama_dasar.clone())
+                        self.peta_situs_def
+                             .entry(dest.id_reg.clone())
                              .or_default()
-                             .insert(node);
-                        self.original_vars.insert(dest.nama_dasar.clone());
-                    } else if let MicroInstruction::InstruksiVektor { tujuan, .. } = instr {
-                         self.def_sites
-                             .entry(tujuan.nama_dasar.clone())
+                             .insert(idx_simpul);
+                        self.set_var_asli.insert(dest.id_reg.clone());
+                    } else if let MicroInstruction::VectorOp { tujuan, .. } = instr {
+                         self.peta_situs_def
+                             .entry(tujuan.id_reg.clone())
                              .or_default()
-                             .insert(node);
-                        self.original_vars.insert(tujuan.nama_dasar.clone());
+                             .insert(idx_simpul);
+                        self.set_var_asli.insert(tujuan.id_reg.clone());
                     }
                 }
             }
         }
     }
-    fn sisipkan_phi_nodes(&mut self) {
-        for var in self.original_vars.clone() {
-            let mut worklist: Vec<NodeIndex> = self.def_sites.get(&var).unwrap().iter().cloned().collect();
+    fn insert_node_phi(&mut self) {
+        for var in self.set_var_asli.clone() {
+            let mut list_kerja: Vec<NodeIndex> = self.peta_situs_def.get(&var).unwrap().iter().cloned().collect();
             let mut has_phi = HashSet::new();
             let mut processed = HashSet::new();
-            while let Some(n) = worklist.pop() {
-                if let Some(frontier) = self.dominance_frontiers.get(&n) {
+            while let Some(n) = list_kerja.pop() {
+                if let Some(frontier) = self.peta_frontier.get(&n) {
                     for &y in frontier {
                         if !has_phi.contains(&y) {
-                            let preds: Vec<u64> = self.cfg
+                            let preds: Vec<u64> = self.graf_cfg
                                 .neighbors_directed(y, Direction::Incoming)
-                                .map(|p| self.cfg[p].va_start) 
+                                .map(|p| self.graf_cfg[p].va_start) 
                                 .collect();
                             let phi_sources = preds.iter().map(|&va| (
-                                SsaVariabel { nama_dasar: var.clone(), versi: 0 },
+                                SsaVariabel { id_reg: var.clone(), versi: 0 },
                                 va
                             )).collect();
                             let phi_instr = MicroInstruction::Phi {
-                                tujuan: SsaVariabel { nama_dasar: var.clone(), versi: 0 },
+                                tujuan: SsaVariabel { id_reg: var.clone(), versi: 0 },
                                 sumber: phi_sources,
                             };
-                            if let Some(block) = self.cfg.node_weight_mut(y) {
-                                if block.instructions.is_empty() {
-                                     block.instructions.push((block.va_start, vec![phi_instr]));
+                            if let Some(blok) = self.graf_cfg.node_weight_mut(y) {
+                                if blok.instructions.is_empty() {
+                                     blok.instructions.push((blok.va_start, vec![phi_instr]));
                                 } else {
-                                     block.instructions[0].1.insert(0, phi_instr);
+                                     blok.instructions[0].1.insert(0, phi_instr);
                                 }
                             }
                             has_phi.insert(y);
-                            if !processed.contains(&y) && !self.def_sites.get(&var).unwrap().contains(&y) {
-                                worklist.push(y);
+                            if !processed.contains(&y) && !self.peta_situs_def.get(&var).unwrap().contains(&y) {
+                                list_kerja.push(y);
                                 processed.insert(y);
                             }
                         }
@@ -149,45 +149,45 @@ impl<'a> SsaBuilder<'a> {
             }
         }
     }
-    fn rename_recursive(&mut self, u: NodeIndex, state: &mut RenameState) {
-        let mut push_counts: HashMap<String, usize> = HashMap::new();
-        if let Some(block) = self.cfg.node_weight_mut(u) {
-            for (_, instrs) in &mut block.instructions {
-                for instr in instrs {
+    fn rename_rekursif(&mut self, u: NodeIndex, state: &mut StateRename) {
+        let mut cnt_push: HashMap<String, usize> = HashMap::new();
+        if let Some(blok) = self.graf_cfg.node_weight_mut(u) {
+            for (_, list_instr) in &mut blok.instructions {
+                for instr in list_instr {
                     match instr {
                         MicroInstruction::Phi { tujuan, .. } => {
-                            let base = &tujuan.nama_dasar;
-                            let new_ver = *state.var_counters.get(base).unwrap() + 1;
-                            state.var_counters.insert(base.clone(), new_ver);
-                            state.var_stacks.get_mut(base).unwrap().push(new_ver);
+                            let base = &tujuan.id_reg;
+                            let new_ver = *state.cnt_var.get(base).unwrap() + 1;
+                            state.cnt_var.insert(base.clone(), new_ver);
+                            state.stack_var.get_mut(base).unwrap().push(new_ver);
                             tujuan.versi = new_ver;
-                            *push_counts.entry(base.clone()).or_default() += 1;
+                            *cnt_push.entry(base.clone()).or_default() += 1;
                         }
                         _ => {
-                           Self::rename_uses_in_instr(instr, state);
+                           Self::rename_use_instr(instr, state);
                            if let Some(dest_var) = Self::get_def_var_mut(instr) {
-                               let base = &dest_var.nama_dasar;
-                               let new_ver = *state.var_counters.get(base).unwrap() + 1;
-                               state.var_counters.insert(base.clone(), new_ver);
-                               state.var_stacks.get_mut(base).unwrap().push(new_ver);
+                               let base = &dest_var.id_reg;
+                               let new_ver = *state.cnt_var.get(base).unwrap() + 1;
+                               state.cnt_var.insert(base.clone(), new_ver);
+                               state.stack_var.get_mut(base).unwrap().push(new_ver);
                                dest_var.versi = new_ver;
-                               *push_counts.entry(base.clone()).or_default() += 1;
+                               *cnt_push.entry(base.clone()).or_default() += 1;
                            }
                         }
                     }
                 }
             }
         }
-        let u_va = self.cfg[u].va_start;
-        let successors: Vec<NodeIndex> = self.cfg.neighbors_directed(u, Direction::Outgoing).collect();
-        for succ_idx in successors {
-             if let Some(succ_block) = self.cfg.node_weight_mut(succ_idx) {
-                 for (_, instrs) in &mut succ_block.instructions {
-                     for instr in instrs {
+        let va_u = self.graf_cfg[u].va_start;
+        let successors: Vec<NodeIndex> = self.graf_cfg.neighbors_directed(u, Direction::Outgoing).collect();
+        for idx_succ in successors {
+             if let Some(blok_succ) = self.graf_cfg.node_weight_mut(idx_succ) {
+                 for (_, list_instr) in &mut blok_succ.instructions {
+                     for instr in list_instr {
                          if let MicroInstruction::Phi { sumber, .. } = instr {
-                             for (src_var, src_block_va) in sumber {
-                                 if *src_block_va == u_va {
-                                     if let Some(stack) = state.var_stacks.get(&src_var.nama_dasar) {
+                             for (src_var, src_blok_va) in sumber {
+                                 if *src_blok_va == va_u {
+                                     if let Some(stack) = state.stack_var.get(&src_var.id_reg) {
                                          if let Some(&ver) = stack.last() {
                                              src_var.versi = ver;
                                          }
@@ -199,47 +199,47 @@ impl<'a> SsaBuilder<'a> {
                  }
              }
         }
-        let mut children: Vec<NodeIndex> = self.dominators
+        let mut children: Vec<NodeIndex> = self.doms
             .immediately_dominated_by(u)
             .map(|n| n)
             .collect();
         children.sort_by(|a, b| a.index().cmp(&b.index()));
         for v in children {
             if v != u {
-                self.rename_recursive(v, state);
+                self.rename_rekursif(v, state);
             }
         }
-        for (var, count) in push_counts {
-            let stack = state.var_stacks.get_mut(&var).unwrap();
+        for (var, count) in cnt_push {
+            let stack = state.stack_var.get_mut(&var).unwrap();
             for _ in 0..count {
                 stack.pop();
             }
         }
     }
-    fn rename_uses_in_instr(instr: &mut MicroInstruction, state: &RenameState) {
+    fn rename_use_instr(instr: &mut MicroInstruction, state: &StateRename) {
         match instr {
             MicroInstruction::Assign(_, expr) 
-            | MicroInstruction::Lompat(expr) 
-            | MicroInstruction::Panggil(expr) 
+            | MicroInstruction::Jump(expr) 
+            | MicroInstruction::Call(expr) 
             | MicroInstruction::UpdateFlag(_, expr) => {
-                Self::rename_uses_in_expr(expr, state);
+                Self::rename_use_expr(expr, state);
             },
-            MicroInstruction::SimpanMemori(addr, val) => {
-                Self::rename_uses_in_expr(addr, state);
-                Self::rename_uses_in_expr(val, state);
+            MicroInstruction::StoreMemori(addr, val) => {
+                Self::rename_use_expr(addr, state);
+                Self::rename_use_expr(val, state);
             },
-            MicroInstruction::LompatKondisi(cond, target) => {
-                Self::rename_uses_in_expr(cond, state);
-                Self::rename_uses_in_expr(target, state);
+            MicroInstruction::JumpKondisi(cond, target) => {
+                Self::rename_use_expr(cond, state);
+                Self::rename_use_expr(target, state);
             },
-            MicroInstruction::AtomicRMW { alamat, nilai, .. } => {
-                Self::rename_uses_in_expr(alamat, state);
-                Self::rename_uses_in_expr(nilai, state);
+            MicroInstruction::AtomicRMW { addr_mem, nilai, .. } => {
+                Self::rename_use_expr(addr_mem, state);
+                Self::rename_use_expr(nilai, state);
             },
-            MicroInstruction::InstruksiVektor { operand_1, operand_2, .. } => {
-                for op in operand_1.iter_mut().chain(operand_2.iter_mut()) {
+            MicroInstruction::VectorOp { op_1, op_2, .. } => {
+                for op in op_1.iter_mut().chain(op_2.iter_mut()) {
                     if let MicroOperand::SsaVar(v) = op {
-                        if let Some(stack) = state.var_stacks.get(&v.nama_dasar) {
+                        if let Some(stack) = state.stack_var.get(&v.id_reg) {
                              if let Some(&ver) = stack.last() {
                                  v.versi = ver;
                              }
@@ -250,23 +250,23 @@ impl<'a> SsaBuilder<'a> {
             _ => {}
         }
     }
-    fn rename_uses_in_expr(expr: &mut MicroExpr, state: &RenameState) {
+    fn rename_use_expr(expr: &mut MicroExpr, state: &StateRename) {
         match expr {
             MicroExpr::Operand(MicroOperand::SsaVar(v)) => {
-                if let Some(stack) = state.var_stacks.get(&v.nama_dasar) {
+                if let Some(stack) = state.stack_var.get(&v.id_reg) {
                     if let Some(&ver) = stack.last() {
                         v.versi = ver;
                     }
                 }
             }
-            MicroExpr::OperasiUnary(_, inner) | MicroExpr::MuatMemori(inner) => {
-                Self::rename_uses_in_expr(inner, state);
+            MicroExpr::UnaryOp(_, inner) | MicroExpr::LoadMemori(inner) => {
+                Self::rename_use_expr(inner, state);
             }
-            MicroExpr::OperasiBiner(_, left, right) 
-            | MicroExpr::Bandingkan(left, right) 
-            | MicroExpr::UjiBit(left, right) => {
-                Self::rename_uses_in_expr(left, state);
-                Self::rename_uses_in_expr(right, state);
+            MicroExpr::BinaryOp(_, left, right) 
+            | MicroExpr::Compare(left, right) 
+            | MicroExpr::TestBit(left, right) => {
+                Self::rename_use_expr(left, state);
+                Self::rename_use_expr(right, state);
             }
             _ => {}
         }
@@ -275,13 +275,13 @@ impl<'a> SsaBuilder<'a> {
         match instr {
             MicroInstruction::Assign(dest, _) => Some(dest),
             MicroInstruction::AtomicRMW { tujuan_lama: Some(dest), .. } => Some(dest),
-            MicroInstruction::InstruksiVektor { tujuan, .. } => Some(tujuan),
+            MicroInstruction::VectorOp { tujuan, .. } => Some(tujuan),
             _ => None
         }
     }
 }
 
-pub fn konstruksi_ssa_lengkap(cfg: &mut DiGraph<BasicBlock, &'static str>) {
+pub fn construct_ssa_complete(cfg: &mut DiGraph<BasicBlock, &'static str>) {
     let mut builder = SsaBuilder::new(cfg);
-    builder.jalankan_konstruksi_ssa();
+    builder.run_construct_ssa();
 }

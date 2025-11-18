@@ -2,7 +2,7 @@
 
 use crate::logic::ir::instruction::{MicroBinOp, MicroExpr, MicroInstruction, MicroOperand};
 use crate::logic::static_analysis::cfg::BasicBlock;
-use crate::logic::data_flow::liveness::hitung_analisis_liveness;
+use crate::logic::data_flow::liveness::calc_live_var;
 use petgraph::graph::DiGraph;
 use std::collections::{HashMap, HashSet};
 
@@ -14,28 +14,28 @@ impl IrOptimizer {
     pub fn new() -> Self {
         IrOptimizer { changed: false }
     }
-    pub fn jalankan_optimasi(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
+    pub fn run_pass_opt(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
         loop {
             self.changed = false;
-            self.pass_constant_propagation(cfg);
-            self.pass_expression_simplification(cfg);
-            self.pass_dead_code_elimination(cfg);
+            self.exec_prop_const(cfg);
+            self.exec_simp_expr(cfg);
+            self.exec_dce(cfg);
             if !self.changed {
                 break;
             }
         }
     }
-    fn pass_constant_propagation(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
-        let mut constants_map: HashMap<String, u64> = HashMap::new();
-        for node_idx in cfg.node_indices() {
-            let block = &cfg[node_idx];
-            for (_, instrs) in &block.instructions {
-                for instr in instrs {
+    fn exec_prop_const(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
+        let mut peta_konstanta: HashMap<String, u64> = HashMap::new();
+        for idx_simpul in cfg.node_indices() {
+            let blok = &cfg[idx_simpul];
+            for (_, list_instr) in &blok.instructions {
+                for instr in list_instr {
                     match instr {
-                         MicroInstruction::Assign(dest, expr) => {
-                            if let MicroExpr::Operand(MicroOperand::Konstanta(val)) = expr {
-                                constants_map.insert(format!("{}_{}", dest.nama_dasar, dest.versi), *val);
-                                constants_map.insert(dest.nama_dasar.clone(), *val); 
+                         MicroInstruction::Assign(tujuan, ekspresi) => {
+                            if let MicroExpr::Operand(MicroOperand::Konstanta(nilai)) = ekspresi {
+                                peta_konstanta.insert(format!("{}_{}", tujuan.id_reg, tujuan.versi), *nilai);
+                                peta_konstanta.insert(tujuan.id_reg.clone(), *nilai); 
                             }
                         }
                         MicroInstruction::Phi { tujuan: _tujuan, sumber } => {
@@ -53,40 +53,40 @@ impl IrOptimizer {
                 }
             }
         }
-        if constants_map.is_empty() {
+        if peta_konstanta.is_empty() {
             return;
         }
-        for node_idx in cfg.node_indices() {
-            let block = &mut cfg[node_idx];
-            for (_, instrs) in &mut block.instructions {
-                for instr in instrs.iter_mut() {
+        for idx_simpul in cfg.node_indices() {
+            let blok = &mut cfg[idx_simpul];
+            for (_, list_instr) in &mut blok.instructions {
+                for instr in list_instr.iter_mut() {
                     match instr {
-                        MicroInstruction::Assign(_, expr) |
-                        MicroInstruction::SimpanMemori(expr, _) | 
-                        MicroInstruction::Lompat(expr) |
-                        MicroInstruction::LompatKondisi(expr, _) |
-                        MicroInstruction::Panggil(expr) => {
-                            if self.ganti_variabel_dengan_konstanta(expr, &constants_map) {
+                        MicroInstruction::Assign(_, ekspresi) |
+                        MicroInstruction::StoreMemori(ekspresi, _) | 
+                        MicroInstruction::Jump(ekspresi) |
+                        MicroInstruction::JumpKondisi(ekspresi, _) |
+                        MicroInstruction::Call(ekspresi) => {
+                            if self.replace_var_const(ekspresi, &peta_konstanta) {
                                 self.changed = true;
                             }
-                            if let MicroInstruction::SimpanMemori(_, data) = instr {
-                                if self.ganti_variabel_dengan_konstanta(data, &constants_map) {
+                            if let MicroInstruction::StoreMemori(_, data) = instr {
+                                if self.replace_var_const(data, &peta_konstanta) {
                                     self.changed = true;
                                 }
                             }
-                            if let MicroInstruction::LompatKondisi(_, target) = instr {
-                                if self.ganti_variabel_dengan_konstanta(target, &constants_map) {
+                            if let MicroInstruction::JumpKondisi(_, target) = instr {
+                                if self.replace_var_const(target, &peta_konstanta) {
                                     self.changed = true;
                                 }
                             }
                         }
-                        MicroInstruction::AtomicRMW { alamat, nilai, .. } => {
-                            let c1 = self.ganti_variabel_dengan_konstanta(alamat, &constants_map);
-                            let c2 = self.ganti_variabel_dengan_konstanta(nilai, &constants_map);
+                        MicroInstruction::AtomicRMW { addr_mem: alamat, nilai, .. } => {
+                            let c1 = self.replace_var_const(alamat, &peta_konstanta);
+                            let c2 = self.replace_var_const(nilai, &peta_konstanta);
                             if c1 || c2 { self.changed = true; }
                         }
-                        MicroInstruction::UpdateFlag(_, expr) => {
-                            if self.ganti_variabel_dengan_konstanta(expr, &constants_map) {
+                        MicroInstruction::UpdateFlag(_, ekspresi) => {
+                            if self.replace_var_const(ekspresi, &peta_konstanta) {
                                 self.changed = true;
                             }
                         }
@@ -96,25 +96,25 @@ impl IrOptimizer {
             }
         }
     }
-    fn ganti_variabel_dengan_konstanta(&self, expr: &mut MicroExpr, constants: &HashMap<String, u64>) -> bool {
+    fn replace_var_const(&self, ekspresi: &mut MicroExpr, peta_konstanta: &HashMap<String, u64>) -> bool {
         let mut modified = false;
-        match expr {
+        match ekspresi {
             MicroExpr::Operand(MicroOperand::SsaVar(var)) => {
-                let key = format!("{}_{}", var.nama_dasar, var.versi);
-                if let Some(val) = constants.get(&key).or_else(|| constants.get(&var.nama_dasar)) {
-                    *expr = MicroExpr::Operand(MicroOperand::Konstanta(*val));
+                let kunci = format!("{}_{}", var.id_reg, var.versi);
+                if let Some(nilai) = peta_konstanta.get(&kunci).or_else(|| peta_konstanta.get(&var.id_reg)) {
+                    *ekspresi = MicroExpr::Operand(MicroOperand::Konstanta(*nilai));
                     modified = true;
                 }
             }
-            MicroExpr::OperasiUnary(_, inner) |
-            MicroExpr::MuatMemori(inner) => {
-                modified = self.ganti_variabel_dengan_konstanta(inner, constants);
+            MicroExpr::UnaryOp(_, inner) |
+            MicroExpr::LoadMemori(inner) => {
+                modified = self.replace_var_const(inner, peta_konstanta);
             }
-            MicroExpr::OperasiBiner(_, left, right) |
-            MicroExpr::Bandingkan(left, right) |
-            MicroExpr::UjiBit(left, right) => {
-                let m1 = self.ganti_variabel_dengan_konstanta(left, constants);
-                let m2 = self.ganti_variabel_dengan_konstanta(right, constants);
+            MicroExpr::BinaryOp(_, kiri, kanan) |
+            MicroExpr::Compare(kiri, kanan) |
+            MicroExpr::TestBit(kiri, kanan) => {
+                let m1 = self.replace_var_const(kiri, peta_konstanta);
+                let m2 = self.replace_var_const(kanan, peta_konstanta);
                 modified = m1 || m2;
             }
             MicroExpr::Operand(MicroOperand::Konstanta(_)) => {}
@@ -122,29 +122,29 @@ impl IrOptimizer {
         }
         modified
     }
-    fn pass_expression_simplification(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
-        for node_idx in cfg.node_indices() {
-            let block = &mut cfg[node_idx];
-            for (_, instrs) in &mut block.instructions {
-                for instr in instrs.iter_mut() {
+    fn exec_simp_expr(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
+        for idx_simpul in cfg.node_indices() {
+            let blok = &mut cfg[idx_simpul];
+            for (_, list_instr) in &mut blok.instructions {
+                for instr in list_instr.iter_mut() {
                     match instr {
-                        MicroInstruction::Assign(_, expr) => {
-                            if self.sederhanakan_ekspresi(expr) {
+                        MicroInstruction::Assign(_, ekspresi) => {
+                            if self.simplify_expr(ekspresi) {
                                 self.changed = true;
                             }
                         }
-                        MicroInstruction::SimpanMemori(addr, data) => {
-                            let c1 = self.sederhanakan_ekspresi(addr);
-                            let c2 = self.sederhanakan_ekspresi(data);
+                        MicroInstruction::StoreMemori(addr, data) => {
+                            let c1 = self.simplify_expr(addr);
+                            let c2 = self.simplify_expr(data);
                             if c1 || c2 { self.changed = true; }
                         }
-                        MicroInstruction::LompatKondisi(cond, target) => {
-                            let c1 = self.sederhanakan_ekspresi(cond);
-                            let c2 = self.sederhanakan_ekspresi(target);
+                        MicroInstruction::JumpKondisi(kondisi, target) => {
+                            let c1 = self.simplify_expr(kondisi);
+                            let c2 = self.simplify_expr(target);
                             if c1 || c2 { self.changed = true; }
                         }
-                        MicroInstruction::Lompat(expr) | MicroInstruction::Panggil(expr) => {
-                            if self.sederhanakan_ekspresi(expr) {
+                        MicroInstruction::Jump(ekspresi) | MicroInstruction::Call(ekspresi) => {
+                            if self.simplify_expr(ekspresi) {
                                 self.changed = true;
                             }
                         }
@@ -154,14 +154,14 @@ impl IrOptimizer {
             }
         }
     }
-    fn sederhanakan_ekspresi(&self, expr: &mut MicroExpr) -> bool {
-        match expr {
-            MicroExpr::OperasiBiner(op, left, right) => {
-                self.sederhanakan_ekspresi(left);
-                self.sederhanakan_ekspresi(right);
-                match (&mut **left, &mut **right) {
+    fn simplify_expr(&self, ekspresi: &mut MicroExpr) -> bool {
+        match ekspresi {
+            MicroExpr::BinaryOp(op, kiri, kanan) => {
+                self.simplify_expr(kiri);
+                self.simplify_expr(kanan);
+                match (&mut **kiri, &mut **kanan) {
                     (MicroExpr::Operand(MicroOperand::Konstanta(c1)), MicroExpr::Operand(MicroOperand::Konstanta(c2))) => {
-                        let res = match op {
+                        let hasil = match op {
                             MicroBinOp::Add => c1.wrapping_add(*c2),
                             MicroBinOp::Sub => c1.wrapping_sub(*c2),
                             MicroBinOp::Mul => c1.wrapping_mul(*c2),
@@ -171,23 +171,23 @@ impl IrOptimizer {
                             MicroBinOp::Xor => *c1 ^ *c2,
                             _ => return false,
                         };
-                        *expr = MicroExpr::Operand(MicroOperand::Konstanta(res));
+                        *ekspresi = MicroExpr::Operand(MicroOperand::Konstanta(hasil));
                         return true;
                     }
                     (inner, MicroExpr::Operand(MicroOperand::Konstanta(0))) if matches!(op, MicroBinOp::Add | MicroBinOp::Sub) => {
-                        *expr = inner.clone();
+                        *ekspresi = inner.clone();
                         return true;
                     }
                     (MicroExpr::Operand(MicroOperand::Konstanta(0)), inner) if matches!(op, MicroBinOp::Add) => {
-                        *expr = inner.clone();
+                        *ekspresi = inner.clone();
                         return true;
                     }
                     (inner, MicroExpr::Operand(MicroOperand::Konstanta(1))) if matches!(op, MicroBinOp::Mul | MicroBinOp::Div) => {
-                        *expr = inner.clone();
+                        *ekspresi = inner.clone();
                         return true;
                     }
                     (_, MicroExpr::Operand(MicroOperand::Konstanta(0))) if matches!(op, MicroBinOp::Mul) => {
-                        *expr = MicroExpr::Operand(MicroOperand::Konstanta(0));
+                        *ekspresi = MicroExpr::Operand(MicroOperand::Konstanta(0));
                         return true;
                     }
                     _ => false
@@ -196,90 +196,90 @@ impl IrOptimizer {
             _ => false,
         }
     }
-    fn pass_dead_code_elimination(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
-        let liveness_info = hitung_analisis_liveness(cfg);
-        for node_idx in cfg.node_indices() {
-            if let Some(block) = cfg.node_weight_mut(node_idx) {
-                let mut live_vars = liveness_info.live_out.get(&node_idx).cloned().unwrap_or_default();
-                let mut new_instrs = Vec::new();
-                for (va, instrs) in block.instructions.iter().rev() {
-                    let mut block_instrs_rev = Vec::new();
-                    for instr in instrs.iter().rev() {
+    fn exec_dce(&mut self, cfg: &mut DiGraph<BasicBlock, &'static str>) {
+        let info_liveness = calc_live_var(cfg);
+        for idx_simpul in cfg.node_indices() {
+            if let Some(blok) = cfg.node_weight_mut(idx_simpul) {
+                let mut set_hidup = info_liveness.live_out.get(&idx_simpul).cloned().unwrap_or_default();
+                let mut list_instr_baru = Vec::new();
+                for (va, list_instr) in blok.instructions.iter().rev() {
+                    let mut blok_instr_rev = Vec::new();
+                    for instr in list_instr.iter().rev() {
                         match instr {
-                            MicroInstruction::Assign(dest, expr) => {
-                                if live_vars.contains(&dest.nama_dasar) {
-                                    live_vars.remove(&dest.nama_dasar);
-                                    self.tambah_uses_ke_live(expr, &mut live_vars);
-                                    block_instrs_rev.push(instr.clone());
+                            MicroInstruction::Assign(tujuan, ekspresi) => {
+                                if set_hidup.contains(&tujuan.id_reg) {
+                                    set_hidup.remove(&tujuan.id_reg);
+                                    self.insert_use_live(ekspresi, &mut set_hidup);
+                                    blok_instr_rev.push(instr.clone());
                                 } else {
                                     self.changed = true;
                                 }
                             }
                             MicroInstruction::Phi { tujuan, sumber } => {
-                                if live_vars.contains(&tujuan.nama_dasar) {
-                                    live_vars.remove(&tujuan.nama_dasar);
+                                if set_hidup.contains(&tujuan.id_reg) {
+                                    set_hidup.remove(&tujuan.id_reg);
                                     for (src, _) in sumber {
-                                        live_vars.insert(src.nama_dasar.clone());
+                                        set_hidup.insert(src.id_reg.clone());
                                     }
-                                    block_instrs_rev.push(instr.clone());
+                                    blok_instr_rev.push(instr.clone());
                                 } else {
                                     self.changed = true;
                                 }
                             }
-                            MicroInstruction::SimpanMemori(addr, data) => {
-                                self.tambah_uses_ke_live(addr, &mut live_vars);
-                                self.tambah_uses_ke_live(data, &mut live_vars);
-                                block_instrs_rev.push(instr.clone());
+                            MicroInstruction::StoreMemori(addr, data) => {
+                                self.insert_use_live(addr, &mut set_hidup);
+                                self.insert_use_live(data, &mut set_hidup);
+                                blok_instr_rev.push(instr.clone());
                             }
-                            MicroInstruction::LompatKondisi(cond, target) => {
-                                self.tambah_uses_ke_live(cond, &mut live_vars);
-                                self.tambah_uses_ke_live(target, &mut live_vars);
-                                block_instrs_rev.push(instr.clone());
+                            MicroInstruction::JumpKondisi(kondisi, target) => {
+                                self.insert_use_live(kondisi, &mut set_hidup);
+                                self.insert_use_live(target, &mut set_hidup);
+                                blok_instr_rev.push(instr.clone());
                             }
-                            MicroInstruction::Lompat(target) | MicroInstruction::Panggil(target) => {
-                                self.tambah_uses_ke_live(target, &mut live_vars);
-                                block_instrs_rev.push(instr.clone());
+                            MicroInstruction::Jump(target) | MicroInstruction::Call(target) => {
+                                self.insert_use_live(target, &mut set_hidup);
+                                blok_instr_rev.push(instr.clone());
                             }
-                            MicroInstruction::AtomicRMW { alamat, nilai, tujuan_lama, .. } => {
-                                self.tambah_uses_ke_live(alamat, &mut live_vars);
-                                self.tambah_uses_ke_live(nilai, &mut live_vars);
+                            MicroInstruction::AtomicRMW { addr_mem: alamat, nilai, tujuan_lama, .. } => {
+                                self.insert_use_live(alamat, &mut set_hidup);
+                                self.insert_use_live(nilai, &mut set_hidup);
                                 if let Some(old) = tujuan_lama {
-                                    if live_vars.contains(&old.nama_dasar) {
-                                        live_vars.remove(&old.nama_dasar);
+                                    if set_hidup.contains(&old.id_reg) {
+                                        set_hidup.remove(&old.id_reg);
                                     }
                                 }
-                                block_instrs_rev.push(instr.clone());
+                                blok_instr_rev.push(instr.clone());
                             }
-                            MicroInstruction::UpdateFlag(_, expr) => {
-                                self.tambah_uses_ke_live(expr, &mut live_vars);
-                                block_instrs_rev.push(instr.clone());
+                            MicroInstruction::UpdateFlag(_, ekspresi) => {
+                                self.insert_use_live(ekspresi, &mut set_hidup);
+                                blok_instr_rev.push(instr.clone());
                             }
                             _ => {
-                                block_instrs_rev.push(instr.clone());
+                                blok_instr_rev.push(instr.clone());
                             }
                         }
                     }
-                    block_instrs_rev.reverse();
-                    new_instrs.push((*va, block_instrs_rev));
+                    blok_instr_rev.reverse();
+                    list_instr_baru.push((*va, blok_instr_rev));
                 }
-                new_instrs.reverse();
-                block.instructions = new_instrs;
+                list_instr_baru.reverse();
+                blok.instructions = list_instr_baru;
             }
         }
     }
-    fn tambah_uses_ke_live(&self, expr: &MicroExpr, live: &mut HashSet<String>) {
-        match expr {
+    fn insert_use_live(&self, ekspresi: &MicroExpr, set_hidup: &mut HashSet<String>) {
+        match ekspresi {
             MicroExpr::Operand(MicroOperand::SsaVar(var)) => {
-                live.insert(var.nama_dasar.clone());
+                set_hidup.insert(var.id_reg.clone());
             }
-            MicroExpr::OperasiUnary(_, inner) | MicroExpr::MuatMemori(inner) => {
-                self.tambah_uses_ke_live(inner, live);
+            MicroExpr::UnaryOp(_, inner) | MicroExpr::LoadMemori(inner) => {
+                self.insert_use_live(inner, set_hidup);
             }
-            MicroExpr::OperasiBiner(_, left, right) |
-            MicroExpr::Bandingkan(left, right) |
-            MicroExpr::UjiBit(left, right) => {
-                self.tambah_uses_ke_live(left, live);
-                self.tambah_uses_ke_live(right, live);
+            MicroExpr::BinaryOp(_, kiri, kanan) |
+            MicroExpr::Compare(kiri, kanan) |
+            MicroExpr::TestBit(kiri, kanan) => {
+                self.insert_use_live(kiri, set_hidup);
+                self.insert_use_live(kanan, set_hidup);
             }
             _ => {}
         }

@@ -5,13 +5,13 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Hash)]
 pub struct SsaVariabel {
-    pub nama_dasar: String,
+    pub id_reg: String,
     pub versi: u32,
 }
 
 impl fmt::Display for SsaVariabel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}_{}", self.nama_dasar, self.versi)
+        write!(f, "{}_{}", self.id_reg, self.versi)
     }
 }
 
@@ -79,38 +79,38 @@ pub enum MicroAtomicOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MicroExpr {
     Operand(MicroOperand),
-    OperasiUnary(MicroUnOp, Box<MicroExpr>),
-    OperasiBiner(MicroBinOp, Box<MicroExpr>, Box<MicroExpr>),
-    MuatMemori(Box<MicroExpr>),
-    Bandingkan(Box<MicroExpr>, Box<MicroExpr>),
-    UjiBit(Box<MicroExpr>, Box<MicroExpr>),
+    UnaryOp(MicroUnOp, Box<MicroExpr>),
+    BinaryOp(MicroBinOp, Box<MicroExpr>, Box<MicroExpr>),
+    LoadMemori(Box<MicroExpr>),
+    Compare(Box<MicroExpr>, Box<MicroExpr>),
+    TestBit(Box<MicroExpr>, Box<MicroExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MicroInstruction {
     Assign(SsaVariabel, MicroExpr),
-    SimpanMemori(MicroExpr, MicroExpr),
-    Lompat(MicroExpr),
-    LompatKondisi(MicroExpr, MicroExpr),
-    Panggil(MicroExpr),
-    Kembali,
+    StoreMemori(MicroExpr, MicroExpr),
+    Jump(MicroExpr),
+    JumpKondisi(MicroExpr, MicroExpr),
+    Call(MicroExpr),
+    Return,
     Nop,
     Syscall,
-    TidakTerdefinisi,
+    Undefined,
     AtomicRMW {
         op: MicroAtomicOp,
-        alamat: MicroExpr,
+        addr_mem: MicroExpr,
         nilai: MicroExpr,
         tujuan_lama: Option<SsaVariabel>,
     },
     MemoryFence,
     UpdateFlag(String, MicroExpr),
-    InstruksiVektor {
+    VectorOp {
         op: MicroBinOp,
         tujuan: SsaVariabel,
-        elemen_size: u8,
-        operand_1: Vec<MicroOperand>,
-        operand_2: Vec<MicroOperand>,
+        sz_elemen: u8,
+        op_1: Vec<MicroOperand>,
+        op_2: Vec<MicroOperand>,
     },
     Phi {
         tujuan: SsaVariabel,

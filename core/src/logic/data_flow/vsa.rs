@@ -152,9 +152,9 @@ impl VsaState {
     }
 }
 
-fn eval_expr_aliasing(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
+fn eval_expr_alias(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
     match expr {
-        MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, versi })) => {
+        MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg: nama_dasar, versi })) => {
             let unique_name = format!("{}_{}", nama_dasar, versi);
             if nama_dasar == "rsp" || nama_dasar == "esp" || nama_dasar == "sp" {
                 return ValueDomain::Pointer(AbstractLocation {
@@ -167,17 +167,17 @@ fn eval_expr_aliasing(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
             })
         }
         MicroExpr::Operand(MicroOperand::Konstanta(c)) => ValueDomain::Constant(*c),
-        MicroExpr::OperasiBiner(op, left, right) => {
-            let v1 = eval_expr_aliasing(left, state);
-            let v2 = eval_expr_aliasing(right, state);
+        MicroExpr::BinaryOp(op, left, right) => {
+            let v1 = eval_expr_alias(left, state);
+            let v2 = eval_expr_alias(right, state);
             match op {
                 MicroBinOp::Add => v1.add(&v2),
                 MicroBinOp::Sub => v1.sub(&v2),
                 _ => ValueDomain::Unknown,
             }
         }
-        MicroExpr::MuatMemori(addr_expr) => {
-            let addr_val = eval_expr_aliasing(addr_expr, state);
+        MicroExpr::LoadMemori(addr_expr) => {
+            let addr_val = eval_expr_alias(addr_expr, state);
             match addr_val {
                 ValueDomain::Pointer(loc) => {
                     state.memory_abstract.get(&loc).cloned().unwrap_or(ValueDomain::Unknown)
@@ -193,13 +193,13 @@ fn eval_expr_aliasing(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
     }
 }
 
-fn transfer_function_aliasing(block: &BasicBlock, state_in: &VsaState) -> VsaState {
+fn func_transfer_alias(blok: &BasicBlock, state_in: &VsaState) -> VsaState {
     let mut state_out = state_in.clone();
-    for (_, instructions) in &block.instructions {
-        for instruction in instructions {
-            match instruction {
-                MicroInstruction::Assign(SsaVariabel { nama_dasar, versi }, expr) => {
-                    let value = eval_expr_aliasing(expr, &state_out);
+    for (_, list_instr) in &blok.instructions {
+        for instr in list_instr {
+            match instr {
+                MicroInstruction::Assign(SsaVariabel { id_reg: nama_dasar, versi }, expr) => {
+                    let value = eval_expr_alias(expr, &state_out);
                     let unique_name = format!("{}_{}", nama_dasar, versi);
                     state_out.variables.insert(unique_name, value);
                 }
@@ -207,7 +207,7 @@ fn transfer_function_aliasing(block: &BasicBlock, state_in: &VsaState) -> VsaSta
                     let mut merged_val = ValueDomain::Unknown;
                     let mut first = true;
                     for (src_var, _) in sumber {
-                         let src_name = format!("{}_{}", src_var.nama_dasar, src_var.versi);
+                         let src_name = format!("{}_{}", src_var.id_reg, src_var.versi);
                          let val = state_out.variables.get(&src_name).cloned().unwrap_or(ValueDomain::Unknown);
                          if first {
                              merged_val = val;
@@ -216,12 +216,12 @@ fn transfer_function_aliasing(block: &BasicBlock, state_in: &VsaState) -> VsaSta
                              merged_val = merged_val.meet(&val);
                          }
                     }
-                    let dest_name = format!("{}_{}", tujuan.nama_dasar, tujuan.versi);
+                    let dest_name = format!("{}_{}", tujuan.id_reg, tujuan.versi);
                     state_out.variables.insert(dest_name, merged_val);
                 }
-                MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
-                    let addr_val = eval_expr_aliasing(addr_expr, &state_out);
-                    let data_val = eval_expr_aliasing(data_expr, &state_out);     
+                MicroInstruction::StoreMemori(addr_expr, data_expr) => {
+                    let addr_val = eval_expr_alias(addr_expr, &state_out);
+                    let data_val = eval_expr_alias(data_expr, &state_out);     
                     match addr_val {
                         ValueDomain::Pointer(loc) => {
                             state_out.memory_abstract.insert(loc, data_val);
@@ -247,54 +247,54 @@ fn transfer_function_aliasing(block: &BasicBlock, state_in: &VsaState) -> VsaSta
     state_out
 }
 
-pub fn analisis_value_set(
-    graph: &DiGraph<BasicBlock, &'static str>,
+pub fn analyze_set_nilai(
+    graf: &DiGraph<BasicBlock, &'static str>,
 ) -> HashMap<NodeIndex, (VsaState, VsaState)> {
-    let mut in_states: HashMap<NodeIndex, VsaState> = HashMap::new();
-    let mut out_states: HashMap<NodeIndex, VsaState> = HashMap::new();
-    let nodes: Vec<NodeIndex> = graph.node_indices().collect();
-    for &node in &nodes {
-        in_states.insert(node, VsaState::new());
-        out_states.insert(node, VsaState::new());
+    let mut peta_state_masuk: HashMap<NodeIndex, VsaState> = HashMap::new();
+    let mut peta_state_keluar: HashMap<NodeIndex, VsaState> = HashMap::new();
+    let list_simpul: Vec<NodeIndex> = graf.node_indices().collect();
+    for &simpul in &list_simpul {
+        peta_state_masuk.insert(simpul, VsaState::new());
+        peta_state_keluar.insert(simpul, VsaState::new());
     }
-    let mut worklist: Vec<NodeIndex> = nodes.clone();
-    let mut iterasi = 0;
+    let mut list_kerja: Vec<NodeIndex> = list_simpul.clone();
+    let mut iter = 0;
     const MAX_ITERASI: usize = 100; 
-    while let Some(node) = worklist.pop() {
-        iterasi += 1;
-        if iterasi > nodes.len() * MAX_ITERASI {
+    while let Some(simpul) = list_kerja.pop() {
+        iter += 1;
+        if iter > list_simpul.len() * MAX_ITERASI {
             break;
         }
-        let mut new_in = VsaState::new();
+        let mut state_masuk_baru = VsaState::new();
         let mut first_pred = true;
-        for pred_node in graph.neighbors_directed(node, Direction::Incoming) {
-            let pred_out = out_states.get(&pred_node).unwrap();
+        for simpul_pred in graf.neighbors_directed(simpul, Direction::Incoming) {
+            let pred_out = peta_state_keluar.get(&simpul_pred).unwrap();
             if first_pred {
-                new_in = pred_out.clone();
+                state_masuk_baru = pred_out.clone();
                 first_pred = false;
             } else {
-                new_in = new_in.merge(pred_out);
+                state_masuk_baru = state_masuk_baru.merge(pred_out);
             }
         }
-        if new_in != *in_states.get(&node).unwrap() {
-            in_states.insert(node, new_in.clone());
-            let new_out = transfer_function_aliasing(graph.node_weight(node).unwrap(), &new_in);
-            if new_out != *out_states.get(&node).unwrap() {
-                out_states.insert(node, new_out);
-                for succ in graph.neighbors_directed(node, Direction::Outgoing) {
-                    worklist.push(succ);
+        if state_masuk_baru != *peta_state_masuk.get(&simpul).unwrap() {
+            peta_state_masuk.insert(simpul, state_masuk_baru.clone());
+            let state_keluar_baru = func_transfer_alias(graf.node_weight(simpul).unwrap(), &state_masuk_baru);
+            if state_keluar_baru != *peta_state_keluar.get(&simpul).unwrap() {
+                peta_state_keluar.insert(simpul, state_keluar_baru);
+                for simpul_suksesor in graf.neighbors_directed(simpul, Direction::Outgoing) {
+                    list_kerja.push(simpul_suksesor);
                 }
             }
         }
     }
-    nodes
+    list_simpul
         .into_iter()
         .map(|node| {
             (
                 node,
                 (
-                    in_states.remove(&node).unwrap(),
-                    out_states.remove(&node).unwrap(),
+                    peta_state_masuk.remove(&node).unwrap(),
+                    peta_state_keluar.remove(&node).unwrap(),
                 ),
             )
         })

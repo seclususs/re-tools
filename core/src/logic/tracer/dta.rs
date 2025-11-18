@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::logic::ir::instruction::{
     MicroBinOp, MicroExpr, MicroInstruction, MicroOperand, SsaVariabel,
 };
-use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::lifter::lift_blok_instr;
 use crate::logic::tracer::platform::PlatformTracer;
 use crate::logic::tracer::types::{u64, C_Registers};
 use crate::error::ReToolsError;
@@ -31,8 +31,8 @@ pub enum TaintSourceType {
 
 #[derive(Debug, Clone)]
 pub struct TaintSource {
-    pub tipe: TaintSourceType,
-    pub deskripsi: String,
+    pub kind_source: TaintSourceType,
+    pub desc_info: String,
 }
 
 #[derive(Debug, Clone)]
@@ -86,33 +86,33 @@ impl<'a> DtaEngine<'a> {
     pub fn attach_static_cfg(&mut self, cfg: &'a DiGraph<BasicBlock, &'static str>) {
         self.static_mapper.cfg = Some(cfg);
     }
-    pub fn tambah_source_eksternal(&mut self, tipe: TaintSourceType, deskripsi: &str) {
+    pub fn add_source_external(&mut self, kind_source: TaintSourceType, desc_info: &str) {
         self.sources.push(TaintSource {
-            tipe,
-            deskripsi: deskripsi.to_string(),
+            kind_source,
+            desc_info: desc_info.to_string(),
         });
     }
-    pub fn tambah_sink(&mut self, sink: TaintSink) {
+    pub fn add_sink(&mut self, sink: TaintSink) {
         self.sinks.push(sink);
     }
-    pub fn inject_taint_ke_region(&mut self, start_addr: u64, size: usize, label: &str) {
-        for i in 0..size {
-            self.taint_state.memory_taint.insert(start_addr + i as u64, true);
+    pub fn inject_taint_mem(&mut self, va_mulai: u64, sz_region: usize, label_info: &str) {
+        for i in 0..sz_region {
+            self.taint_state.memory_taint.insert(va_mulai + i as u64, true);
         }
         self.laporan_forensik.push(DtaReport {
-            va: start_addr,
+            va: va_mulai,
             instruksi_str: "Manual Injection".to_string(),
-            pesan: format!("Inject taint pada 0x{:x} (len: {}) [{}]", start_addr, size, label),
+            pesan: format!("Inject taint pada 0x{:x} (len: {}) [{}]", va_mulai, sz_region, label_info),
             static_block_id: None,
         });
     }
-    pub fn proses_sumber_awal(&mut self, regs: &C_Registers) {
+    pub fn process_source_init(&mut self, regs: &C_Registers) {
         let sources = std::mem::take(&mut self.sources);
         for source in &sources {
-            match &source.tipe {
+            match &source.kind_source {
                 TaintSourceType::FunctionArgument(idx) => {
-                    let reg_name = self.get_arg_reg_name(*idx);
-                    if let Some(r) = reg_name {
+                    let nama_reg = self.get_nama_reg_arg(*idx);
+                    if let Some(r) = nama_reg {
                          self.taint_state.register_taint.insert(r.to_string(), true);
                          self.laporan_forensik.push(DtaReport {
                              va: regs.rip,
@@ -122,15 +122,15 @@ impl<'a> DtaEngine<'a> {
                          });
                     }
                 }
-                TaintSourceType::UserBuffer(addr, size) => {
-                    self.inject_taint_ke_region(*addr, *size, &source.deskripsi);
+                TaintSourceType::UserBuffer(va_buf, sz_buf) => {
+                    self.inject_taint_mem(*va_buf, *sz_buf, &source.desc_info);
                 }
                 _ => {}
             }
         }
         self.sources = sources;
     }
-    fn get_arg_reg_name(&self, index: usize) -> Option<&'static str> {
+    fn get_nama_reg_arg(&self, index: usize) -> Option<&'static str> {
         match self.arsitektur {
             ArsitekturDisasm::ARCH_X86_64 => match index {
                 0 => Some("rdi"),
@@ -151,18 +151,18 @@ impl<'a> DtaEngine<'a> {
             _ => None, 
         }
     }
-    fn map_runtime_ke_static(&mut self, runtime_va: u64) -> Option<NodeIndex> {
+    fn map_runtime_to_static(&mut self, va_runtime: u64) -> Option<NodeIndex> {
         if let Some(cfg) = self.static_mapper.cfg {
-             for node_idx in cfg.node_indices() {
-                 let block = &cfg[node_idx];
-                 if runtime_va >= block.va_start && runtime_va < block.va_end {
-                     return Some(node_idx);
+             for idx_node in cfg.node_indices() {
+                 let blok = &cfg[idx_node];
+                 if va_runtime >= blok.va_start && va_runtime < blok.va_end {
+                     return Some(idx_node);
                  }
              }
         }
         None
     }
-    fn ambil_nilai_register(&self, regs: &C_Registers, nama_reg: &str) -> u64 {
+    fn read_val_reg(&self, regs: &C_Registers, nama_reg: &str) -> u64 {
         match nama_reg.to_lowercase().as_str() {
             "rax" | "x0" => regs.rax,
             "rbx" | "x1" => regs.rbx,
@@ -184,29 +184,29 @@ impl<'a> DtaEngine<'a> {
             _ => 0,
         }
     }
-    fn cek_ekspresi_taint(
+    fn check_expr_taint(
         &mut self,
         expr: &MicroExpr,
         regs: &C_Registers,
-        current_static_node: Option<NodeIndex>,
+        node_static_kini: Option<NodeIndex>,
     ) -> (bool, Option<u64>) {
         let expr = expr.clone();
         match &expr {
-            MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
+            MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { id_reg: nama_dasar, .. })) => {
                 let tainted = self
                     .taint_state
                     .register_taint
                     .get(nama_dasar)
                     .cloned()
                     .unwrap_or(false);
-                let value = self.ambil_nilai_register(regs, nama_dasar);
-                (tainted, Some(value))
+                let nilai = self.read_val_reg(regs, nama_dasar);
+                (tainted, Some(nilai))
             }
             MicroExpr::Operand(MicroOperand::Konstanta(k)) => (false, Some(*k)),
-            MicroExpr::OperasiUnary(_, inner) => self.cek_ekspresi_taint(inner, regs, current_static_node),
-            MicroExpr::OperasiBiner(op, left, right) => {
-                let (l_taint, l_val) = self.cek_ekspresi_taint(left, regs, current_static_node);
-                let (r_taint, r_val) = self.cek_ekspresi_taint(right, regs, current_static_node);
+            MicroExpr::UnaryOp(_, inner) => self.check_expr_taint(inner, regs, node_static_kini),
+            MicroExpr::BinaryOp(op, kiri, kanan) => {
+                let (l_taint, l_val) = self.check_expr_taint(kiri, regs, node_static_kini);
+                let (r_taint, r_val) = self.check_expr_taint(kanan, regs, node_static_kini);
                 let res_val = if let (Some(l), Some(r)) = (l_val, r_val) {
                      match op {
                         MicroBinOp::Add => Some(l.wrapping_add(r)),
@@ -222,19 +222,19 @@ impl<'a> DtaEngine<'a> {
                 };
                 (l_taint || r_taint, res_val)
             }
-            MicroExpr::MuatMemori(addr_expr) => {
-                let (addr_tainted, addr_val) = self.cek_ekspresi_taint(addr_expr, regs, current_static_node);
+            MicroExpr::LoadMemori(addr_expr) => {
+                let (addr_tainted, addr_val) = self.check_expr_taint(addr_expr, regs, node_static_kini);
                 if addr_tainted {
                      self.laporan_forensik.push(DtaReport {
                         va: regs.rip,
                         instruksi_str: "Memory Load".to_string(),
                         pesan: "Tainted pointer dereference detected!".to_string(),
-                        static_block_id: current_static_node.map(|n| n.index()),
+                        static_block_id: node_static_kini.map(|n| n.index()),
                     });
                 }
                 if let Some(addr) = addr_val {
                     let val_tainted = self.taint_state.memory_taint.get(&addr).cloned().unwrap_or(false);
-                    let mem_val = self.tracer.baca_memory(addr, 8).ok()
+                    let mem_val = self.tracer.read_memori(addr, 8).ok()
                         .and_then(|b| b.try_into().ok())
                         .map(u64::from_le_bytes);
                     (val_tainted, mem_val)
@@ -245,7 +245,7 @@ impl<'a> DtaEngine<'a> {
             _ => (false, None),
         }
     }
-    fn propagate_taint(
+    fn spread_taint_data(
         &mut self,
         ir: &MicroInstruction,
         va: u64,
@@ -255,8 +255,8 @@ impl<'a> DtaEngine<'a> {
     ) {
         match ir {
             MicroInstruction::Assign(dest, src) => {
-                let (is_tainted, _) = self.cek_ekspresi_taint(src, regs, static_node);
-                let old_status = self.taint_state.register_taint.insert(dest.nama_dasar.clone(), is_tainted).unwrap_or(false);
+                let (is_tainted, _) = self.check_expr_taint(src, regs, static_node);
+                let old_status = self.taint_state.register_taint.insert(dest.id_reg.clone(), is_tainted).unwrap_or(false);
                 
                 if is_tainted && !old_status {
                     if let Some(node_idx) = static_node {
@@ -265,14 +265,14 @@ impl<'a> DtaEngine<'a> {
                     self.laporan_forensik.push(DtaReport {
                         va,
                         instruksi_str,
-                        pesan: format!("Taint menyebar ke register {}", dest.nama_dasar),
+                        pesan: format!("Taint menyebar ke register {}", dest.id_reg),
                         static_block_id: static_node.map(|n| n.index()),
                     });
                 }
             }
-            MicroInstruction::SimpanMemori(addr_expr, val_expr) => {
-                let (val_tainted, _) = self.cek_ekspresi_taint(val_expr, regs, static_node);
-                let (addr_tainted, addr_val) = self.cek_ekspresi_taint(addr_expr, regs, static_node);
+            MicroInstruction::StoreMemori(addr_expr, val_expr) => {
+                let (val_tainted, _) = self.check_expr_taint(val_expr, regs, static_node);
+                let (addr_tainted, addr_val) = self.check_expr_taint(addr_expr, regs, static_node);
                 if addr_tainted {
                      self.laporan_forensik.push(DtaReport {
                         va,
@@ -292,8 +292,8 @@ impl<'a> DtaEngine<'a> {
                      }
                 }
             }
-            MicroInstruction::LompatKondisi(cond, _) => {
-                 let (cond_tainted, _) = self.cek_ekspresi_taint(cond, regs, static_node);
+            MicroInstruction::JumpKondisi(cond, _) => {
+                 let (cond_tainted, _) = self.check_expr_taint(cond, regs, static_node);
                  if cond_tainted {
                       self.laporan_forensik.push(DtaReport {
                         va,
@@ -303,8 +303,8 @@ impl<'a> DtaEngine<'a> {
                     });
                  }
             }
-            MicroInstruction::Lompat(target) | MicroInstruction::Panggil(target) => {
-                let (target_tainted, _) = self.cek_ekspresi_taint(target, regs, static_node);
+            MicroInstruction::Jump(target) | MicroInstruction::Call(target) => {
+                let (target_tainted, _) = self.check_expr_taint(target, regs, static_node);
                 if target_tainted {
                      self.laporan_forensik.push(DtaReport {
                         va,
@@ -317,7 +317,7 @@ impl<'a> DtaEngine<'a> {
             _ => {}
         }
     }
-    fn cek_sink_safety(&mut self, va: u64, _regs: &C_Registers, static_node: Option<NodeIndex>) {
+    fn check_sink_safe(&mut self, va: u64, _regs: &C_Registers, static_node: Option<NodeIndex>) {
         for sink in &self.sinks {
             if sink.alamat == va {
                 for reg in &sink.cek_arg_regs {
@@ -335,13 +335,13 @@ impl<'a> DtaEngine<'a> {
     }
     pub fn step_and_analyze(&mut self, regs: &C_Registers) -> Result<(), ReToolsError> {
         let va = regs.rip;
-        let static_node = self.map_runtime_ke_static(va);
-        let bytes = self.tracer.baca_memory(va, 16)?;
-        let (_, irs) = angkat_blok_instruksi(&bytes, va, self.arsitektur)?;
-        self.cek_sink_safety(va, regs, static_node);
+        let static_node = self.map_runtime_to_static(va);
+        let bytes = self.tracer.read_memori(va, 16)?;
+        let (_, irs) = lift_blok_instr(&bytes, va, self.arsitektur)?;
+        self.check_sink_safe(va, regs, static_node);
         for ir in irs {
             let instr_debug = format!("{:?}", ir);
-            self.propagate_taint(&ir, va, regs, instr_debug, static_node);
+            self.spread_taint_data(&ir, va, regs, instr_debug, static_node);
         }
         Ok(())
     }

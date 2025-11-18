@@ -5,7 +5,7 @@ use super::ast::{
 };
 use crate::error::ReToolsError;
 use crate::logic::ir::instruction::MicroInstruction;
-use crate::logic::static_analysis::cfg::{hitungDominators, BasicBlock};
+use crate::logic::static_analysis::cfg::{calc_dominators, BasicBlock};
 use petgraph::algo::dominators::Dominators;
 use petgraph::algo::kosaraju_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -21,11 +21,11 @@ struct ContextAnalisis<'a> {
     processed_nodes: HashSet<NodeIndex>,
 }
 
-pub fn analyze_structure(
+pub fn build_struct_cfg(
     cfg: &DiGraph<BasicBlock, &'static str>,
     start_node: NodeIndex,
 ) -> Result<NodeStruktur, ReToolsError> {
-    let dominators = hitungDominators(cfg, start_node);
+    let dominators = calc_dominators(cfg, start_node);
     let reversed_graph = Reversed(cfg);
     let exit_nodes: Vec<NodeIndex> = cfg
         .node_identifiers()
@@ -256,12 +256,12 @@ impl<'a> ContextAnalisis<'a> {
         }
     }
     fn is_control_flow_instruction(&self, ir: &MicroInstruction) -> bool {
-        matches!(ir, MicroInstruction::Lompat(_) | MicroInstruction::LompatKondisi(_, _) | MicroInstruction::Panggil(_) | MicroInstruction::Kembali)
+        matches!(ir, MicroInstruction::Jump(_) | MicroInstruction::JumpKondisi(_, _) | MicroInstruction::Call(_) | MicroInstruction::Return)
     }
     fn ekstrak_kondisi_cabang(&self, block: &BasicBlock) -> Option<EkspresiPseudo> {
         if let Some((_, irs)) = block.instructions.last() {
             if let Some(last_ir) = irs.last() {
-                if let MicroInstruction::LompatKondisi(cond, _) = last_ir {
+                if let MicroInstruction::JumpKondisi(cond, _) = last_ir {
                     return Some(map_expr_ke_ekspresi_pseudo(cond));
                 }
             }
@@ -271,8 +271,8 @@ impl<'a> ContextAnalisis<'a> {
     fn ekstrak_variabel_switch(&self, block: &BasicBlock) -> Option<EkspresiPseudo> {
         if let Some((_, irs)) = block.instructions.last() {
             if let Some(last_ir) = irs.last() {
-                if let MicroInstruction::Lompat(expr) = last_ir {
-                     if let crate::logic::ir::instruction::MicroExpr::MuatMemori(_) = expr {
+                if let MicroInstruction::Jump(expr) = last_ir {
+                     if let crate::logic::ir::instruction::MicroExpr::LoadMemori(_) = expr {
                          return Some(map_expr_ke_ekspresi_pseudo(expr));
                      }
                 }

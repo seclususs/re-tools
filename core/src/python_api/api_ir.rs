@@ -5,26 +5,25 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::ffi::CStr;
 
-use super::api_static::map_err_to_py;
-use crate::logic::ir::lifter::angkat_blok_instruksi;
+use super::api_static::convert_err_py;
+use crate::logic::ir::lifter::lift_blok_instr;
 use crate::logic::ir::optimization::IrOptimizer;
-use crate::logic::static_analysis::cfg::bangun_cfg_internal;
+use crate::logic::static_analysis::cfg::build_cfg_internal;
 use crate::logic::static_analysis::parser::Binary;
-use crate::logic::static_analysis::disasm::{decode_satu_instruksi, ArsitekturDisasm};
-
+use crate::logic::static_analysis::disasm::{decode_instr_single, ArsitekturDisasm};
 
 #[pyfunction(name = "decodeInstruksi")]
-fn decode_instruksi_py(
+fn wrap_decode_instr(
     py: Python,
-    byte_data: &Bound<'_, PyBytes>,
-    offset: usize,
-    arch_int: u32,
-    base_va: u64,
+    bytes_data: &Bound<'_, PyBytes>,
+    off_set: usize,
+    id_arch: u32,
+    va_basis: u64,
 ) -> PyResult<PyObject> {
-    let bytes_slice = byte_data.as_bytes();
-    let len_data = bytes_slice.len();
-    let ptr_data = bytes_slice.as_ptr();
-    let arch = match arch_int {
+    let slice_bytes = bytes_data.as_bytes();
+    let len_data = slice_bytes.len();
+    let ptr_data = slice_bytes.as_ptr();
+    let arch = match id_arch {
         1 => ArsitekturDisasm::ARCH_X86_32,
         2 => ArsitekturDisasm::ARCH_X86_64,
         3 => ArsitekturDisasm::ARCH_ARM_32,
@@ -35,7 +34,7 @@ fn decode_instruksi_py(
         8 => ArsitekturDisasm::ARCH_MIPS_64,
         _ => ArsitekturDisasm::ARCH_UNKNOWN,
     };
-    let c_instr = decode_satu_instruksi(ptr_data, len_data, offset, base_va, arch);
+    let c_instr = decode_instr_single(ptr_data, len_data, off_set, va_basis, arch);
     let dict = PyDict::new_bound(py);
     dict.set_item("valid", c_instr.valid != 0)?;
     dict.set_item("size", c_instr.ukuran)?;
@@ -54,19 +53,19 @@ fn decode_instruksi_py(
 }
 
 #[pyfunction(name = "getIrForInstruksi")]
-fn get_ir_for_instruksi_py(
+fn wrap_lift_ir(
     py: Python,
-    byte_data: &Bound<'_, PyBytes>,
-    offset: usize,
-    arch_int: u32,
-    base_va: u64,
+    bytes_data: &Bound<'_, PyBytes>,
+    off_set: usize,
+    id_arch: u32,
+    va_basis: u64,
 ) -> PyResult<PyObject> {
-    let bytes_slice = byte_data.as_bytes();
-    if offset >= bytes_slice.len() {
+    let slice_bytes = bytes_data.as_bytes();
+    if off_set >= slice_bytes.len() {
         return Err(PyValueError::new_err("Offset di luar batas"));
     }
-    let code_slice = &bytes_slice[offset..];
-    let arch = match arch_int {
+    let code_slice = &slice_bytes[off_set..];
+    let arch = match id_arch {
         1 => ArsitekturDisasm::ARCH_X86_32,
         2 => ArsitekturDisasm::ARCH_X86_64,
         3 => ArsitekturDisasm::ARCH_ARM_32,
@@ -77,7 +76,7 @@ fn get_ir_for_instruksi_py(
         8 => ArsitekturDisasm::ARCH_MIPS_64,
         _ => ArsitekturDisasm::ARCH_UNKNOWN,
     };
-    match angkat_blok_instruksi(code_slice, base_va, arch) {
+    match lift_blok_instr(code_slice, va_basis, arch) {
         Ok((_size, ir_vec)) => {
             let json_str = serde_json::to_string(&ir_vec)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -85,25 +84,22 @@ fn get_ir_for_instruksi_py(
             let py_json = json_module.getattr("loads")?.call1((json_str,))?;
             Ok(py_json.to_object(py))
         }
-        Err(e) => Err(map_err_to_py(e)),
+        Err(e) => Err(convert_err_py(e)),
     }
 }
 
 #[pyfunction(name = "optimizeIrCfg")]
-fn optimize_ir_cfg_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-    let binary = Binary::load(file_path).map_err(map_err_to_py)?;
-    let mut cfg = bangun_cfg_internal(&binary).map_err(map_err_to_py)?;
-    
+fn wrap_calc_opt(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+    let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
+    let mut cfg = build_cfg_internal(&binary).map_err(convert_err_py)?;
     let mut optimizer = IrOptimizer::new();
-    optimizer.jalankan_optimasi(&mut cfg);
-
+    optimizer.run_pass_opt(&mut cfg);
     let mut result_map = std::collections::HashMap::new();
     for node_idx in cfg.node_indices() {
         let block = &cfg[node_idx];
         let instrs: Vec<_> = block.instructions.iter().flat_map(|(_, irs)| irs.clone()).collect();
         result_map.insert(block.va_start, instrs);
     }
-
     let json_str = serde_json::to_string(&result_map)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let json_module = PyModule::import_bound(py, "json")?;
@@ -111,9 +107,9 @@ fn optimize_ir_cfg_py(py: Python, file_path: &str) -> PyResult<PyObject> {
     Ok(py_json.to_object(py))
 }
 
-pub fn register_ir_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(decode_instruksi_py, m)?)?;
-    m.add_function(wrap_pyfunction!(get_ir_for_instruksi_py, m)?)?;
-    m.add_function(wrap_pyfunction!(optimize_ir_cfg_py, m)?)?;
+pub fn init_modul_ir(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(wrap_decode_instr, m)?)?;
+    m.add_function(wrap_pyfunction!(wrap_lift_ir, m)?)?;
+    m.add_function(wrap_pyfunction!(wrap_calc_opt, m)?)?;
     Ok(())
 }

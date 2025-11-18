@@ -18,78 +18,78 @@ impl UnsupportedTracer {
 }
 
 impl PlatformTracer for UnsupportedTracer {
-    fn attach(&mut self) -> Result<(), ReToolsError> {
+    fn attach_sasaran(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn detach(&mut self) -> Result<(), ReToolsError> {
+    fn detach_sasaran(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn baca_memory(&self, _addr: u64, _size: c_int) -> Result<Vec<u8>, ReToolsError> {
+    fn read_memori(&self, _va_alamat: u64, _sz_ukuran: c_int) -> Result<Vec<u8>, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn tulis_memory(&self, _addr: u64, _data: &[u8]) -> Result<usize, ReToolsError> {
+    fn write_memori(&self, _va_alamat: u64, _buf_data: &[u8]) -> Result<usize, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
+    fn get_register(&self) -> Result<C_Registers, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn set_registers(&self, _regs: &C_Registers) -> Result<(), ReToolsError> {
+    fn set_register(&self, _reg_nilai: &C_Registers) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn single_step(&mut self) -> Result<(), ReToolsError> {
+    fn step_instruksi(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn tunggu_event(&mut self, _event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
+    fn wait_event(&mut self, _ptr_event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn poll_event(&mut self, _event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+    fn poll_event(&mut self, _ptr_event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn set_software_breakpoint(&mut self, _addr: u64) -> Result<(), ReToolsError> {
+    fn set_titik_henti_sw(&mut self, _va_alamat: u64) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn remove_software_breakpoint(&mut self, _addr: u64) -> Result<(), ReToolsError> {
+    fn remove_titik_henti_sw(&mut self, _va_alamat: u64) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn set_hardware_breakpoint(&mut self, _addr: u64, _index: usize) -> Result<(), ReToolsError> {
+    fn set_titik_henti_hw(&mut self, _va_alamat: u64, _idx_slot: usize) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn remove_hardware_breakpoint(&mut self, _index: usize) -> Result<(), ReToolsError> {
+    fn remove_titik_henti_hw(&mut self, _idx_slot: usize) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
+    fn list_thread(&self) -> Result<Vec<c_int>, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+    fn get_region_memori(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
+    fn set_trace_syscall(&mut self, _status_aktif: bool) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+    fn get_info_syscall(&self, _id_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+    fn set_opsi_multithread(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn hook_memory_api(
+    fn hook_api_memori(
         &mut self,
-        _api_name: &str,
-        _on_entry_callback: u64,
-        _on_exit_callback: u64,
+        _nama_api: &str,
+        _va_entry: u64,
+        _va_exit: u64,
     ) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+    fn remove_hook_api_memori(&mut self, _nama_api: &str) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+    fn dump_region_memori(&self, _va_alamat: u64, _sz_ukuran: usize, _jalur_berkas: &str) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
-    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
+    fn hide_status_debugger(&mut self) -> Result<(), ReToolsError> {
         Err(Self::unsupported_err())
     }
 }

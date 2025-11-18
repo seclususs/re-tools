@@ -2,7 +2,7 @@
 
 use super::platform::PlatformTracer;
 use super::types::{u64, u8, C_DebugEvent, C_MemoryRegionInfo, C_Registers, C_SyscallInfo, DebugEventTipe};
-use crate::error::{set_last_error, ReToolsError};
+use crate::error::{set_err_last, ReToolsError};
 use libc::c_int;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
@@ -11,30 +11,30 @@ use nix::unistd::Pid;
 use std::collections::HashMap;
 
 pub struct MacosTracer {
-    pid_target: Pid,
-    breakpoints_map: HashMap<u64, u8>,
+    pid_sasaran: Pid,
+    map_titik_henti: HashMap<u64, u8>,
 }
 
 impl MacosTracer {
     pub fn new(pid: c_int) -> Result<Self, ReToolsError> {
         Ok(MacosTracer {
-            pid_target: Pid::from_raw(pid),
-            breakpoints_map: HashMap::new(),
+            pid_sasaran: Pid::from_raw(pid),
+            map_titik_henti: HashMap::new(),
         })
     }
-    unsafe fn handle_breakpoint_logic(&mut self, pid: Pid, alamat_bp: u64) -> bool {
-        let Some(&byte_asli) = self.breakpoints_map.get(&alamat_bp) else {
+    unsafe fn handle_logika_bp(&mut self, pid: Pid, va_bp: u64) -> bool {
+        let Some(&byte_asli) = self.map_titik_henti.get(&va_bp) else {
             return false;
         };
-        if self.tulis_memory(alamat_bp, &[byte_asli]).is_err() {
+        if self.write_memori(va_bp, &[byte_asli]).is_err() {
             return false;
         }
         #[cfg(target_arch = "x86_64")]
         match ptrace::getregs(pid) {
-            Ok(mut regs_any) => {
-                if let Some(regs) = regs_any.as_x86_64_mut() {
-                    regs.rip = alamat_bp;
-                    if ptrace::setregs(pid, regs_any).is_err() {
+            Ok(mut reg_any) => {
+                if let Some(reg) = reg_any.as_x86_64_mut() {
+                    reg.rip = va_bp;
+                    if ptrace::setregs(pid, reg_any).is_err() {
                         return false;
                     }
                 } else {
@@ -45,95 +45,95 @@ impl MacosTracer {
                 return false;
             }
         };
-        if self.single_step().is_err() {
-            self.tulis_memory(alamat_bp, &[0xCC]).ok();
+        if self.step_instruksi().is_err() {
+            self.write_memori(va_bp, &[0xCC]).ok();
             return false;
         }
-        if self.tulis_memory(alamat_bp, &[0xCC]).is_err() {
+        if self.write_memori(va_bp, &[0xCC]).is_err() {
             return false;
         }
         true
     }
     #[cfg(target_arch = "x86_64")]
-    fn set_hw_bp(&self, addr: u64, index: usize) -> Result<(), ReToolsError> {
-        if index > 3 {
+    fn set_bp_hw_internal(&self, va_target: u64, idx_slot: usize) -> Result<(), ReToolsError> {
+        if idx_slot > 3 {
             return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut debug_state: ptrace::DebugState = std::mem::zeroed();
-        ptrace::getdbregs(self.pid_target, &mut debug_state)?;
-        debug_state.db_dr[index] = addr;
-        let enable_mask = 1 << (index * 2);
-        let condition_mask = 0b00 << (16 + index * 4);
-        let len_mask = 0b00 << (18 + index * 4);
-        debug_state.db_dr[7] |= (enable_mask | condition_mask | len_mask) as u64;
-        ptrace::setdbregs(self.pid_target, &debug_state)?;
+        let mut state_debug: ptrace::DebugState = std::mem::zeroed();
+        ptrace::getdbregs(self.pid_sasaran, &mut state_debug)?;
+        state_debug.db_dr[idx_slot] = va_target;
+        let mask_enable = 1 << (idx_slot * 2);
+        let mask_kondisi = 0b00 << (16 + idx_slot * 4);
+        let mask_len = 0b00 << (18 + idx_slot * 4);
+        state_debug.db_dr[7] |= (mask_enable | mask_kondisi | mask_len) as u64;
+        ptrace::setdbregs(self.pid_sasaran, &state_debug)?;
         Ok(())
     }
     #[cfg(target_arch = "x86_64")]
-    fn remove_hw_bp(&self, index: usize) -> Result<(), ReToolsError> {
-        if index > 3 {
+    fn remove_bp_hw_internal(&self, idx_slot: usize) -> Result<(), ReToolsError> {
+        if idx_slot > 3 {
             return Err(ReToolsError::Generic(
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut debug_state: ptrace::DebugState = std::mem::zeroed();
-        ptrace::getdbregs(self.pid_target, &mut debug_state)?;
-        debug_state.db_dr[index] = 0;
-        let disable_mask = !(1 << (index * 2));
-        debug_state.db_dr[7] &= disable_mask as u64;
-        ptrace::setdbregs(self.pid_target, &debug_state)?;
+        let mut state_debug: ptrace::DebugState = std::mem::zeroed();
+        ptrace::getdbregs(self.pid_sasaran, &mut state_debug)?;
+        state_debug.db_dr[idx_slot] = 0;
+        let mask_disable = !(1 << (idx_slot * 2));
+        state_debug.db_dr[7] &= mask_disable as u64;
+        ptrace::setdbregs(self.pid_sasaran, &state_debug)?;
         Ok(())
     }
     #[cfg(not(target_arch = "x86_64"))]
-    fn set_hw_bp(&self, _addr: u64, _index: usize) -> Result<(), ReToolsError> {
+    fn set_bp_hw_internal(&self, _va: u64, _idx: usize) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic(
             "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
         ))
     }
     #[cfg(not(target_arch = "x86_64"))]
-    fn remove_hw_bp(&self, _index: usize) -> Result<(), ReToolsError> {
+    fn remove_bp_hw_internal(&self, _idx: usize) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic(
             "Hardware breakpoints tidak didukung di arsitektur ini".to_string(),
         ))
     }
-    fn process_wait_status(&mut self, status: WaitStatus, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+    fn process_status_wait(&mut self, status: WaitStatus, ptr_event: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
         unsafe {
             match status {
                 WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
                     let mut rip: u64 = 0;
                     #[cfg(target_arch = "x86_64")]
                     {
-                        let regs = match ptrace::getregs(pid) {
-                            Ok(regs_any) => match regs_any.as_x86_64() {
+                        let reg = match ptrace::getregs(pid) {
+                            Ok(reg_any) => match reg_any.as_x86_64() {
                                 Some(r) => r.clone(),
                                 None => return Ok(false),
                             },
                             Err(_) => return Ok(false),
                         };
-                        rip = regs.rip;
+                        rip = reg.rip;
                     }
-                    let alamat_breakpoint_potensial = rip.saturating_sub(1);
-                    if self.breakpoints_map.contains_key(&alamat_breakpoint_potensial) {
-                        if self.handle_breakpoint_logic(pid, alamat_breakpoint_potensial) {
-                            (*event_out).tipe = DebugEventTipe::EVENT_BREAKPOINT;
-                            (*event_out).pid_thread = pid.as_raw();
-                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                    let va_bp_potensial = rip.saturating_sub(1);
+                    if self.map_titik_henti.contains_key(&va_bp_potensial) {
+                        if self.handle_logika_bp(pid, va_bp_potensial) {
+                            (*ptr_event).tipe = DebugEventTipe::EVENT_BREAKPOINT;
+                            (*ptr_event).pid_thread = pid.as_raw();
+                            (*ptr_event).info_alamat = va_bp_potensial;
                             return Ok(true);
                         } else {
-                            set_last_error(ReToolsError::Generic(format!(
+                            set_err_last(ReToolsError::Generic(format!(
                                 "Gagal menangani breakpoint logic pada 0x{:x}",
-                                alamat_breakpoint_potensial
+                                va_bp_potensial
                             )));
-                            (*event_out).tipe = DebugEventTipe::EVENT_UNKNOWN;
-                            (*event_out).info_alamat = alamat_breakpoint_potensial;
+                            (*ptr_event).tipe = DebugEventTipe::EVENT_UNKNOWN;
+                            (*ptr_event).info_alamat = va_bp_potensial;
                             return Ok(false);
                         }
                     } else {
-                        (*event_out).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
-                        (*event_out).pid_thread = pid.as_raw();
-                        (*event_out).info_alamat = rip;
+                        (*ptr_event).tipe = DebugEventTipe::EVENT_SINGLE_STEP;
+                        (*ptr_event).pid_thread = pid.as_raw();
+                        (*ptr_event).info_alamat = rip;
                         return Ok(true);
                     }
                 }
@@ -141,16 +141,16 @@ impl MacosTracer {
                     ptrace::cont(pid, None).ok();
                     return Ok(false);
                 }
-                WaitStatus::Exited(pid, status_code) => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                    (*event_out).pid_thread = pid.as_raw();
-                    (*event_out).info_alamat = status_code as u64;
+                WaitStatus::Exited(pid, kode_status) => {
+                    (*ptr_event).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*ptr_event).pid_thread = pid.as_raw();
+                    (*ptr_event).info_alamat = kode_status as u64;
                     return Ok(true);
                 }
-                WaitStatus::Signaled(pid, signal, _) => {
-                    (*event_out).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
-                    (*event_out).pid_thread = pid.as_raw();
-                    (*event_out).info_alamat = signal as u64;
+                WaitStatus::Signaled(pid, sinyal, _) => {
+                    (*ptr_event).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                    (*ptr_event).pid_thread = pid.as_raw();
+                    (*ptr_event).info_alamat = sinyal as u64;
                     return Ok(true);
                 }
                 _ => {
@@ -162,9 +162,9 @@ impl MacosTracer {
 }
 
 impl PlatformTracer for MacosTracer {
-    fn attach(&mut self) -> Result<(), ReToolsError> {
-        ptrace::attach(self.pid_target)?;
-        match waitpid(self.pid_target, None) {
+    fn attach_sasaran(&mut self) -> Result<(), ReToolsError> {
+        ptrace::attach(self.pid_sasaran)?;
+        match waitpid(self.pid_sasaran, None) {
             Ok(WaitStatus::Stopped(_, _)) => Ok(()),
             Ok(status) => Err(ReToolsError::Generic(format!(
                 "Status waitpid tidak terduga setelah attach: {:?}",
@@ -173,87 +173,87 @@ impl PlatformTracer for MacosTracer {
             Err(e) => Err(e.into()),
         }
     }
-    fn detach(&mut self) -> Result<(), ReToolsError> {
-        for (addr, orig_byte) in &self.breakpoints_map {
-            self.tulis_memory(*addr, &[*orig_byte]).ok();
+    fn detach_sasaran(&mut self) -> Result<(), ReToolsError> {
+        for (va, byte_asli) in &self.map_titik_henti {
+            self.write_memori(*va, &[*byte_asli]).ok();
         }
-        self.breakpoints_map.clear();
-        ptrace::detach(self.pid_target, None)?;
+        self.map_titik_henti.clear();
+        ptrace::detach(self.pid_sasaran, None)?;
         Ok(())
     }
-    fn baca_memory(&self, addr: u64, size: c_int) -> Result<Vec<u8>, ReToolsError> {
-        let mut buffer = Vec::with_capacity(size as usize);
-        for i in 0..(size as usize) {
-            let read_addr = (addr + i as u64) as ptrace::AddressType;
-            match ptrace::read(self.pid_target, read_addr) {
+    fn read_memori(&self, va_alamat: u64, sz_ukuran: c_int) -> Result<Vec<u8>, ReToolsError> {
+        let mut vec_buffer = Vec::with_capacity(sz_ukuran as usize);
+        for i in 0..(sz_ukuran as usize) {
+            let read_addr = (va_alamat + i as u64) as ptrace::AddressType;
+            match ptrace::read(self.pid_sasaran, read_addr) {
                 Ok(word) => {
-                    buffer.push((word & 0xFF) as u8);
+                    vec_buffer.push((word & 0xFF) as u8);
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(buffer)
+        Ok(vec_buffer)
     }
-    fn tulis_memory(&self, addr: u64, data: &[u8]) -> Result<usize, ReToolsError> {
-        for (i, &byte) in data.iter().enumerate() {
-            let write_addr = (addr + i as u64) as ptrace::AddressType;
+    fn write_memori(&self, va_alamat: u64, buf_data: &[u8]) -> Result<usize, ReToolsError> {
+        for (i, &byte) in buf_data.iter().enumerate() {
+            let write_addr = (va_alamat + i as u64) as ptrace::AddressType;
             let data_word = byte as ptrace::WordType;
-            ptrace::write(self.pid_target, write_addr, data_word)?;
+            ptrace::write(self.pid_sasaran, write_addr, data_word)?;
         }
-        Ok(data.len())
+        Ok(buf_data.len())
     }
-    fn get_registers(&self) -> Result<C_Registers, ReToolsError> {
-        let regs_any = ptrace::getregs(self.pid_target)?;
+    fn get_register(&self) -> Result<C_Registers, ReToolsError> {
+        let reg_any = ptrace::getregs(self.pid_sasaran)?;
         #[cfg(target_arch = "x86_64")]
-        if let Some(regs) = regs_any.as_x86_64() {
+        if let Some(reg) = reg_any.as_x86_64() {
             return Ok(C_Registers {
-                rax: regs.rax,
-                rbx: regs.rbx,
-                rcx: regs.rcx,
-                rdx: regs.rdx,
-                rsi: regs.rsi,
-                rdi: regs.rdi,
-                rbp: regs.rbp,
-                rsp: regs.rsp,
-                r8: regs.r8,
-                r9: regs.r9,
-                r10: regs.r10,
-                r11: regs.r11,
-                r12: regs.r12,
-                r13: regs.r13,
-                r14: regs.r14,
-                r15: regs.r15,
-                rip: regs.rip,
-                eflags: regs.rflags,
+                rax: reg.rax,
+                rbx: reg.rbx,
+                rcx: reg.rcx,
+                rdx: reg.rdx,
+                rsi: reg.rsi,
+                rdi: reg.rdi,
+                rbp: reg.rbp,
+                rsp: reg.rsp,
+                r8: reg.r8,
+                r9: reg.r9,
+                r10: reg.r10,
+                r11: reg.r11,
+                r12: reg.r12,
+                r13: reg.r13,
+                r14: reg.r14,
+                r15: reg.r15,
+                rip: reg.rip,
+                eflags: reg.rflags,
             });
         }
         Err(ReToolsError::Generic(
             "Gagal konversi register ke x86_64".to_string(),
         ))
     }
-    fn set_registers(&self, c_regs: &C_Registers) -> Result<(), ReToolsError> {
-        let mut regs_any = ptrace::getregs(self.pid_target)?;
+    fn set_register(&self, reg_nilai: &C_Registers) -> Result<(), ReToolsError> {
+        let mut reg_any = ptrace::getregs(self.pid_sasaran)?;
         #[cfg(target_arch = "x86_64")]
-        if let Some(regs) = regs_any.as_x86_64_mut() {
-            regs.rax = c_regs.rax;
-            regs.rbx = c_regs.rbx;
-            regs.rcx = c_regs.rcx;
-            regs.rdx = c_regs.rdx;
-            regs.rsi = c_regs.rsi;
-            regs.rdi = c_regs.rdi;
-            regs.rbp = c_regs.rbp;
-            regs.rsp = c_regs.rsp;
-            regs.r8 = c_regs.r8;
-            regs.r9 = c_regs.r9;
-            regs.r10 = c_regs.r10;
-            regs.r11 = c_regs.r11;
-            regs.r12 = c_regs.r12;
-            regs.r13 = c_regs.r13;
-            regs.r14 = c_regs.r14;
-            regs.r15 = c_regs.r15;
-            regs.rip = c_regs.rip;
-            regs.rflags = c_regs.eflags;
-            ptrace::setregs(self.pid_target, regs_any)?;
+        if let Some(reg) = reg_any.as_x86_64_mut() {
+            reg.rax = reg_nilai.rax;
+            reg.rbx = reg_nilai.rbx;
+            reg.rcx = reg_nilai.rcx;
+            reg.rdx = reg_nilai.rdx;
+            reg.rsi = reg_nilai.rsi;
+            reg.rdi = reg_nilai.rdi;
+            reg.rbp = reg_nilai.rbp;
+            reg.rsp = reg_nilai.rsp;
+            reg.r8 = reg_nilai.r8;
+            reg.r9 = reg_nilai.r9;
+            reg.r10 = reg_nilai.r10;
+            reg.r11 = reg_nilai.r11;
+            reg.r12 = reg_nilai.r12;
+            reg.r13 = reg_nilai.r13;
+            reg.r14 = reg_nilai.r14;
+            reg.r15 = reg_nilai.r15;
+            reg.rip = reg_nilai.rip;
+            reg.rflags = reg_nilai.eflags;
+            ptrace::setregs(self.pid_sasaran, reg_any)?;
             return Ok(());
         }
         Err(ReToolsError::Generic(
@@ -261,12 +261,12 @@ impl PlatformTracer for MacosTracer {
         ))
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
-        ptrace::cont(self.pid_target, None)?;
+        ptrace::cont(self.pid_sasaran, None)?;
         Ok(())
     }
-    fn single_step(&mut self) -> Result<(), ReToolsError> {
-        ptrace::step(self.pid_target, None)?;
-        match waitpid(self.pid_target, None) {
+    fn step_instruksi(&mut self) -> Result<(), ReToolsError> {
+        ptrace::step(self.pid_sasaran, None)?;
+        match waitpid(self.pid_sasaran, None) {
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => Ok(()),
             Ok(status) => Err(ReToolsError::Generic(format!(
                 "Status waitpid tidak terduga setelah step: {:?}",
@@ -275,83 +275,83 @@ impl PlatformTracer for MacosTracer {
             Err(e) => Err(e.into()),
         }
     }
-    fn tunggu_event(&mut self, event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
+    fn wait_event(&mut self, ptr_event_out: *mut C_DebugEvent) -> Result<c_int, ReToolsError> {
         loop {
-            let status = match waitpid(self.pid_target, None) {
+            let status = match waitpid(self.pid_sasaran, None) {
                 Ok(s) => s,
                 Err(e) => return Err(e.into()),
             };
-            if self.process_wait_status(status, event_out)? {
+            if self.process_status_wait(status, ptr_event_out)? {
                 return Ok(0);
             }
         }
     }
-    fn poll_event(&mut self, event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
-        match waitpid(self.pid_target, Some(WaitPidFlag::WNOHANG)) {
+    fn poll_event(&mut self, ptr_event_out: *mut C_DebugEvent) -> Result<bool, ReToolsError> {
+        match waitpid(self.pid_sasaran, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => Ok(false),
-            Ok(status) => self.process_wait_status(status, event_out),
+            Ok(status) => self.process_status_wait(status, ptr_event_out),
             Err(nix::errno::Errno::ECHILD) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
-    fn set_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
-        if self.breakpoints_map.contains_key(&addr) {
+    fn set_titik_henti_sw(&mut self, va_alamat: u64) -> Result<(), ReToolsError> {
+        if self.map_titik_henti.contains_key(&va_alamat) {
             return Ok(());
         }
-        let orig_bytes = self.baca_memory(addr, 1)?;
-        if orig_bytes.is_empty() {
+        let vec_byte_asli = self.read_memori(va_alamat, 1)?;
+        if vec_byte_asli.is_empty() {
             return Err(ReToolsError::Generic(format!(
                 "Gagal membaca byte asli di 0x{:x}",
-                addr
+                va_alamat
             )));
         }
-        let orig_byte = orig_bytes[0];
-        self.tulis_memory(addr, &[0xCC])?;
-        self.breakpoints_map.insert(addr, orig_byte);
+        let byte_asli = vec_byte_asli[0];
+        self.write_memori(va_alamat, &[0xCC])?;
+        self.map_titik_henti.insert(va_alamat, byte_asli);
         Ok(())
     }
-    fn remove_software_breakpoint(&mut self, addr: u64) -> Result<(), ReToolsError> {
-        if let Some(orig_byte) = self.breakpoints_map.remove(&addr) {
-            self.tulis_memory(addr, &[orig_byte])?;
+    fn remove_titik_henti_sw(&mut self, va_alamat: u64) -> Result<(), ReToolsError> {
+        if let Some(byte_asli) = self.map_titik_henti.remove(&va_alamat) {
+            self.write_memori(va_alamat, &[byte_asli])?;
         }
         Ok(())
     }
-    fn set_hardware_breakpoint(&mut self, addr: u64, index: usize) -> Result<(), ReToolsError> {
-        self.set_hw_bp(addr, index)
+    fn set_titik_henti_hw(&mut self, va_alamat: u64, idx_slot: usize) -> Result<(), ReToolsError> {
+        self.set_bp_hw_internal(va_alamat, idx_slot)
     }
-    fn remove_hardware_breakpoint(&mut self, index: usize) -> Result<(), ReToolsError> {
-        self.remove_hw_bp(index)
+    fn remove_titik_henti_hw(&mut self, idx_slot: usize) -> Result<(), ReToolsError> {
+        self.remove_bp_hw_internal(idx_slot)
     }
-    fn list_semua_threads(&self) -> Result<Vec<c_int>, ReToolsError> {
-        Err(ReToolsError::Generic("list_semua_threads belum diimplementasikan di macOS".to_string()))
+    fn list_thread(&self) -> Result<Vec<c_int>, ReToolsError> {
+        Err(ReToolsError::Generic("list_thread belum diimplementasikan di macOS".to_string()))
     }
-    fn get_memory_regions(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
-        Err(ReToolsError::Generic("get_memory_regions belum diimplementasikan di macOS".to_string()))
+    fn get_region_memori(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
+        Err(ReToolsError::Generic("get_region_memori belum diimplementasikan di macOS".to_string()))
     }
-    fn set_pelacakan_syscall(&mut self, _enable: bool) -> Result<(), ReToolsError> {
-        Err(ReToolsError::Generic("set_pelacakan_syscall belum diimplementasikan di macOS".to_string()))
+    fn set_trace_syscall(&mut self, _status_aktif: bool) -> Result<(), ReToolsError> {
+        Err(ReToolsError::Generic("set_trace_syscall belum diimplementasikan di macOS".to_string()))
     }
-    fn get_info_syscall(&self, _pid_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
+    fn get_info_syscall(&self, _id_thread: c_int) -> Result<C_SyscallInfo, ReToolsError> {
         Err(ReToolsError::Generic("get_info_syscall belum diimplementasikan di macOS".to_string()))
     }
-    fn set_options_multithread(&mut self) -> Result<(), ReToolsError> {
+    fn set_opsi_multithread(&mut self) -> Result<(), ReToolsError> {
         Ok(())
     }
-    fn hook_memory_api(
+    fn hook_api_memori(
         &mut self,
-        _api_name: &str,
-        _on_entry_callback: u64,
-        _on_exit_callback: u64,
+        _nama_api: &str,
+        _va_entry: u64,
+        _va_exit: u64,
     ) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn remove_memory_api_hook(&mut self, _api_name: &str) -> Result<(), ReToolsError> {
+    fn remove_hook_api_memori(&mut self, _nama_api: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn dump_memory_region(&self, _address: u64, _size: usize, _file_path: &str) -> Result<(), ReToolsError> {
+    fn dump_region_memori(&self, _va_alamat: u64, _sz_ukuran: usize, _jalur_berkas: &str) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fungsi tidak diimplementasi".to_string()))
     }
-    fn sembunyikan_status_debugger(&mut self) -> Result<(), ReToolsError> {
+    fn hide_status_debugger(&mut self) -> Result<(), ReToolsError> {
         Err(ReToolsError::Generic("Fitur anti-anti-debug belum diimplementasikan di macOS".to_string()))
     }
 }

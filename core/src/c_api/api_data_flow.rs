@@ -1,13 +1,13 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
-use crate::error::{set_last_error, ReToolsError};
-use crate::logic::data_flow::chains::bangun_chains_reaching_defs;
-use crate::logic::data_flow::liveness::hitung_analisis_liveness;
-use crate::logic::data_flow::tipe::{analisis_tipe_dasar, verifikasi_batas_memori};
-use crate::logic::data_flow::vsa::{analisis_value_set, VsaState};
-use crate::logic::static_analysis::cfg::bangun_cfg_internal;
+use crate::error::{set_err_last, ReToolsError};
+use crate::logic::data_flow::chains::build_chain_def;
+use crate::logic::data_flow::liveness::calc_live_var;
+use crate::logic::data_flow::tipe::{infer_type_base, verify_bound_mem};
+use crate::logic::data_flow::vsa::{analyze_set_nilai, VsaState};
+use crate::logic::static_analysis::cfg::build_cfg_internal;
 use crate::logic::static_analysis::parser::Binary;
-use crate::logic::data_flow::ssa::konstruksi_ssa_lengkap;
+use crate::logic::data_flow::ssa::construct_ssa_complete;
 
 use libc::c_char;
 use petgraph::graph::NodeIndex;
@@ -15,8 +15,8 @@ use std::ffi::{CStr, CString};
 use std::collections::{HashMap, HashSet};
 
 unsafe fn c_analyze_binary_and_serialize<F>(
-	file_path_c: *const c_char,
-	f: F,
+	ptr_path_raw: *const c_char,
+	func_aksi: F,
 ) -> *mut c_char
 where
 	F: FnOnce(
@@ -27,34 +27,34 @@ where
 		>,
 	) -> Result<String, ReToolsError>,
 {
-	let error_json = CString::new("{}").unwrap().into_raw();
-	let path_str = match CStr::from_ptr(file_path_c).to_str() {
+	let ptr_json_error = CString::new("{}").unwrap().into_raw();
+	let str_path_sumber = match CStr::from_ptr(ptr_path_raw).to_str() {
 		Ok(s) => s,
 		Err(e) => {
-			set_last_error(e.into());
-			return error_json;
+			set_err_last(e.into());
+			return ptr_json_error;
 		}
 	};
-	let binary = match Binary::load(path_str) {
+	let obj_biner = match Binary::load(str_path_sumber) {
 		Ok(b) => b,
 		Err(e) => {
-			set_last_error(e);
-			return error_json;
+			set_err_last(e);
+			return ptr_json_error;
 		}
 	};
-	let mut cfg = match bangun_cfg_internal(&binary) {
+	let mut graf_cfg = match build_cfg_internal(&obj_biner) {
 		Ok(g) => g,
 		Err(e) => {
-			set_last_error(e);
-			return error_json;
+			set_err_last(e);
+			return ptr_json_error;
 		}
 	};
-    konstruksi_ssa_lengkap(&mut cfg);
-	match f(&binary, &cfg) {
-		Ok(json) => CString::new(json).unwrap_or_default().into_raw(),
+    construct_ssa_complete(&mut graf_cfg);
+	match func_aksi(&obj_biner, &graf_cfg) {
+		Ok(str_json) => CString::new(str_json).unwrap_or_default().into_raw(),
 		Err(e) => {
-			set_last_error(e);
-			error_json
+			set_err_last(e);
+			ptr_json_error
 		}
 	}
 }
@@ -62,107 +62,107 @@ where
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getLivenessAnalysis_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |_binary, cfg| {
-		let liveness = hitung_analisis_liveness(cfg);
-		let mut simple_liveness: std::collections::HashMap<usize, (HashSet<String>, HashSet<String>)> =
+	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
+		let obj_liveness = calc_live_var(graf_cfg);
+		let mut peta_liveness_sederhana: std::collections::HashMap<usize, (HashSet<String>, HashSet<String>)> =
 			std::collections::HashMap::new();
-		for (node, in_set) in liveness.live_in {
-			let out_set = liveness.live_out.get(&node).unwrap().clone();
-			simple_liveness.insert(node.index(), (in_set, out_set));
+		for (idx_simpul, set_masuk) in obj_liveness.live_in {
+			let set_keluar = obj_liveness.live_out.get(&idx_simpul).unwrap().clone();
+			peta_liveness_sederhana.insert(idx_simpul.index(), (set_masuk, set_keluar));
 		}
-		serde_json::to_string(&simple_liveness).map_err(|e| ReToolsError::Generic(e.to_string()))
+		serde_json::to_string(&peta_liveness_sederhana).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getReachingDefs_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |_binary, cfg| {
-		let (info, _, _) = bangun_chains_reaching_defs(cfg);
-		let mut simple_info: std::collections::HashMap<
+	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
+		let (obj_info, _, _) = build_chain_def(graf_cfg);
+		let mut peta_info_sederhana: std::collections::HashMap<
 			usize,
 			(
 				std::collections::HashMap<String, HashSet<crate::logic::data_flow::chains::DefLocation>>,
 				std::collections::HashMap<String, HashSet<crate::logic::data_flow::chains::DefLocation>>,
 			),
 		> = std::collections::HashMap::new();
-		for (node, in_set) in info.in_sets {
-			let out_set = info.out_sets.get(&node).unwrap().clone();
-			simple_info.insert(node.index(), (in_set, out_set));
+		for (idx_simpul, set_masuk) in obj_info.in_sets {
+			let set_keluar = obj_info.out_sets.get(&idx_simpul).unwrap().clone();
+			peta_info_sederhana.insert(idx_simpul.index(), (set_masuk, set_keluar));
 		}
-		serde_json::to_string(&simple_info).map_err(|e| ReToolsError::Generic(e.to_string()))
+		serde_json::to_string(&peta_info_sederhana).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getDefUseChains_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |_binary, cfg| {
-		let (_, def_use, _) = bangun_chains_reaching_defs(cfg);
-		serde_json::to_string(&def_use.chains).map_err(|e| ReToolsError::Generic(e.to_string()))
+	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
+		let (_, obj_def_use, _) = build_chain_def(graf_cfg);
+		serde_json::to_string(&obj_def_use.chains).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getUseDefChains_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |_binary, cfg| {
-		let (_, _, use_def) = bangun_chains_reaching_defs(cfg);
-		serde_json::to_string(&use_def.chains).map_err(|e| ReToolsError::Generic(e.to_string()))
+	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
+		let (_, _, obj_use_def) = build_chain_def(graf_cfg);
+		serde_json::to_string(&obj_use_def.chains).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getValueSetAnalysis_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |_binary, cfg| {
-		let vsa = analisis_value_set(cfg);
-		let simple_vsa: HashMap<usize, (VsaState, VsaState)> = vsa
+	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
+		let peta_vsa = analyze_set_nilai(graf_cfg);
+		let peta_vsa_sederhana: HashMap<usize, (VsaState, VsaState)> = peta_vsa
 			.into_iter()
-			.map(|(idx, states)| (idx.index(), states))
+			.map(|(idx_simpul, states)| (idx_simpul.index(), states))
 			.collect();
-		serde_json::to_string(&simple_vsa).map_err(|e| ReToolsError::Generic(e.to_string()))
+		serde_json::to_string(&peta_vsa_sederhana).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getTipeInference_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |binary, cfg| {
-		let vsa = analisis_value_set(cfg);
-		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
+	c_analyze_binary_and_serialize(ptr_path_raw, |obj_biner, graf_cfg| {
+		let peta_vsa = analyze_set_nilai(graf_cfg);
+		let peta_vsa_keluar: HashMap<NodeIndex, VsaState> = peta_vsa
 			.into_iter()
-			.map(|(idx, (_, out_state))| (idx, out_state))
+			.map(|(idx_simpul, (_, state_keluar))| (idx_simpul, state_keluar))
 			.collect();
-		let tipe_info = analisis_tipe_dasar(&vsa_out_states, cfg, binary);
-		serde_json::to_string(&tipe_info).map_err(|e| ReToolsError::Generic(e.to_string()))
+		let info_tipe = infer_type_base(&peta_vsa_keluar, graf_cfg, obj_biner);
+		serde_json::to_string(&info_tipe).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }
 
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn c_getMemoryAccessCheck_json(
-	file_path_c: *const c_char,
+	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(file_path_c, |binary, cfg| {
-		let vsa = analisis_value_set(cfg);
-		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
+	c_analyze_binary_and_serialize(ptr_path_raw, |obj_biner, graf_cfg| {
+		let peta_vsa = analyze_set_nilai(graf_cfg);
+		let peta_vsa_keluar: HashMap<NodeIndex, VsaState> = peta_vsa
 			.into_iter()
-			.map(|(idx, (_, out_state))| (idx, out_state))
+			.map(|(idx_simpul, (_, state_keluar))| (idx_simpul, state_keluar))
 			.collect();
-		let checks = verifikasi_batas_memori(&vsa_out_states, cfg, binary);
-		serde_json::to_string(&checks).map_err(|e| ReToolsError::Generic(e.to_string()))
+		let list_cek = verify_bound_mem(&peta_vsa_keluar, graf_cfg, obj_biner);
+		serde_json::to_string(&list_cek).map_err(|e| ReToolsError::Generic(e.to_string()))
 	})
 }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::error::ReToolsError;
 use crate::logic::static_analysis::parser::{Binary, SectionInfo, SymbolInfo};
 use crate::logic::static_analysis::disasm::ArsitekturDisasm;
-use crate::logic::ir::lifter::angkat_blok_instruksi;
+use crate::logic::ir::lifter::lift_blok_instr;
 use crate::logic::ir::instruction::MicroInstruction;
 
 #[derive(Debug, serde::Serialize)]
@@ -43,57 +43,57 @@ fn get_arch_from_binary(binary: &Binary) -> ArsitekturDisasm {
     }
 }
 
-fn lift_function_to_ir(
-    binary: &Binary,
-    sym: &SymbolInfo,
+fn lift_fungsi_ke_ir(
+    biner: &Binary,
+    simbol: &SymbolInfo,
     arch: ArsitekturDisasm,
 ) -> Result<Vec<MicroInstruction>, ReToolsError> {
-    let func_va = sym.addr;
-    let func_size = sym.size;
-    if func_size == 0 {
+    let va_fungsi = simbol.addr;
+    let sz_fungsi = simbol.size;
+    if sz_fungsi == 0 {
         return Ok(Vec::new());
     }
-    let func_offset = va_to_offset(func_va, &binary.sections)
-        .ok_or_else(|| ReToolsError::Generic(format!("VA 0x{:x} tidak ditemukan di sections", func_va)))?;
-    let start = func_offset as usize;
-    let end = start.saturating_add(func_size as usize);
-    if start > binary.file_data.len() || end > binary.file_data.len() {
-        return Err(ReToolsError::Generic(format!("Simbol 0x{:x} di luar batas file", func_va)));
+    let off_fungsi = va_to_offset(va_fungsi, &biner.sections)
+        .ok_or_else(|| ReToolsError::Generic(format!("VA 0x{:x} tidak ditemukan di sections", va_fungsi)))?;
+    let idx_mulai = off_fungsi as usize;
+    let idx_akhir = idx_mulai.saturating_add(sz_fungsi as usize);
+    if idx_mulai > biner.file_data.len() || idx_akhir > biner.file_data.len() {
+        return Err(ReToolsError::Generic(format!("Simbol 0x{:x} di luar batas file", va_fungsi)));
     }
-    let func_bytes = &binary.file_data[start..end];
-    let mut all_irs = Vec::new();
-    let mut current_offset = 0;
-    while current_offset < func_bytes.len() {
-        let current_va = func_va + current_offset as u64;
-        let (size, irs) = match angkat_blok_instruksi(&func_bytes[current_offset..], current_va, arch) {
+    let bytes_fungsi = &biner.file_data[idx_mulai..idx_akhir];
+    let mut list_ir = Vec::new();
+    let mut off_kini = 0;
+    while off_kini < bytes_fungsi.len() {
+        let va_kini = va_fungsi + off_kini as u64;
+        let (sz, vec_ir) = match lift_blok_instr(&bytes_fungsi[off_kini..], va_kini, arch) {
             Ok((size, ir_vec)) if size > 0 => (size, ir_vec),
-            _ => (1, vec![MicroInstruction::TidakTerdefinisi]),
+            _ => (1, vec![MicroInstruction::Undefined]),
         };
-        all_irs.extend(irs);
-        current_offset += size;
-        if size == 0 {
+        list_ir.extend(vec_ir);
+        off_kini += sz;
+        if sz == 0 {
             break;
         }
     }
-    Ok(all_irs)
+    Ok(list_ir)
 }
 
-fn is_ir_branch(ir: &MicroInstruction) -> bool {
-    matches!(ir, MicroInstruction::Lompat(_) | MicroInstruction::LompatKondisi(_, _) | MicroInstruction::Kembali | MicroInstruction::Panggil(_))
+fn check_ir_cabang(ir: &MicroInstruction) -> bool {
+    matches!(ir, MicroInstruction::Jump(_) | MicroInstruction::JumpKondisi(_, _) | MicroInstruction::Return | MicroInstruction::Call(_))
 }
 
-fn get_ir_signature(ir: &MicroInstruction) -> &'static str {
+fn get_tanda_ir(ir: &MicroInstruction) -> &'static str {
     match ir {
         MicroInstruction::Assign(_, _) => "Assign",
-        MicroInstruction::SimpanMemori(_, _) => "SimpanMemori",
-        MicroInstruction::Lompat(_) => "Lompat",
-        MicroInstruction::LompatKondisi(_, _) => "LompatKondisi",
-        MicroInstruction::Panggil(_) => "Panggil",
-        MicroInstruction::Kembali => "Kembali",
+        MicroInstruction::StoreMemori(_, _) => "StoreMemori",
+        MicroInstruction::Jump(_) => "Jump",
+        MicroInstruction::JumpKondisi(_, _) => "JumpKondisi",
+        MicroInstruction::Call(_) => "Call",
+        MicroInstruction::Return => "Return",
         MicroInstruction::Nop => "Nop",
         MicroInstruction::Syscall => "Syscall",
-        MicroInstruction::TidakTerdefinisi => "TidakTerdefinisi",
-        MicroInstruction::InstruksiVektor { .. } => "InstruksiVektor",
+        MicroInstruction::Undefined => "Undefined",
+        MicroInstruction::VectorOp { .. } => "VectorOp",
         MicroInstruction::AtomicRMW { .. } => "Atomic",
         MicroInstruction::MemoryFence => "Fence",
         MicroInstruction::UpdateFlag(_, _) => "UpdateFlag",
@@ -101,30 +101,30 @@ fn get_ir_signature(ir: &MicroInstruction) -> &'static str {
     }
 }
 
-fn generate_function_signature(irs: Vec<MicroInstruction>) -> Vec<String> {
-    let mut all_block_sigs = Vec::new();
-    let mut current_block_sig = String::new();
-    for ir in irs {
-        current_block_sig.push_str(get_ir_signature(&ir));
-        current_block_sig.push(';');
-        if is_ir_branch(&ir) {
-            all_block_sigs.push(current_block_sig);
-            current_block_sig = String::new();
+fn create_tanda_fungsi(list_ir: Vec<MicroInstruction>) -> Vec<String> {
+    let mut list_tanda_blok = Vec::new();
+    let mut tanda_blok_kini = String::new();
+    for ir in list_ir {
+        tanda_blok_kini.push_str(get_tanda_ir(&ir));
+        tanda_blok_kini.push(';');
+        if check_ir_cabang(&ir) {
+            list_tanda_blok.push(tanda_blok_kini);
+            tanda_blok_kini = String::new();
         }
     }
-    if !current_block_sig.is_empty() {
-        all_block_sigs.push(current_block_sig);
+    if !tanda_blok_kini.is_empty() {
+        list_tanda_blok.push(tanda_blok_kini);
     }
-    all_block_sigs
+    list_tanda_blok
 }
 
-fn compare_function_signatures(
-    sig1_res: Result<Vec<String>, ReToolsError>,
-    sig2_res: Result<Vec<String>, ReToolsError>,
+fn cmp_tanda_fungsi(
+    res_tanda_1: Result<Vec<String>, ReToolsError>,
+    res_tanda_2: Result<Vec<String>, ReToolsError>,
 ) -> c_int {
-    match (sig1_res, sig2_res) {
-        (Ok(sig1), Ok(sig2)) => {
-            if sig1 == sig2 {
+    match (res_tanda_1, res_tanda_2) {
+        (Ok(t1), Ok(t2)) => {
+            if t1 == t2 {
                 STATUS_MATCHED
             } else {
                 STATUS_MODIFIED
@@ -134,19 +134,19 @@ fn compare_function_signatures(
     }
 }
 
-fn perform_diff_logic(
-    binary1: &Binary,
-    binary2: &Binary,
+fn calc_diff_biner(
+    biner_1: &Binary,
+    biner_2: &Binary,
 ) -> Result<Vec<DiffResultInternal>, ReToolsError> {
-    let arch1 = get_arch_from_binary(binary1);
-    let arch2 = get_arch_from_binary(binary2);
-    let symbols1_map: HashMap<String, &SymbolInfo> = binary1
+    let arch_1 = get_arch_from_binary(biner_1);
+    let arch_2 = get_arch_from_binary(biner_2);
+    let peta_simbol_1: HashMap<String, &SymbolInfo> = biner_1
         .symbols
         .iter()
         .filter(|s| s.symbol_type == "FUNC" && s.size > 0)
         .map(|s| (s.name.clone(), s))
         .collect();
-    let symbols2_map: HashMap<String, &SymbolInfo> = binary2
+    let peta_simbol_2: HashMap<String, &SymbolInfo> = biner_2
         .symbols
         .iter()
         .filter(|s| s.symbol_type == "FUNC" && s.size > 0)
@@ -154,52 +154,52 @@ fn perform_diff_logic(
         .collect();
     info!(
         "Membandingkan (IR-based) {} simbol FUNC dari file 1 vs {} simbol FUNC dari file 2",
-        symbols1_map.len(),
-        symbols2_map.len()
+        peta_simbol_1.len(),
+        peta_simbol_2.len()
     );
-    let mut results: Vec<DiffResultInternal> = Vec::new();
-    let mut processed_names: HashMap<String, bool> = HashMap::new();
-    let status_map = ["Matched", "Modified", "Removed", "Added", "Unknown"];
+    let mut list_hasil: Vec<DiffResultInternal> = Vec::new();
+    let mut peta_nama_diproses: HashMap<String, bool> = HashMap::new();
+    let map_status = ["Matched", "Modified", "Removed", "Added", "Unknown"];
     debug!("Membandingkan simbol dari file 1...");
-    for (name, sym1) in &symbols1_map {
-        processed_names.insert(name.clone(), true);
-        let mut status_code = STATUS_REMOVED;
-        let mut addr2 = 0;
-        let sig1 = lift_function_to_ir(binary1, sym1, arch1).map(generate_function_signature);
-        if let Some(sym2) = symbols2_map.get(name) {
-            addr2 = sym2.addr;
-            let sig2 = lift_function_to_ir(binary2, sym2, arch2).map(generate_function_signature);
-            status_code = compare_function_signatures(sig1, sig2);
+    for (nama, sym1) in &peta_simbol_1 {
+        peta_nama_diproses.insert(nama.clone(), true);
+        let mut kode_status = STATUS_REMOVED;
+        let mut addr_2 = 0;
+        let tanda_1 = lift_fungsi_ke_ir(biner_1, sym1, arch_1).map(create_tanda_fungsi);
+        if let Some(sym2) = peta_simbol_2.get(nama) {
+            addr_2 = sym2.addr;
+            let tanda_2 = lift_fungsi_ke_ir(biner_2, sym2, arch_2).map(create_tanda_fungsi);
+            kode_status = cmp_tanda_fungsi(tanda_1, tanda_2);
         }
-        results.push(DiffResultInternal {
-            function_name: name.clone(),
+        list_hasil.push(DiffResultInternal {
+            function_name: nama.clone(),
             address_file1: sym1.addr,
-            address_file2: addr2,
-            status: status_map[status_code as usize].to_string(),
+            address_file2: addr_2,
+            status: map_status[kode_status as usize].to_string(),
         });
     }
     debug!("Mencari simbol yang ditambah di file 2...");
-    for (name, sym2) in &symbols2_map {
-        if !processed_names.contains_key(name) {
-            results.push(DiffResultInternal {
-                function_name: name.clone(),
+    for (nama, sym2) in &peta_simbol_2 {
+        if !peta_nama_diproses.contains_key(nama) {
+            list_hasil.push(DiffResultInternal {
+                function_name: nama.clone(),
                 address_file1: 0,
                 address_file2: sym2.addr,
-                status: status_map[STATUS_ADDED as usize].to_string(),
+                status: map_status[STATUS_ADDED as usize].to_string(),
             });
         }
     }
-    Ok(results)
+    Ok(list_hasil)
 }
 
 pub fn diff_binary_internal(
-    file1_path: &str,
-    file2_path: &str,
+    path_berkas_1: &str,
+    path_berkas_2: &str,
 ) -> Result<Vec<DiffResultInternal>, String> {
-    info!("Mulai diff binary: {} vs {}", file1_path, file2_path);
-    let binary1 = Binary::load(file1_path).map_err(|e| e.to_string())?;
-    let binary2 = Binary::load(file2_path).map_err(|e| e.to_string())?;
-    let results = perform_diff_logic(&binary1, &binary2).map_err(|e| e.to_string())?;
-    info!("Diff selesai, {} hasil ditemukan", results.len());
-    Ok(results)
+    info!("Mulai diff binary: {} vs {}", path_berkas_1, path_berkas_2);
+    let biner_1 = Binary::load(path_berkas_1).map_err(|e| e.to_string())?;
+    let biner_2 = Binary::load(path_berkas_2).map_err(|e| e.to_string())?;
+    let hasil = calc_diff_biner(&biner_1, &biner_2).map_err(|e| e.to_string())?;
+    info!("Diff selesai, {} hasil ditemukan", hasil.len());
+    Ok(hasil)
 }

@@ -8,9 +8,9 @@ pub mod api_data_flow;
 
 #[pymodule]
 fn re_tools(m: &Bound<'_, PyModule>) -> PyResult<()> {
-	api_static::register_static_functions(m)?;
-	api_ir::register_ir_functions(m)?;
-	api_data_flow::register_data_flow_functions(m)?;
+	api_static::init_modul_static(m)?;
+	api_ir::init_modul_ir(m)?;
+	api_data_flow::init_modul_data_flow(m)?;
 	m.add("ARCH_UNKNOWN", ArsitekturDisasm::ARCH_UNKNOWN as u32)?;
 	m.add("ARCH_X86_32", ArsitekturDisasm::ARCH_X86_32 as u32)?;
 	m.add("ARCH_X86_64", ArsitekturDisasm::ARCH_X86_64 as u32)?;

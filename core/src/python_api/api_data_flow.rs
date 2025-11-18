@@ -3,22 +3,22 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::api_static::map_err_to_py;
-use crate::logic::data_flow::chains::bangun_chains_reaching_defs;
-use crate::logic::data_flow::liveness::hitung_analisis_liveness;
-use crate::logic::data_flow::tipe::{analisis_tipe_dasar, verifikasi_batas_memori};
-use crate::logic::data_flow::vsa::{analisis_value_set, VsaState};
-use crate::logic::static_analysis::cfg::bangun_cfg_internal;
+use super::api_static::convert_err_py;
+use crate::logic::data_flow::chains::build_chain_def;
+use crate::logic::data_flow::liveness::calc_live_var;
+use crate::logic::data_flow::tipe::{infer_type_base, verify_bound_mem};
+use crate::logic::data_flow::vsa::{analyze_set_nilai, VsaState};
+use crate::logic::static_analysis::cfg::build_cfg_internal;
 use crate::logic::static_analysis::parser::Binary;
-use crate::logic::data_flow::ssa::konstruksi_ssa_lengkap;
+use crate::logic::data_flow::ssa::construct_ssa_complete;
 
 use log::info;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
-fn analyze_binary_and_serialize_py<F>(
+fn wrap_calc_analisis<F>(
 	py: Python,
-	file_path: &str,
+	jalur_berkas: &str,
 	f: F,
 ) -> PyResult<PyObject>
 where
@@ -30,10 +30,10 @@ where
 		>,
 	) -> PyResult<String>,
 {
-	info!("py: Menganalisis binary: {}", file_path);
-	let binary = Binary::load(file_path).map_err(map_err_to_py)?;
-	let mut cfg = bangun_cfg_internal(&binary).map_err(map_err_to_py)?;
-    konstruksi_ssa_lengkap(&mut cfg);
+	info!("py: Menganalisis binary: {}", jalur_berkas);
+	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
+	let mut cfg = build_cfg_internal(&binary).map_err(convert_err_py)?;
+    construct_ssa_complete(&mut cfg);
 	let json_str = f(&binary, &mut cfg)?;
 	let json_module = PyModule::import_bound(py, "json")?;
 	let py_json = json_module.getattr("loads")?.call1((json_str,))?;
@@ -41,9 +41,9 @@ where
 }
 
 #[pyfunction(name = "getLivenessAnalysis")]
-fn get_liveness_analysis_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |_binary, cfg| {
-		let liveness = hitung_analisis_liveness(cfg);
+fn wrap_calc_liveness(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
+		let liveness = calc_live_var(cfg);
 		let mut simple_liveness: HashMap<String, (HashSet<String>, HashSet<String>)> =
 			HashMap::new();
 		for (node, in_set) in liveness.live_in {
@@ -55,9 +55,9 @@ fn get_liveness_analysis_py(py: Python, file_path: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getReachingDefs")]
-fn get_reaching_defs_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |_binary, cfg| {
-		let (info, _, _) = bangun_chains_reaching_defs(cfg);
+fn wrap_calc_reaching(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
+		let (info, _, _) = build_chain_def(cfg);
 		let mut simple_info: HashMap<String, (ReachingDefSet, ReachingDefSet)> = HashMap::new();
 		for (node, in_set) in info.in_sets {
 			let out_set = info.out_sets.get(&node).unwrap().clone();
@@ -69,25 +69,25 @@ fn get_reaching_defs_py(py: Python, file_path: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getDefUseChains")]
-fn get_def_use_chains_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |_binary, cfg| {
-		let (_, def_use, _) = bangun_chains_reaching_defs(cfg);
+fn wrap_calc_def_use(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
+		let (_, def_use, _) = build_chain_def(cfg);
 		serde_json::to_string(&def_use.chains).map_err(|e| PyValueError::new_err(e.to_string()))
 	})
 }
 
 #[pyfunction(name = "getUseDefChains")]
-fn get_use_def_chains_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |_binary, cfg| {
-		let (_, _, use_def) = bangun_chains_reaching_defs(cfg);
+fn wrap_calc_use_def(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
+		let (_, _, use_def) = build_chain_def(cfg);
 		serde_json::to_string(&use_def.chains).map_err(|e| PyValueError::new_err(e.to_string()))
 	})
 }
 
 #[pyfunction(name = "getValueSetAnalysis")]
-fn get_value_set_analysis_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |_binary, cfg| {
-		let vsa = analisis_value_set(cfg);
+fn wrap_calc_vsa(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
+		let vsa = analyze_set_nilai(cfg);
 		let simple_vsa: HashMap<String, (VsaState, VsaState)> = vsa
 			.into_iter()
 			.map(|(idx, states)| (format!("block_{}", idx.index()), states))
@@ -97,38 +97,38 @@ fn get_value_set_analysis_py(py: Python, file_path: &str) -> PyResult<PyObject> 
 }
 
 #[pyfunction(name = "getTipeInference")]
-fn get_tipe_inference_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |binary, cfg| {
-		let vsa = analisis_value_set(cfg);
+fn wrap_calc_tipe(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |binary, cfg| {
+		let vsa = analyze_set_nilai(cfg);
 		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
 			.into_iter()
 			.map(|(idx, (_, out_state))| (idx, out_state))
 			.collect();
-		let tipe_info = analisis_tipe_dasar(&vsa_out_states, cfg, binary);
+		let tipe_info = infer_type_base(&vsa_out_states, cfg, binary);
 		serde_json::to_string(&tipe_info).map_err(|e| PyValueError::new_err(e.to_string()))
 	})
 }
 
 #[pyfunction(name = "getMemoryAccessCheck")]
-fn get_memory_access_check_py(py: Python, file_path: &str) -> PyResult<PyObject> {
-	analyze_binary_and_serialize_py(py, file_path, |binary, cfg| {
-		let vsa = analisis_value_set(cfg);
+fn wrap_scan_mem_check(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+	wrap_calc_analisis(py, jalur_berkas, |binary, cfg| {
+		let vsa = analyze_set_nilai(cfg);
 		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
 			.into_iter()
 			.map(|(idx, (_, out_state))| (idx, out_state))
 			.collect();
-		let checks = verifikasi_batas_memori(&vsa_out_states, cfg, binary);
+		let checks = verify_bound_mem(&vsa_out_states, cfg, binary);
 		serde_json::to_string(&checks).map_err(|e| PyValueError::new_err(e.to_string()))
 	})
 }
 
-pub fn register_data_flow_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
-	m.add_function(wrap_pyfunction!(get_liveness_analysis_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_reaching_defs_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_def_use_chains_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_use_def_chains_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_value_set_analysis_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_tipe_inference_py, m)?)?;
-	m.add_function(wrap_pyfunction!(get_memory_access_check_py, m)?)?;
+pub fn init_modul_data_flow(m: &Bound<'_, PyModule>) -> PyResult<()> {
+	m.add_function(wrap_pyfunction!(wrap_calc_liveness, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_calc_reaching, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_calc_def_use, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_calc_use_def, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_calc_vsa, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_calc_tipe, m)?)?;
+	m.add_function(wrap_pyfunction!(wrap_scan_mem_check, m)?)?;
 	Ok(())
 }

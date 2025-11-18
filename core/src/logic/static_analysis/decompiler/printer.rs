@@ -37,7 +37,7 @@ impl PrinterState {
 	}
 }
 
-pub fn print_ast_to_string(node: &NodeStruktur, nama_fungsi: &str) -> String {
+pub fn render_ast_code(node: &NodeStruktur, nama_fungsi: &str) -> String {
 	let mut state = PrinterState::new();
 	state.write_line(&format!("void {}(void) {{", nama_fungsi));
 	state.indent();
@@ -112,12 +112,12 @@ fn print_pernyataan(pernyataan: &PernyataanPseudo, state: &mut PrinterState) {
 			writeln!(
 				state.output,
 				"{} = {};",
-				tujuan.nama_dasar,
+				tujuan.id_reg,
 				print_ekspresi(sumber)
 			)
 			.unwrap();
 		}
-		PernyataanPseudo::SimpanMemori { alamat, nilai } => {
+		PernyataanPseudo::StoreMem { alamat, nilai } => {
 			writeln!(
 				state.output,
 				"*({}) = {};",
@@ -126,7 +126,7 @@ fn print_pernyataan(pernyataan: &PernyataanPseudo, state: &mut PrinterState) {
 			)
 			.unwrap();
 		}
-		PernyataanPseudo::Lompat(target) => {
+		PernyataanPseudo::JumpTarget(target) => {
 			writeln!(state.output, "goto loc_{:x};", target).unwrap();
 		}
 		PernyataanPseudo::LompatKondisi {
@@ -177,7 +177,7 @@ fn print_pernyataan(pernyataan: &PernyataanPseudo, state: &mut PrinterState) {
 
 fn print_ekspresi(ekspresi: &EkspresiPseudo) -> String {
 	match ekspresi {
-		EkspresiPseudo::Variabel(var) => var.nama_dasar.clone(),
+		EkspresiPseudo::Variabel(var) => var.id_reg.clone(),
 		EkspresiPseudo::Konstanta(k) => format!("0x{:x}", k),
 		EkspresiPseudo::Flag(f) => format!("FLAG_{}", f),
 		EkspresiPseudo::OperasiBiner { op, kiri, kanan } => {
