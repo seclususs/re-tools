@@ -1,12 +1,7 @@
 /**
- * @file retools_dynamic.h
- * @brief [ID] Header untuk fungsionalitas Analisis Dinamis (Debugger/Tracer).
- *        [EN] Header for Dynamic Analysis functionality (Debugger/Tracer).
- * @details [ID] File ini berisi deklarasi fungsi dan struktur data C-ABI untuk analisis dinamis (debugger).
- *          [EN] This file contains C-ABI function and data structure declarations for dynamic analysis (debugger).
+ * @brief Dynamic Analysis and Debugging API.
  * @author Seclususs
- * @date 2025-11-13
- * @see https://github.com/seclususs/retools
+ * @date 2025-11-19
  */
 
 #ifndef RETOOLS_DYNAMIC_H
@@ -19,51 +14,37 @@ extern "C" {
 #endif
 
 // ===================================================================================
-// === TRACER / DEBUGGER ===
+// === DATA STRUCTURES ===
 // ===================================================================================
 
 /**
- * @struct C_Registers
- * @brief [ID] Struktur C-ABI untuk menyimpan register CPU (x86_64).
- *        [EN] C-ABI structure to store CPU registers (x86_64).
+ * @brief CPU register state (x86_64).
  */
 typedef struct C_Registers {
-    u64 rax;
-    u64 rbx;
-    u64 rcx;
-    u64 rdx;
-    u64 rsi;
-    u64 rdi;
-    u64 rbp;
-    u64 rsp;
-    u64 r8;
-    u64 r9;
-    u64 r10;
-    u64 r11;
-    u64 r12;
-    u64 r13;
-    u64 r14;
-    u64 r15;
-    u64 rip;
-    u64 eflags;
+    u64 rax; u64 rbx; u64 rcx; u64 rdx;
+    u64 rsi; u64 rdi; u64 rbp; u64 rsp;
+    u64 r8;  u64 r9;  u64 r10; u64 r11;
+    u64 r12; u64 r13; u64 r14; u64 r15;
+    u64 rip; u64 eflags;
 } C_Registers;
 
 /**
- * @enum DebugEventTipe
- * @brief [ID] Enum C-ABI untuk tipe event debugger.
- *        [EN] C-ABI enum for debugger event types.
+ * @brief Types of debug events.
  */
 typedef enum DebugEventTipe {
     EVENT_UNKNOWN = 0,
     EVENT_BREAKPOINT = 1,
     EVENT_SINGLE_STEP = 2,
-    EVENT_PROSES_EXIT = 3
+    EVENT_PROSES_EXIT = 3,
+    EVENT_THREAD_BARU = 4,
+    EVENT_THREAD_EXIT = 5,
+    EVENT_SYSCALL_ENTRY = 6,
+    EVENT_SYSCALL_EXIT = 7,
+    EVENT_MODUL_LOAD = 8
 } DebugEventTipe;
 
 /**
- * @struct C_DebugEvent
- * @brief [ID] Struktur C-ABI untuk menyimpan data event debugger.
- *        [EN] C-ABI structure to store debugger event data.
+ * @brief Debug event details.
  */
 typedef struct C_DebugEvent {
     DebugEventTipe tipe;
@@ -71,123 +52,123 @@ typedef struct C_DebugEvent {
     u64 info_alamat;
 } C_DebugEvent;
 
-/**
- * @brief [ID] Melakukan attach ke proses yang sedang berjalan.
- *        [EN] Attaches to a running process.
- * @param pid [ID] PID dari proses target.
- *            [EN] The PID of the target process.
- * @return [ID] Handle internal ke state debugger (`RT_Handle`), NULL jika gagal.
- *         [EN] An internal handle to the debugger state (`RT_Handle`), NULL on failure.
- */
-RT_Handle rt_attachProses(int pid);
+
+// ===================================================================================
+// === PROCESS CONTROL ===
+// ===================================================================================
 
 /**
- * @brief [ID] Melakukan detach dari proses dan membersihkan state.
- *        [EN] Detaches from the process and cleans up the state.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
+ * @brief Attaches to a running process.
+ * @return Debugger handle or NULL on failure.
  */
-void rt_detachProses(RT_Handle handle);
+RT_Handle rt_attachProses(int id_pid_target);
 
 /**
- * @brief [ID] Membaca memori dari proses yang di-debug.
- *        [EN] Reads memory from the debugged process.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param addr [ID] Alamat virtual untuk dibaca.
- *             [EN] The virtual address to read from.
- * @param out_buffer [ID] Buffer untuk menyimpan data yang dibaca.
- *                   [EN] Buffer to store the read data.
- * @param size [ID] Jumlah byte yang akan dibaca.
- *             [EN] The number of bytes to read.
- * @return [ID] Jumlah byte yang berhasil dibaca, -1 jika gagal.
- *         [EN] The number of bytes successfully read, -1 on failure.
+ * @brief Detaches and cleans up the debugger session.
  */
-int rt_bacaMemory(RT_Handle handle, u64 addr, u8* out_buffer, int size);
+void rt_detachProses(RT_Handle ptr_handle);
 
 /**
- * @brief [ID] Menulis memori ke proses yang di-debug.
- *        [EN] Writes memory to the debugged process.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param addr [ID] Alamat virtual untuk ditulisi.
- *             [EN] The virtual address to write to.
- * @param data [ID] Pointer ke data yang akan ditulis.
- *             [EN] Pointer to the data to be written.
- * @param size [ID] Jumlah byte yang akan ditulis.
- *             [EN] The number of bytes to write.
- * @return [ID] Jumlah byte yang berhasil ditulis, -1 jika gagal.
- *         [EN] The number of bytes successfully written, -1 on failure.
+ * @brief Continues process execution.
+ * @return 0 on success, -1 on failure.
  */
-int rt_tulisMemory(RT_Handle handle, u64 addr, const u8* data, int size);
+int rt_continueProses(RT_Handle ptr_handle);
 
 /**
- * @brief [ID] Menyetel software breakpoint (0xCC) di alamat tertentu.
- *        [EN] Sets a software breakpoint (0xCC) at a specific address.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param addr [ID] Alamat virtual untuk menyetel breakpoint.
- *             [EN] The virtual address to set the breakpoint at.
- * @return [ID] 0 jika sukses, -1 jika gagal.
- *         [EN] 0 on success, -1 on failure.
+ * @brief Executes a single instruction.
+ * @return 0 on success, -1 on failure.
  */
-int rt_setBreakpoint(RT_Handle handle, u64 addr);
+int rt_stepInstruksi(RT_Handle ptr_handle);
 
 /**
- * @brief [ID] Melakukan eksekusi satu instruksi (single step).
- *        [EN] Executes a single instruction (single step).
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @return [ID] 0 jika sukses, -1 jika gagal.
- *         [EN] 0 on success, -1 on failure.
+ * @brief Waits for a debug event (blocking).
+ * @param ptr_event_out Pointer to store event details.
+ * @return 0 on success, -1 on failure.
  */
-int rt_singleStep(RT_Handle handle);
+int rt_waitEvent(RT_Handle ptr_handle, C_DebugEvent* ptr_event_out);
+
+
+// ===================================================================================
+// === MEMORY & REGISTERS ===
+// ===================================================================================
 
 /**
- * @brief [ID] Mengambil register CPU saat ini dari thread terakhir.
- *        [EN] Gets the current CPU registers from the last event's thread.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param out_registers [ID] Pointer ke struktur `C_Registers` untuk diisi.
- *                      [EN] Pointer to a `C_Registers` structure to be filled.
- * @return [ID] 0 jika sukses, -1 jika gagal.
- *         [EN] 0 on success, -1 on failure.
+ * @brief Reads memory from the target process.
+ * @return Number of bytes read, or -1 on failure.
  */
-int rt_getRegisters(RT_Handle handle, C_Registers* out_registers);
+int rt_readMemori(RT_Handle ptr_handle, u64 va_target, u8* ptr_buf_hasil, int sz_baca);
 
 /**
- * @brief [ID] Menyetel register CPU untuk thread terakhir.
- *        [EN] Sets the CPU registers for the last event's thread.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param registers [ID] Pointer ke struktur `C_Registers` yang berisi nilai baru.
- *                  [EN] Pointer to a `C_Registers` structure containing the new values.
- * @return [ID] 0 jika sukses, -1 jika gagal.
- *         [EN] 0 on success, -1 on failure.
+ * @brief Writes memory to the target process.
+ * @return Number of bytes written, or -1 on failure.
  */
-int rt_setRegisters(RT_Handle handle, const C_Registers* registers);
+int rt_writeMemori(RT_Handle ptr_handle, u64 va_target, const u8* ptr_sumber_data, int sz_tulis);
 
 /**
- * @brief [ID] Melanjutkan eksekusi proses.
- *        [EN] Continues the execution of the process.
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @return [ID] 0 jika sukses, -1 jika gagal.
- *         [EN] 0 on success, -1 on failure.
+ * @brief Reads CPU registers for the current thread.
+ * @return 0 on success, -1 on failure.
  */
-int rt_continueProses(RT_Handle handle);
+int rt_readRegister(RT_Handle ptr_handle, C_Registers* ptr_reg_luaran);
 
 /**
- * @brief [ID] Menunggu event debugger selanjutnya (blocking).
- *        [EN] Waits for the next debugger event (blocking).
- * @param handle [ID] Handle (`RT_Handle`) yang didapat dari `rt_attachProses`.
- *               [EN] The handle (`RT_Handle`) obtained from `rt_attachProses`.
- * @param event_out [ID] Pointer ke struktur `C_DebugEvent` untuk diisi.
- *                  [EN] Pointer to a `C_DebugEvent` structure to be filled.
- * @return [ID] 0 jika event diterima, -1 jika gagal.
- *         [EN] 0 if an event was received, -1 on failure.
+ * @brief Writes CPU registers for the current thread.
+ * @return 0 on success, -1 on failure.
  */
-int rt_tungguEvent(RT_Handle handle, C_DebugEvent* event_out);
+int rt_writeRegister(RT_Handle ptr_handle, const C_Registers* ptr_reg_in);
+
+
+// ===================================================================================
+// === BREAKPOINTS ===
+// ===================================================================================
+
+/**
+ * @brief Sets a Software Breakpoint (INT 3).
+ */
+int rt_insertTitikHentiSw(RT_Handle ptr_handle, u64 va_target);
+
+/**
+ * @brief Removes a Software Breakpoint.
+ */
+int rt_removeTitikHentiSw(RT_Handle ptr_handle, u64 va_target);
+
+/**
+ * @brief Sets a Hardware Breakpoint (DRx).
+ * @param id_urutan Slot index (0-3).
+ */
+int rt_insertTitikHentiHw(RT_Handle ptr_handle, u64 va_target, int id_urutan);
+
+/**
+ * @brief Removes a Hardware Breakpoint.
+ */
+int rt_removeTitikHentiHw(RT_Handle ptr_handle, int id_urutan);
+
+
+// ===================================================================================
+// === ADVANCED INFO ===
+// ===================================================================================
+
+/**
+ * @brief Retrieves list of threads in JSON.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* rt_listThread_json(RT_Handle ptr_handle);
+
+/**
+ * @brief Retrieves memory regions in JSON.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* rt_readRegionMemori_json(RT_Handle ptr_handle);
+
+/**
+ * @brief Toggles system call tracing.
+ */
+int rt_setTraceSyscall(RT_Handle ptr_handle, bool is_aktif);
+
+/**
+ * @brief Retrieves last syscall info in JSON.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* rt_readInfoSyscall_json(RT_Handle ptr_handle, int id_thread);
 
 #ifdef __cplusplus
 }

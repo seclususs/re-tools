@@ -1,12 +1,9 @@
 /**
- * @file retools_advanced.h
- * @brief [ID] Header untuk fungsionalitas Analisis Statis Tingkat Tinggi.
- *        [EN] Header for High-Level Static Analysis functionality.
- * @details [ID] Menggabungkan tools canggih seperti Binary Diff dan CFG Generator.
- *          [EN] Combines advanced tools like Binary Diff and CFG Generator.
+ * @brief Advanced Analysis API (IR, Data Flow, Decompiler).
+ * @details Provides high-level analysis capabilities including IR lifting,
+ * optimization, data flow analysis, and decompilation.
  * @author Seclususs
- * @date 2025-11-13
- * https://github.com/seclususs/retools
+ * @date 2025-11-19
  */
 
 #ifndef RETOOLS_ADVANCED_H
@@ -19,52 +16,132 @@ extern "C" {
 #endif
 
 // ===================================================================================
-// === BINARY DIFF ===
+// === INTERMEDIATE REPRESENTATION (IR) ===
 // ===================================================================================
 
 /**
- * @struct C_DiffResult
- * @brief [ID] Struktur C-ABI untuk menyimpan satu hasil perbandingan.
- *        [EN] C-ABI structure to store a single diff result.
+ * @brief Supported architectures.
  */
-struct C_DiffResult {
-    char functionName[128];
-    uint64_t addressFile1;
-    uint64_t addressFile2;
-    int status; // 0=Matched, 1=Modified, 2=Removed, 3=Added
-};
+typedef enum ArsitekturDisasm {
+    ARCH_UNKNOWN = 0,
+    ARCH_X86_32 = 1,
+    ARCH_X86_64 = 2,
+    ARCH_ARM_32 = 3,
+    ARCH_ARM_64 = 4,
+    ARCH_RISCV_32 = 5,
+    ARCH_RISCV_64 = 6,
+    ARCH_MIPS_32 = 7,
+    ARCH_MIPS_64 = 8
+} ArsitekturDisasm;
 
 /**
- * @brief [ID] Membandingkan dua file binary dan mengembalikan perbedaannya.
- *        [EN] Compares two binary files and returns the differences.
- * @param file1 [ID] Nama file pertama yang akan dibandingkan.
- *              [EN] First filename to be compared.
- * @param file2 [ID] Nama file kedua.
- *              [EN] Second filename.
- * @param out_results [ID] Pointer ke buffer output untuk menyimpan hasil `C_DiffResult`.
- *                    [EN] Pointer to the output buffer to store `C_DiffResult` results.
- * @param max_results [ID] Ukuran maksimum buffer `out_results`.
- *                    [EN] The maximum size of the `out_results` buffer.
- * @return [ID] Jumlah hasil yang ditulis, -1 jika gagal.
- *         [EN] The number of results written, -1 on failure.
+ * @brief Decoded instruction details.
  */
-int c_diffBinary_rs(const char* file1, const char* file2, struct C_DiffResult* out_results, int max_results);
+typedef struct C_Instruksi {
+    char mnemonic_instruksi[32];
+    char str_operand[64];
+    int ukuran;
+    int valid;
+} C_Instruksi;
+
+/**
+ * @brief Decodes a single machine instruction.
+ */
+C_Instruksi c_parseInstruksi(
+    const u8* ptr_kode_raw,
+    size_t len_buffer,
+    size_t off_kursor,
+    u64 va_basis_instr,
+    ArsitekturDisasm enum_arch
+);
+
+/**
+ * @brief Lifts machine code to Intermediate Representation (IR).
+ * @return JSON string representing IR. Caller must free using `c_freeString`.
+ */
+char* c_liftInstruksi(
+    const u8* ptr_kode_raw,
+    size_t len_buffer,
+    size_t off_kursor,
+    u64 va_basis_instr,
+    ArsitekturDisasm enum_arch
+);
+
+/**
+ * @brief Optimizes the IR of a binary.
+ * @return JSON string of optimized IR. Caller must free using `c_freeString`.
+ */
+char* c_calcOptimasi(const char* ptr_jalur_raw);
 
 
 // ===================================================================================
-// === CONTROL FLOW GRAPH (CFG) ===
+// === DATA FLOW ANALYSIS ===
 // ===================================================================================
 
 /**
- * @brief [ID] Membuat Control Flow Graph (CFG) dari file.
- *        [EN] Generates a Control Flow Graph (CFG) from a file.
- * @param filename [ID] Nama file target yang akan dibuatkan CFG.
- *                 [EN] Target filename to generate a CFG for.
- * @return [ID] Pointer ke string format DOT. Harus dibebaskan dengan `c_freeString`.
- *         [EN] Pointer to a DOT format string. Must be freed with `c_freeString`.
+ * @brief Performs Liveness Analysis.
+ * @return JSON string (LiveIn/LiveOut sets). Caller must free using `c_freeString`.
  */
-char* c_generateCFG_rs(const char* filename);
+char* c_getLivenessAnalysis_json(const char* ptr_path_raw);
 
+/**
+ * @brief Performs Reaching Definitions Analysis.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getReachingDefs_json(const char* ptr_path_raw);
+
+/**
+ * @brief Generates Def-Use Chains.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getDefUseChains_json(const char* ptr_path_raw);
+
+/**
+ * @brief Generates Use-Def Chains.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getUseDefChains_json(const char* ptr_path_raw);
+
+/**
+ * @brief Performs Value Set Analysis (VSA).
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getValueSetAnalysis_json(const char* ptr_path_raw);
+
+/**
+ * @brief Infers variable types based on access patterns.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getTipeInference_json(const char* ptr_path_raw);
+
+/**
+ * @brief Checks for static memory access violations.
+ * @return JSON string. Caller must free using `c_freeString`.
+ */
+char* c_getMemoryAccessCheck_json(const char* ptr_path_raw);
+
+
+// ===================================================================================
+// === HIGH-LEVEL TOOLS ===
+// ===================================================================================
+
+/**
+ * @brief Performs a structural binary diff.
+ * @return JSON string of diff results. Caller must free using `c_freeString`.
+ */
+char* c_calcDiffBiner_json(const char* ptr_path1_raw, const char* ptr_path2_raw);
+
+/**
+ * @brief Generates a Control Flow Graph (CFG) in DOT format.
+ * @return DOT format string. Caller must free using `c_freeString`.
+ */
+char* c_createCFG(const char* ptr_jalur_raw);
+
+/**
+ * @brief Decompiles a function to pseudocode.
+ * @return Pseudocode string. Caller must free using `c_freeString`.
+ */
+char* c_createPseudocode(const char* ptr_jalur_raw, u64 va_fungsi);
 
 #ifdef __cplusplus
 }

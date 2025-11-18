@@ -1,14 +1,7 @@
 /**
- * @file retools_types.h
- * @brief [ID] Header untuk definisi tipe data C-ABI umum dan utilitas.
- *        [EN] Header for common C-ABI type definitions and utilities.
- * @details [ID] File ini berisi alias tipe data dasar dan fungsi utilitas (seperti free) yang digunakan di seluruh C-API.
- *          [EN] This file contains basic type aliases and utility functions (like free) used across the C-API.
- * @note [ID] Tipe-tipe ini menjamin konsistensi ukuran data antara C/C++ dan Rust.
- *       [EN] These types guarantee data size consistency between C/C++ and Rust.
+ * @brief Core type definitions and utility functions for the library.
  * @author Seclususs
- * @date 2025-11-13
- * https://github.com/seclususs/retools
+ * @date 2025-11-19
  */
 
 #ifndef RETOOLS_TYPES_H
@@ -21,14 +14,13 @@
 extern "C" {
 #endif
 
-// === Tipe Data Dasar ===
+// ===================================================================================
+// === TYPE DEFINITIONS ===
+// ===================================================================================
 
-/**
- * @name Tipe Data Primitif
- * @brief [ID] Alias tipe data C-ABI untuk integer dengan ukuran tetap.
- *        [EN] C-ABI type aliases for fixed-size integers.
- * @{
- */
+/** @name Fixed-width Integers
+ * Standardized integer types for FFI compatibility.
+ * @{ */
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -41,36 +33,32 @@ typedef int64_t  s64;
 /** @} */
 
 /**
- * @enum RT_Status
- * @brief [ID] Kode status error (saat ini tidak digunakan secara aktif, preferensi -1/0).
- *        [EN] Error status codes (currently not actively used, preferring -1/0).
- */
-typedef enum {
-    RT_SUKSES = 0,
-    RT_GAGAL_UMUM = -1,
-    RT_INVALID_PARAMETER = -2,
-    RT_MEMORI_PENUH = -3,
-    RT_FILE_TIDAK_DITEMUKAN = -4,
-    RT_BELUM_DIIMPLEMENTASIKAN = -99
-} RT_Status;
-
-/**
- * @typedef RT_Handle
- * @brief [ID] Tipe handle opaque untuk state internal (seperti state debugger).
- *        [EN] Opaque handle type for internal state (like the debugger state).
+ * @brief Opaque handle for internal objects (e.g., debugger session).
  */
 typedef void* RT_Handle;
 
 
-// === Utilitas Umum ===
+// ===================================================================================
+// === UTILITIES ===
+// ===================================================================================
 
 /**
- * @brief [ID] Membebaskan memori string yang dialokasikan oleh Rust.
- *        [EN] Frees string memory allocated by Rust.
- * @param ptr [ID] Pointer string yang dikembalikan dari fungsi C-API (misal `c_getStringsList_rs` atau `c_generateCFG_rs`).
- *            [EN] String pointer returned from a C-API function (e.g., `c_getStringsList_rs` or `c_generateCFG_rs`).
+ * @brief Frees a string allocated by the library.
+ *
+ * @note Must be called for every `char*` returned by the API to prevent memory leaks.
+ *
+ * @param ptr Pointer to the C-string to free.
  */
 void c_freeString(char* ptr);
+
+/**
+ * @brief Retrieves the last error message on the current thread.
+ *
+ * Use this when an API function returns a failure code (e.g., -1 or NULL).
+ *
+ * @return Pointer to the error string. Caller must free using `c_freeString`.
+ */
+char* rt_get_last_error_message(void);
 
 #ifdef __cplusplus
 }
