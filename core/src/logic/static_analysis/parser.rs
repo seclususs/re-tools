@@ -655,7 +655,7 @@ impl Binary {
                                 for import in imports {
                                     imports_vec.push(ImportInfo {
                                         name: import.name.to_string(),
-                                    });
+                                        });
                                 }
                             }
                         }

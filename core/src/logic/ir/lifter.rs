@@ -348,7 +348,7 @@ pub fn lift_ssa_x86(
                 let vec_op2 = Vec::new(); 
                 if let X86OperandType::Reg(id_reg) = operands[0].op_type {
                     let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
-                    let tipe_op = match mnem.chars().last().unwrap() {
+                    let tipe_op = match mnem.chars().last().unwrap_or('d') {
                         'b' => MicroBinOp::VecAddI8,
                         'w' => MicroBinOp::VecAddI16,
                         'd' => MicroBinOp::VecAddI32,
@@ -778,7 +778,7 @@ pub fn lift_ssa_mips(
             }
         },
         "jal" | "jalr" => {
-            if operands.len() >= 1 {
+            if !operands.is_empty() {
                  let target = if operands.len() == 2 { &operands[1] } else { &operands[0] };
                  vec![MicroInstruction::Call(map_op_to_expr_ssa_mips(target, cs))]
             } else {
@@ -789,7 +789,11 @@ pub fn lift_ssa_mips(
             if operands.len() == 1 {
                 vec![MicroInstruction::Return]
             } else {
-                 vec![MicroInstruction::Jump(map_op_to_expr_ssa_mips(&operands[0], cs))]
+                if !operands.is_empty() {
+                    vec![MicroInstruction::Jump(map_op_to_expr_ssa_mips(&operands[0], cs))]
+                } else {
+                    vec![MicroInstruction::Undefined]
+                }
             }
         },
         "syscall" => vec![MicroInstruction::Syscall],
@@ -887,8 +891,8 @@ pub fn lift_ssa_riscv(
         },
         "fence" | "fence.i" => vec![MicroInstruction::MemoryFence],
         "jal" => {
-            if operands.len() >= 1 {
-                let target = operands.last().unwrap();
+            if !operands.is_empty() {
+                let target = operands.last().unwrap(); 
                 vec![MicroInstruction::Call(map_op_to_expr_ssa_riscv(target, cs))]
             } else {
                 vec![MicroInstruction::Undefined]
@@ -926,10 +930,26 @@ pub fn lift_from_detail(
 ) -> Vec<MicroInstruction> {
     match arch {
         ArsitekturDisasm::ARCH_X86_64 | ArsitekturDisasm::ARCH_X86_32 => {
-            lift_ssa_x86(insn, detail.x86().unwrap(), cs, arch)
+            if let Some(x86_det) = detail.x86() {
+                lift_ssa_x86(insn, x86_det, cs, arch)
+            } else {
+                vec![MicroInstruction::Undefined]
+            }
         }
-        ArsitekturDisasm::ARCH_ARM_32 => lift_ssa_arm(insn, detail.arm().unwrap(), cs),
-        ArsitekturDisasm::ARCH_ARM_64 => lift_ssa_aarch64(insn, detail.arm64().unwrap(), cs),
+        ArsitekturDisasm::ARCH_ARM_32 => {
+            if let Some(arm_det) = detail.arm() {
+                lift_ssa_arm(insn, arm_det, cs)
+            } else {
+                vec![MicroInstruction::Undefined]
+            }
+        },
+        ArsitekturDisasm::ARCH_ARM_64 => {
+             if let Some(arm64_det) = detail.arm64() {
+                 lift_ssa_aarch64(insn, arm64_det, cs)
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        },
         ArsitekturDisasm::ARCH_RISCV_32 | ArsitekturDisasm::ARCH_RISCV_64 => {
              if let Some(riscv_detail) = detail.riscv() {
                 lift_ssa_riscv(insn, riscv_detail, cs)
