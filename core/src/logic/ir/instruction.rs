@@ -112,4 +112,8 @@ pub enum MicroInstruction {
         operand_1: Vec<MicroOperand>,
         operand_2: Vec<MicroOperand>,
     },
+    Phi {
+        tujuan: SsaVariabel,
+        sumber: Vec<(SsaVariabel, u64)>,
+    },
 }

@@ -154,14 +154,17 @@ impl VsaState {
 
 fn eval_expr_aliasing(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
     match expr {
-        MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, .. })) => {
+        MicroExpr::Operand(MicroOperand::SsaVar(SsaVariabel { nama_dasar, versi })) => {
+            let unique_name = format!("{}_{}", nama_dasar, versi);
             if nama_dasar == "rsp" || nama_dasar == "esp" || nama_dasar == "sp" {
                 return ValueDomain::Pointer(AbstractLocation {
                     region: MemoryRegion::Stack,
                     offset: 0,
                 });
             }
-            state.variables.get(nama_dasar).cloned().unwrap_or_default()
+            state.variables.get(&unique_name).cloned().unwrap_or_else(|| {
+                 state.variables.get(nama_dasar).cloned().unwrap_or_default()
+            })
         }
         MicroExpr::Operand(MicroOperand::Konstanta(c)) => ValueDomain::Constant(*c),
         MicroExpr::OperasiBiner(op, left, right) => {
@@ -195,9 +198,26 @@ fn transfer_function_aliasing(block: &BasicBlock, state_in: &VsaState) -> VsaSta
     for (_, instructions) in &block.instructions {
         for instruction in instructions {
             match instruction {
-                MicroInstruction::Assign(SsaVariabel { nama_dasar, .. }, expr) => {
+                MicroInstruction::Assign(SsaVariabel { nama_dasar, versi }, expr) => {
                     let value = eval_expr_aliasing(expr, &state_out);
-                    state_out.variables.insert(nama_dasar.clone(), value);
+                    let unique_name = format!("{}_{}", nama_dasar, versi);
+                    state_out.variables.insert(unique_name, value);
+                }
+                MicroInstruction::Phi { tujuan, sumber } => {
+                    let mut merged_val = ValueDomain::Unknown;
+                    let mut first = true;
+                    for (src_var, _) in sumber {
+                         let src_name = format!("{}_{}", src_var.nama_dasar, src_var.versi);
+                         let val = state_out.variables.get(&src_name).cloned().unwrap_or(ValueDomain::Unknown);
+                         if first {
+                             merged_val = val;
+                             first = false;
+                         } else {
+                             merged_val = merged_val.meet(&val);
+                         }
+                    }
+                    let dest_name = format!("{}_{}", tujuan.nama_dasar, tujuan.versi);
+                    state_out.variables.insert(dest_name, merged_val);
                 }
                 MicroInstruction::SimpanMemori(addr_expr, data_expr) => {
                     let addr_val = eval_expr_aliasing(addr_expr, &state_out);
@@ -239,7 +259,7 @@ pub fn analisis_value_set(
     }
     let mut worklist: Vec<NodeIndex> = nodes.clone();
     let mut iterasi = 0;
-    const MAX_ITERASI: usize = 50;
+    const MAX_ITERASI: usize = 100; 
     while let Some(node) = worklist.pop() {
         iterasi += 1;
         if iterasi > nodes.len() * MAX_ITERASI {

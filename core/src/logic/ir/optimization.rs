@@ -31,10 +31,24 @@ impl IrOptimizer {
             let block = &cfg[node_idx];
             for (_, instrs) in &block.instructions {
                 for instr in instrs {
-                    if let MicroInstruction::Assign(dest, expr) = instr {
-                        if let MicroExpr::Operand(MicroOperand::Konstanta(val)) = expr {
-                            constants_map.insert(dest.nama_dasar.clone(), *val);
+                    match instr {
+                         MicroInstruction::Assign(dest, expr) => {
+                            if let MicroExpr::Operand(MicroOperand::Konstanta(val)) = expr {
+                                constants_map.insert(format!("{}_{}", dest.nama_dasar, dest.versi), *val);
+                                constants_map.insert(dest.nama_dasar.clone(), *val); 
+                            }
                         }
+                        MicroInstruction::Phi { tujuan: _tujuan, sumber } => {
+                            let mut first_val = None;
+                            let all_same = true;
+                            for (_, _) in sumber {
+                                if first_val.is_none() {
+                                    first_val = Some(0); 
+                                }
+                            }
+                            if all_same && first_val.is_some() {}
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -86,7 +100,8 @@ impl IrOptimizer {
         let mut modified = false;
         match expr {
             MicroExpr::Operand(MicroOperand::SsaVar(var)) => {
-                if let Some(val) = constants.get(&var.nama_dasar) {
+                let key = format!("{}_{}", var.nama_dasar, var.versi);
+                if let Some(val) = constants.get(&key).or_else(|| constants.get(&var.nama_dasar)) {
                     *expr = MicroExpr::Operand(MicroOperand::Konstanta(*val));
                     modified = true;
                 }
@@ -195,6 +210,17 @@ impl IrOptimizer {
                                 if live_vars.contains(&dest.nama_dasar) {
                                     live_vars.remove(&dest.nama_dasar);
                                     self.tambah_uses_ke_live(expr, &mut live_vars);
+                                    block_instrs_rev.push(instr.clone());
+                                } else {
+                                    self.changed = true;
+                                }
+                            }
+                            MicroInstruction::Phi { tujuan, sumber } => {
+                                if live_vars.contains(&tujuan.nama_dasar) {
+                                    live_vars.remove(&tujuan.nama_dasar);
+                                    for (src, _) in sumber {
+                                        live_vars.insert(src.nama_dasar.clone());
+                                    }
                                     block_instrs_rev.push(instr.clone());
                                 } else {
                                     self.changed = true;

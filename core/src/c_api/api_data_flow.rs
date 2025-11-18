@@ -1,7 +1,5 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
-#![allow(unsafe_op_in_unsafe_fn)]
-
 use crate::error::{set_last_error, ReToolsError};
 use crate::logic::data_flow::chains::bangun_chains_reaching_defs;
 use crate::logic::data_flow::liveness::hitung_analisis_liveness;
@@ -9,6 +7,7 @@ use crate::logic::data_flow::tipe::{analisis_tipe_dasar, verifikasi_batas_memori
 use crate::logic::data_flow::vsa::{analisis_value_set, VsaState};
 use crate::logic::static_analysis::cfg::bangun_cfg_internal;
 use crate::logic::static_analysis::parser::Binary;
+use crate::logic::data_flow::ssa::konstruksi_ssa_lengkap;
 
 use libc::c_char;
 use petgraph::graph::NodeIndex;
@@ -43,13 +42,14 @@ where
 			return error_json;
 		}
 	};
-	let cfg = match bangun_cfg_internal(&binary) {
+	let mut cfg = match bangun_cfg_internal(&binary) {
 		Ok(g) => g,
 		Err(e) => {
 			set_last_error(e);
 			return error_json;
 		}
 	};
+    konstruksi_ssa_lengkap(&mut cfg);
 	match f(&binary, &cfg) {
 		Ok(json) => CString::new(json).unwrap_or_default().into_raw(),
 		Err(e) => {

@@ -10,6 +10,7 @@ use crate::logic::data_flow::tipe::{analisis_tipe_dasar, verifikasi_batas_memori
 use crate::logic::data_flow::vsa::{analisis_value_set, VsaState};
 use crate::logic::static_analysis::cfg::bangun_cfg_internal;
 use crate::logic::static_analysis::parser::Binary;
+use crate::logic::data_flow::ssa::konstruksi_ssa_lengkap;
 
 use log::info;
 use petgraph::graph::NodeIndex;
@@ -23,7 +24,7 @@ fn analyze_binary_and_serialize_py<F>(
 where
 	F: FnOnce(
 		&Binary,
-		&petgraph::graph::DiGraph<
+		&mut petgraph::graph::DiGraph<
 			crate::logic::static_analysis::cfg::BasicBlock,
 			&'static str,
 		>,
@@ -31,8 +32,9 @@ where
 {
 	info!("py: Menganalisis binary: {}", file_path);
 	let binary = Binary::load(file_path).map_err(map_err_to_py)?;
-	let cfg = bangun_cfg_internal(&binary).map_err(map_err_to_py)?;
-	let json_str = f(&binary, &cfg)?;
+	let mut cfg = bangun_cfg_internal(&binary).map_err(map_err_to_py)?;
+    konstruksi_ssa_lengkap(&mut cfg);
+	let json_str = f(&binary, &mut cfg)?;
 	let json_module = PyModule::import_bound(py, "json")?;
 	let py_json = json_module.getattr("loads")?.call1((json_str,))?;
 	Ok(py_json.to_object(py))

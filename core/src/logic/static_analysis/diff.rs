@@ -97,6 +97,7 @@ fn get_ir_signature(ir: &MicroInstruction) -> &'static str {
         MicroInstruction::AtomicRMW { .. } => "Atomic",
         MicroInstruction::MemoryFence => "Fence",
         MicroInstruction::UpdateFlag(_, _) => "UpdateFlag",
+        MicroInstruction::Phi { .. } => "Phi",
     }
 }
 
