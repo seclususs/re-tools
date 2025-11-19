@@ -73,6 +73,46 @@ fn print_node(node: &NodeStruktur, state: &mut PrinterState) {
 				state.write_line("}");
 			}
 		}
+		NodeStruktur::KondisiSwitch { kondisi, kasus, opsi_default } => {
+			state.write_indent();
+			state.write(&format!("switch ({}) {{\n", print_ekspresi(kondisi)));
+			state.indent();
+			for (vals, badan) in kasus {
+				for v in vals {
+					state.write_line(&format!("case 0x{:x}:", v));
+				}
+				state.indent();
+				print_node(badan, state);
+				state.write_line("break;");
+				state.dedent();
+			}
+			if let Some(def_body) = opsi_default {
+				state.write_line("default:");
+				state.indent();
+				print_node(def_body, state);
+				state.dedent();
+			}
+			state.dedent();
+			state.write_line("}");
+		}
+		NodeStruktur::LoopFor { inisialisasi, kondisi, update, badan_loop } => {
+			state.write_indent();
+			state.write("for (");
+			if let Some(init) = inisialisasi {
+				state.write(&print_stmt_inline(init));
+			}
+			state.write("; ");
+			state.write(&print_ekspresi(kondisi));
+			state.write("; ");
+			if let Some(upd) = update {
+				state.write(&print_stmt_inline(upd).trim_end_matches(';').to_string());
+			}
+			state.write(") {\n");
+			state.indent();
+			print_node(badan_loop, state);
+			state.dedent();
+			state.write_line("}");
+		}
 		NodeStruktur::LoopSementara { kondisi, badan_loop } => {
 			state.write_indent();
 			state.write(&format!("while ({}) {{\n", print_ekspresi(kondisi)));
@@ -102,6 +142,18 @@ fn print_node(node: &NodeStruktur, state: &mut PrinterState) {
 		NodeStruktur::BlokDasar(pernyataan) => {
 			print_pernyataan(pernyataan, state);
 		}
+		NodeStruktur::Goto(target) => {
+			state.write_line(&format!("goto loc_{:x};", target));
+		}
+	}
+}
+
+fn print_stmt_inline(stmt: &PernyataanPseudo) -> String {
+	match stmt {
+		PernyataanPseudo::Assign { tujuan, sumber } => {
+			format!("{} = {}", tujuan.id_reg, print_ekspresi(sumber))
+		}
+		_ => "".to_string()
 	}
 }
 
@@ -193,6 +245,12 @@ fn print_ekspresi(ekspresi: &EkspresiPseudo) -> String {
 		}
 		EkspresiPseudo::MuatMemori { alamat } => {
 			format!("*({})", print_ekspresi(alamat))
+		}
+		EkspresiPseudo::AksesArray { basis, indeks } => {
+			format!("{}[{}]", print_ekspresi(basis), print_ekspresi(indeks))
+		}
+		EkspresiPseudo::AksesStruct { basis, offset } => {
+			format!("{}->field_{:x}", print_ekspresi(basis), offset)
 		}
 		EkspresiPseudo::PanggilFungsi { nama, argumen } => {
 			let args_str = argumen

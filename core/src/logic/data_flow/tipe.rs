@@ -77,7 +77,10 @@ pub fn infer_type_base(
 				if let Some(addr) = addr_expr_opt {
 					let (base_reg, _, offset) = extract_base_offset(addr);
 					if let Some(nama_reg) = base_reg {
-						let domain_reg = state.variables.get(&nama_reg).cloned().unwrap_or_default();
+						let mut domain_reg = state.variables.get(&nama_reg).cloned().unwrap_or_default();
+                        while let ValueDomain::Tainted(inner) = domain_reg {
+                            domain_reg = *inner;
+                        }
 						match domain_reg {
 							ValueDomain::Constant(base_addr) => {
 								let struct_entry = struct_reconstruction
@@ -114,6 +117,11 @@ pub fn infer_type_base(
 									InferredTipe::Pointer(Box::new(InferredTipe::Unknown)),
 								);
 							}
+                            _ => {
+                                tipe_var
+									.entry(nama_reg.clone())
+									.or_insert(InferredTipe::Unknown);
+                            }
 						}
 					}
 				}
@@ -159,9 +167,12 @@ pub fn verify_bound_mem(
 					_ => None,
 				};
 				if let Some(addr) = addr_expr_opt {
-					if let (Some(base), Some(index_domain), stride, offset) =
+					if let (Some(base), Some(mut index_domain), stride, offset) =
 						detect_access_array(addr, state)
 					{
+                        while let ValueDomain::Tainted(inner) = index_domain.clone() {
+                            index_domain = *inner;
+                        }
 						let (index_reg, info) = match index_domain {
 							ValueDomain::Unknown => (None, "Indeks tidak diketahui".to_string()),
 							ValueDomain::Constant(c) => {
@@ -174,6 +185,7 @@ pub fn verify_bound_mem(
 							ValueDomain::Pointer(_) | ValueDomain::PointerSet(_) => {
 								(None, "Akses menggunakan pointer".to_string())
 							}
+                            _ => (None, "Indeks kompleks/tainted".to_string()),
 						};
 						list_cek.push(MemoryAccessCheck {
 							va: *va,

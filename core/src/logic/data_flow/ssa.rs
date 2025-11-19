@@ -8,6 +8,8 @@ use petgraph::visit::IntoNodeIdentifiers;
 use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
+const ID_MEMORI: &str = "@@MEM";
+
 struct StateRename {
     stack_var: HashMap<String, Vec<u32>>,
     cnt_var: HashMap<String, u32>,
@@ -99,12 +101,29 @@ impl<'a> SsaBuilder<'a> {
                              .or_default()
                              .insert(idx_simpul);
                         self.set_var_asli.insert(dest.id_reg.clone());
+                        self.peta_situs_def
+                             .entry(ID_MEMORI.to_string())
+                             .or_default()
+                             .insert(idx_simpul);
+                        self.set_var_asli.insert(ID_MEMORI.to_string());
                     } else if let MicroInstruction::VectorOp { tujuan, .. } = instr {
                          self.peta_situs_def
                              .entry(tujuan.id_reg.clone())
                              .or_default()
                              .insert(idx_simpul);
                         self.set_var_asli.insert(tujuan.id_reg.clone());
+                    }
+                    match instr {
+                        MicroInstruction::StoreMemori(_, _) |
+                        MicroInstruction::Call(_) |
+                        MicroInstruction::AtomicRMW { .. } => {
+                            self.peta_situs_def
+                                .entry(ID_MEMORI.to_string())
+                                .or_default()
+                                .insert(idx_simpul);
+                            self.set_var_asli.insert(ID_MEMORI.to_string());
+                        },
+                        _ => {}
                     }
                 }
             }
@@ -151,27 +170,34 @@ impl<'a> SsaBuilder<'a> {
     }
     fn rename_rekursif(&mut self, u: NodeIndex, state: &mut StateRename) {
         let mut cnt_push: HashMap<String, usize> = HashMap::new();
+        let push_versi = |nama_var: String, st: &mut StateRename, cnt: &mut HashMap<String, usize>| -> u32 {
+            let ver_baru = *st.cnt_var.get(&nama_var).unwrap_or(&0) + 1;
+            st.cnt_var.insert(nama_var.clone(), ver_baru);
+            st.stack_var.entry(nama_var.clone()).or_default().push(ver_baru);
+            *cnt.entry(nama_var).or_default() += 1;
+            ver_baru
+        };
         if let Some(blok) = self.graf_cfg.node_weight_mut(u) {
             for (_, list_instr) in &mut blok.instructions {
                 for instr in list_instr {
                     match instr {
                         MicroInstruction::Phi { tujuan, .. } => {
-                            let base = &tujuan.id_reg;
-                            let new_ver = *state.cnt_var.get(base).unwrap() + 1;
-                            state.cnt_var.insert(base.clone(), new_ver);
-                            state.stack_var.get_mut(base).unwrap().push(new_ver);
-                            tujuan.versi = new_ver;
-                            *cnt_push.entry(base.clone()).or_default() += 1;
+                            let ver_baru = push_versi(tujuan.id_reg.clone(), state, &mut cnt_push);
+                            tujuan.versi = ver_baru;
                         }
                         _ => {
                            Self::rename_use_instr(instr, state);
                            if let Some(dest_var) = Self::get_def_var_mut(instr) {
-                               let base = &dest_var.id_reg;
-                               let new_ver = *state.cnt_var.get(base).unwrap() + 1;
-                               state.cnt_var.insert(base.clone(), new_ver);
-                               state.stack_var.get_mut(base).unwrap().push(new_ver);
-                               dest_var.versi = new_ver;
-                               *cnt_push.entry(base.clone()).or_default() += 1;
+                               let ver_baru = push_versi(dest_var.id_reg.clone(), state, &mut cnt_push);
+                               dest_var.versi = ver_baru;
+                           }
+                           match instr {
+                               MicroInstruction::StoreMemori(_, _) |
+                               MicroInstruction::Call(_) |
+                               MicroInstruction::AtomicRMW { .. } => {
+                                   push_versi(ID_MEMORI.to_string(), state, &mut cnt_push);
+                               },
+                               _ => {}
                            }
                         }
                     }
@@ -210,9 +236,10 @@ impl<'a> SsaBuilder<'a> {
             }
         }
         for (var, count) in cnt_push {
-            let stack = state.stack_var.get_mut(&var).unwrap();
-            for _ in 0..count {
-                stack.pop();
+            if let Some(stack) = state.stack_var.get_mut(&var) {
+                for _ in 0..count {
+                    stack.pop();
+                }
             }
         }
     }

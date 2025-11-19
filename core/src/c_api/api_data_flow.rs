@@ -125,8 +125,8 @@ pub unsafe extern "C" fn c_getUseDefChains_json(
 pub unsafe extern "C" fn c_getValueSetAnalysis_json(
 	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
-	c_analyze_binary_and_serialize(ptr_path_raw, |_obj_biner, graf_cfg| {
-		let peta_vsa = analyze_set_nilai(graf_cfg);
+	c_analyze_binary_and_serialize(ptr_path_raw, |obj_biner, graf_cfg| {
+		let peta_vsa = analyze_set_nilai(graf_cfg, obj_biner);
 		let peta_vsa_sederhana: HashMap<usize, (VsaState, VsaState)> = peta_vsa
 			.into_iter()
 			.map(|(idx_simpul, states)| (idx_simpul.index(), states))
@@ -141,7 +141,7 @@ pub unsafe extern "C" fn c_getTipeInference_json(
 	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
 	c_analyze_binary_and_serialize(ptr_path_raw, |obj_biner, graf_cfg| {
-		let peta_vsa = analyze_set_nilai(graf_cfg);
+		let peta_vsa = analyze_set_nilai(graf_cfg, obj_biner);
 		let peta_vsa_keluar: HashMap<NodeIndex, VsaState> = peta_vsa
 			.into_iter()
 			.map(|(idx_simpul, (_, state_keluar))| (idx_simpul, state_keluar))
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn c_getMemoryAccessCheck_json(
 	ptr_path_raw: *const c_char,
 ) -> *mut c_char {
 	c_analyze_binary_and_serialize(ptr_path_raw, |obj_biner, graf_cfg| {
-		let peta_vsa = analyze_set_nilai(graf_cfg);
+		let peta_vsa = analyze_set_nilai(graf_cfg, obj_biner);
 		let peta_vsa_keluar: HashMap<NodeIndex, VsaState> = peta_vsa
 			.into_iter()
 			.map(|(idx_simpul, (_, state_keluar))| (idx_simpul, state_keluar))

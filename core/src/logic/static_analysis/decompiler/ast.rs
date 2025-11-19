@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::logic::ir::instruction::{MicroExpr, MicroOperand, SsaVariabel};
+use crate::logic::ir::instruction::{MicroBinOp, MicroExpr, MicroInstruction, MicroOperand, SsaVariabel};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EkspresiPseudo {
@@ -20,6 +20,14 @@ pub enum EkspresiPseudo {
 	},
 	MuatMemori {
 		alamat: Box<EkspresiPseudo>,
+	},
+	AksesArray {
+		basis: Box<EkspresiPseudo>,
+		indeks: Box<EkspresiPseudo>,
+	},
+	AksesStruct {
+		basis: Box<EkspresiPseudo>,
+		offset: u64,
 	},
 	PanggilFungsi {
 		nama: Box<EkspresiPseudo>,
@@ -64,6 +72,11 @@ pub enum NodeStruktur {
 		blok_true: Box<NodeStruktur>,
 		blok_false: Option<Box<NodeStruktur>>,
 	},
+	KondisiSwitch {
+		kondisi: EkspresiPseudo,
+		kasus: Vec<(Vec<u64>, Box<NodeStruktur>)>,
+		opsi_default: Option<Box<NodeStruktur>>,
+	},
 	LoopSementara {
 		kondisi: EkspresiPseudo,
 		badan_loop: Box<NodeStruktur>,
@@ -72,33 +85,40 @@ pub enum NodeStruktur {
 		badan_loop: Box<NodeStruktur>,
 		kondisi: EkspresiPseudo,
 	},
+	LoopFor {
+		inisialisasi: Option<Box<PernyataanPseudo>>,
+		kondisi: EkspresiPseudo,
+		update: Option<Box<PernyataanPseudo>>,
+		badan_loop: Box<NodeStruktur>,
+	},
 	LoopTakTerbatas(Box<NodeStruktur>),
 	Pernyataan(PernyataanPseudo),
+	Goto(u64),
 }
 
 pub fn map_ir_ke_pernyataan_pseudo(
-	ir: &crate::logic::ir::instruction::MicroInstruction,
+	ir: &MicroInstruction,
 	va: u64,
 ) -> PernyataanPseudo {
 	match ir {
-		crate::logic::ir::instruction::MicroInstruction::Assign(var, expr) => PernyataanPseudo::Assign {
+		MicroInstruction::Assign(var, expr) => PernyataanPseudo::Assign {
 			tujuan: var.clone(),
 			sumber: map_expr_ke_ekspresi_pseudo(expr),
 		},
-		crate::logic::ir::instruction::MicroInstruction::StoreMemori(addr, data) => {
+		MicroInstruction::StoreMemori(addr, data) => {
 			PernyataanPseudo::StoreMem {
 				alamat: map_expr_ke_ekspresi_pseudo(addr),
 				nilai: map_expr_ke_ekspresi_pseudo(data),
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::Jump(expr) => {
+		MicroInstruction::Jump(expr) => {
 			if let EkspresiPseudo::Konstanta(target) = map_expr_ke_ekspresi_pseudo(expr) {
 				PernyataanPseudo::JumpTarget(target)
 			} else {
 				PernyataanPseudo::TidakTerdefinisi
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::JumpKondisi(cond, target) => {
+		MicroInstruction::JumpKondisi(cond, target) => {
 			if let EkspresiPseudo::Konstanta(target_true) = map_expr_ke_ekspresi_pseudo(target) {
 				PernyataanPseudo::LompatKondisi {
 					kondisi: map_expr_ke_ekspresi_pseudo(cond),
@@ -110,19 +130,55 @@ pub fn map_ir_ke_pernyataan_pseudo(
 				PernyataanPseudo::TidakTerdefinisi
 			}
 		}
-		crate::logic::ir::instruction::MicroInstruction::Call(expr) => {
+		MicroInstruction::Call(expr) => {
 			PernyataanPseudo::Panggil(map_expr_ke_ekspresi_pseudo(expr))
 		}
-		crate::logic::ir::instruction::MicroInstruction::Return => {
+		MicroInstruction::Return => {
 			PernyataanPseudo::Kembali(None)
 		}
-		crate::logic::ir::instruction::MicroInstruction::Syscall => PernyataanPseudo::Syscall,
-		crate::logic::ir::instruction::MicroInstruction::AtomicRMW { op, .. } => {
+		MicroInstruction::Syscall => PernyataanPseudo::Syscall,
+		MicroInstruction::AtomicRMW { op, .. } => {
 			PernyataanPseudo::AtomicOp { deskripsi: format!("{:?}", op) }
 		},
-		crate::logic::ir::instruction::MicroInstruction::MemoryFence => PernyataanPseudo::Fence,
+		MicroInstruction::MemoryFence => PernyataanPseudo::Fence,
 		_ => PernyataanPseudo::TidakTerdefinisi,
 	}
+}
+
+fn detect_pola_array(
+	expr: &MicroExpr,
+) -> Option<(Box<EkspresiPseudo>, Box<EkspresiPseudo>)> {
+	if let MicroExpr::BinaryOp(MicroBinOp::Add, kiri, kanan) = expr {
+		if let MicroExpr::BinaryOp(MicroBinOp::Mul, idx, scale) = &**kanan {
+			if let MicroExpr::Operand(MicroOperand::Konstanta(_)) = &**scale {
+				return Some((
+					Box::new(map_expr_ke_ekspresi_pseudo(kiri)),
+					Box::new(map_expr_ke_ekspresi_pseudo(idx)),
+				));
+			}
+		}
+		if let MicroExpr::BinaryOp(MicroBinOp::Mul, idx, scale) = &**kiri {
+			if let MicroExpr::Operand(MicroOperand::Konstanta(_)) = &**scale {
+				return Some((
+					Box::new(map_expr_ke_ekspresi_pseudo(kanan)),
+					Box::new(map_expr_ke_ekspresi_pseudo(idx)),
+				));
+			}
+		}
+	}
+	None
+}
+
+fn detect_pola_struct(expr: &MicroExpr) -> Option<(Box<EkspresiPseudo>, u64)> {
+	if let MicroExpr::BinaryOp(MicroBinOp::Add, kiri, kanan) = expr {
+		if let MicroExpr::Operand(MicroOperand::Konstanta(off)) = &**kanan {
+			return Some((Box::new(map_expr_ke_ekspresi_pseudo(kiri)), *off));
+		}
+		if let MicroExpr::Operand(MicroOperand::Konstanta(off)) = &**kiri {
+			return Some((Box::new(map_expr_ke_ekspresi_pseudo(kanan)), *off));
+		}
+	}
+	None
 }
 
 pub fn map_expr_ke_ekspresi_pseudo(expr: &MicroExpr) -> EkspresiPseudo {
@@ -139,8 +195,16 @@ pub fn map_expr_ke_ekspresi_pseudo(expr: &MicroExpr) -> EkspresiPseudo {
 			kiri: Box::new(map_expr_ke_ekspresi_pseudo(l)),
 			kanan: Box::new(map_expr_ke_ekspresi_pseudo(r)),
 		},
-		MicroExpr::LoadMemori(addr) => EkspresiPseudo::MuatMemori {
-			alamat: Box::new(map_expr_ke_ekspresi_pseudo(addr)),
+		MicroExpr::LoadMemori(addr) => {
+			if let Some((base, index)) = detect_pola_array(addr) {
+				EkspresiPseudo::AksesArray { basis: base, indeks: index }
+			} else if let Some((base, offset)) = detect_pola_struct(addr) {
+				EkspresiPseudo::AksesStruct { basis: base, offset }
+			} else {
+				EkspresiPseudo::MuatMemori {
+					alamat: Box::new(map_expr_ke_ekspresi_pseudo(addr)),
+				}
+			}
 		},
 		MicroExpr::Compare(l, r) => EkspresiPseudo::OperasiBiner {
 			op: "==".to_string(),

@@ -1,7 +1,7 @@
 //! Author: [Seclususs](https://github.com/seclususs)
 
 use super::ast::{
-    map_expr_ke_ekspresi_pseudo, map_ir_ke_pernyataan_pseudo, EkspresiPseudo, NodeStruktur,
+    map_expr_ke_ekspresi_pseudo, map_ir_ke_pernyataan_pseudo, EkspresiPseudo, NodeStruktur, PernyataanPseudo,
 };
 use crate::error::ReToolsError;
 use crate::logic::ir::instruction::MicroInstruction;
@@ -11,14 +11,14 @@ use petgraph::algo::kosaraju_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::{IntoNodeIdentifiers, Reversed};
 use petgraph::Direction;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 struct ContextAnalisis<'a> {
     cfg: &'a DiGraph<BasicBlock, &'static str>,
     dominators: Dominators<NodeIndex>,
     post_dominators: Dominators<NodeIndex>,
     loop_headers: HashSet<NodeIndex>,
-    processed_nodes: HashSet<NodeIndex>,
+    back_edges: HashMap<NodeIndex, Vec<NodeIndex>>,
 }
 
 pub fn build_struct_cfg(
@@ -42,27 +42,29 @@ pub fn build_struct_cfg(
         dominators,
         post_dominators,
         loop_headers: HashSet::new(),
-        processed_nodes: HashSet::new(),
+        back_edges: HashMap::new(),
     };
-    context.deteksi_natural_loops(start_node);
+    context.deteksi_loops(start_node);
     let scc = kosaraju_scc(cfg);
     let root_structure = context.proses_region_skop(start_node, None, &scc);
     Ok(root_structure)
 }
 
 impl<'a> ContextAnalisis<'a> {
-    fn deteksi_natural_loops(&mut self, entry: NodeIndex) {
+    fn deteksi_loops(&mut self, entry: NodeIndex) {
         let mut worklist = vec![entry];
         let mut visited = HashSet::new();
         while let Some(node) = worklist.pop() {
             if !visited.insert(node) {
                 continue;
             }
-            for neighbor in self.cfg.neighbors_directed(node, Direction::Outgoing) {
-                if self.dominators.dominators(node).map_or(false, |mut d| d.any(|x| x == neighbor)) {
-                    self.loop_headers.insert(neighbor);
+            for succ in self.cfg.neighbors_directed(node, Direction::Outgoing) {
+                if self.dominators.dominators(node).map_or(false, |mut d| d.any(|x| x == succ)) {
+                    self.loop_headers.insert(succ);
+                    self.back_edges.entry(succ).or_default().push(node);
+                } else {
+                    worklist.push(succ);
                 }
-                worklist.push(neighbor);
             }
         }
     }
@@ -72,188 +74,207 @@ impl<'a> ContextAnalisis<'a> {
     fn proses_region_skop(
         &mut self,
         entry: NodeIndex,
-        exit: Option<NodeIndex>,
+        region_exit: Option<NodeIndex>,
         sccs: &[Vec<NodeIndex>],
     ) -> NodeStruktur {
-        if Some(entry) == exit || self.processed_nodes.contains(&entry) {
+        if Some(entry) == region_exit {
             return NodeStruktur::Sekuen(vec![]);
         }
-        let current_scc = sccs.iter().find(|component| component.contains(&entry));
-        let is_loop_complex = current_scc.map_or(false, |c| c.len() > 1);
-        if is_loop_complex || self.loop_headers.contains(&entry) {
-            return self.bentuk_struktur_loop(entry, exit, sccs);
+        if self.loop_headers.contains(&entry) {
+            let loop_exit = self.cari_titik_konvergensi(entry);
+            let effective_exit = if let Some(lx) = loop_exit {
+                if let Some(rx) = region_exit {
+                    if self.dominators.dominators(lx).map_or(false, |mut d| d.any(|x| x == rx)) {
+                        Some(rx) 
+                    } else {
+                         Some(lx)
+                    }
+                } else {
+                    Some(lx)
+                }
+            } else {
+                region_exit
+            };
+            let loop_struct = self.bentuk_struktur_loop(entry, effective_exit, sccs);
+            let next_struct = if let Some(exit) = effective_exit {
+                self.proses_region_skop(exit, region_exit, sccs)
+            } else {
+                NodeStruktur::Sekuen(vec![])
+            };
+            return NodeStruktur::Sekuen(vec![loop_struct, next_struct]);
         }
         let successors: Vec<NodeIndex> = self
             .cfg
             .neighbors_directed(entry, Direction::Outgoing)
             .collect();
         if successors.is_empty() {
-            self.processed_nodes.insert(entry);
             return self.konversi_block_ke_node(&self.cfg[entry]);
         }
         if successors.len() == 1 {
             let next_node = successors[0];
             let current_block = self.konversi_block_ke_node(&self.cfg[entry]);
-            self.processed_nodes.insert(entry);
-            let rest = self.proses_region_skop(next_node, exit, sccs);
+            if Some(next_node) == region_exit {
+                return current_block;
+            }
+            let rest = self.proses_region_skop(next_node, region_exit, sccs);
             return NodeStruktur::Sekuen(vec![current_block, rest]);
         }
-        if successors.len() == 2 {
-            return self.bentuk_struktur_percabangan(entry, exit, successors[0], successors[1], sccs);
-        }
+        let merge_point = self.cari_titik_konvergensi(entry).or(region_exit);
         if successors.len() > 2 {
-            return self.bentuk_struktur_switch_case(entry, exit, &successors, sccs);
+            return self.bentuk_struktur_switch(entry, merge_point, &successors, sccs, region_exit);
         }
-        NodeStruktur::Sekuen(vec![])
+        if successors.len() == 2 {
+            let true_node = successors[0];
+            let false_node = successors[1];
+            return self.bentuk_struktur_if_else(entry, true_node, false_node, merge_point, region_exit, sccs);
+        }
+        NodeStruktur::Goto(self.cfg[entry].va_start)
     }
     fn bentuk_struktur_loop(
         &mut self,
         header: NodeIndex,
-        global_exit: Option<NodeIndex>,
+        loop_exit: Option<NodeIndex>,
         sccs: &[Vec<NodeIndex>],
     ) -> NodeStruktur {
-        let mut loop_body_nodes = HashSet::new();
-        let mut stack = vec![header];
-        let mut latch_node = None;
-        while let Some(n) = stack.pop() {
-            if !loop_body_nodes.insert(n) {
-                continue;
-            }
-            for neighbor in self.cfg.neighbors_directed(n, Direction::Outgoing) {
-                if neighbor == header {
-                    latch_node = Some(n);
-                } else if Some(neighbor) != global_exit && !self.dominators.dominators(header).map_or(false, |mut d| d.any(|x| x == neighbor)) {
-                     
-                } else {
-                   if self.dominators.dominators(n).map_or(false, |mut d| d.any(|x| x == header)) {
-                       stack.push(neighbor);
-                   }
-                }
-            }
-        }
-        let loop_exit = self.cari_titik_konvergensi(header).or(global_exit);
-        self.processed_nodes.insert(header);
         let header_block = &self.cfg[header];
-        let condition = self.ekstrak_kondisi_cabang(header_block);
-        let body_structure = if let Some(_latch) = latch_node {
-             self.proses_region_skop(header, Some(header), sccs) 
-        } else {
-             let next_in_loop = self.cfg.neighbors_directed(header, Direction::Outgoing)
-                .find(|&n| loop_body_nodes.contains(&n))
-                .unwrap_or(header);
-             self.proses_region_skop(next_in_loop, Some(header), sccs)
-        };
-        let loop_node = if let Some(cond) = condition {
+        let kondisi_awal = self.ekstrak_kondisi_cabang(header_block);
+        let latches = self.back_edges.get(&header).cloned().unwrap_or_default();
+        if latches.len() == 1 && kondisi_awal.is_some() {
+            let latch = latches[0];
+            let update_stmt = self.ekstrak_pernyataan_tunggal(&self.cfg[latch]);
+            let body_struct = self.proses_region_skop(
+                self.cfg.neighbors_directed(header, Direction::Outgoing).find(|&n| n != loop_exit.unwrap_or(NodeIndex::end())).unwrap_or(header),
+                Some(latch),
+                sccs
+            );
+            return NodeStruktur::LoopFor {
+                inisialisasi: None,
+                kondisi: kondisi_awal.unwrap(),
+                update: update_stmt.map(Box::new),
+                badan_loop: Box::new(body_struct),
+            };
+        }
+        let body_entry = self.cfg.neighbors_directed(header, Direction::Outgoing)
+            .find(|&n| Some(n) != loop_exit)
+            .unwrap_or(header);
+        let body_struct = self.proses_region_skop(body_entry, Some(header), sccs);
+        if let Some(cond) = kondisi_awal {
             NodeStruktur::LoopSementara {
                 kondisi: cond,
-                badan_loop: Box::new(body_structure),
+                badan_loop: Box::new(body_struct),
             }
         } else {
-            NodeStruktur::LoopTakTerbatas(Box::new(body_structure))
+            if !latches.is_empty() {
+                let latch = latches[0];
+                let latch_cond = self.ekstrak_kondisi_cabang(&self.cfg[latch]);
+                if let Some(cond) = latch_cond {
+                    return NodeStruktur::LoopLakukan {
+                        badan_loop: Box::new(body_struct),
+                        kondisi: cond,
+                    };
+                }
+            }
+            NodeStruktur::LoopTakTerbatas(Box::new(body_struct))
+        }
+    }
+    fn bentuk_struktur_switch(
+        &mut self,
+        header: NodeIndex,
+        merge_point: Option<NodeIndex>,
+        targets: &[NodeIndex],
+        sccs: &[Vec<NodeIndex>],
+        global_exit: Option<NodeIndex>,
+    ) -> NodeStruktur {
+        let header_block = &self.cfg[header];
+        let switch_var = self.ekstrak_variabel_switch(header_block)
+            .unwrap_or(EkspresiPseudo::TidakDiketahui);
+        let mut cases = Vec::new();
+        let mut processed_targets = HashSet::new();
+        for (idx, &target) in targets.iter().enumerate() {
+            if Some(target) == merge_point || processed_targets.contains(&target) {
+                continue;
+            }
+            processed_targets.insert(target);
+            let case_val = idx as u64; 
+            let body = self.proses_region_skop(target, merge_point, sccs);
+            cases.push((vec![case_val], Box::new(body)));
+        }
+        let switch_node = NodeStruktur::KondisiSwitch {
+            kondisi: switch_var,
+            kasus: cases,
+            opsi_default: None,
         };
-        let next_part = if let Some(exit_node) = loop_exit {
-            self.proses_region_skop(exit_node, global_exit, sccs)
+        let next_part = if let Some(merge) = merge_point {
+            self.proses_region_skop(merge, global_exit, sccs)
         } else {
             NodeStruktur::Sekuen(vec![])
         };
-        NodeStruktur::Sekuen(vec![loop_node, next_part])
+        NodeStruktur::Sekuen(vec![switch_node, next_part])
     }
-    fn bentuk_struktur_percabangan(
+    fn bentuk_struktur_if_else(
         &mut self,
-        node: NodeIndex,
-        global_exit: Option<NodeIndex>,
+        header: NodeIndex,
         true_target: NodeIndex,
         false_target: NodeIndex,
+        merge_point: Option<NodeIndex>,
+        global_exit: Option<NodeIndex>,
         sccs: &[Vec<NodeIndex>],
     ) -> NodeStruktur {
-        let block = &self.cfg[node];
+        let block = &self.cfg[header];
         let kondisi = self.ekstrak_kondisi_cabang(block).unwrap_or(EkspresiPseudo::Konstanta(1));
-        let merge_point = self.cari_titik_konvergensi(node).or(global_exit);
-        self.processed_nodes.insert(node);
-        let true_branch = if Some(true_target) != merge_point {
-            self.proses_region_skop(true_target, merge_point, sccs)
+        let true_body = if Some(true_target) != merge_point {
+            Box::new(self.proses_region_skop(true_target, merge_point, sccs))
         } else {
-            NodeStruktur::Sekuen(vec![])
+            Box::new(NodeStruktur::Sekuen(vec![]))
         };
-        let false_branch = if Some(false_target) != merge_point {
+        let false_body = if Some(false_target) != merge_point {
             Some(Box::new(self.proses_region_skop(false_target, merge_point, sccs)))
         } else {
             None
         };
         let if_node = NodeStruktur::KondisiJika {
             kondisi,
-            blok_true: Box::new(true_branch),
-            blok_false: false_branch,
+            blok_true: true_body,
+            blok_false: false_body,
         };
         let next_part = if let Some(merge) = merge_point {
-             self.proses_region_skop(merge, global_exit, sccs)
+            self.proses_region_skop(merge, global_exit, sccs)
         } else {
             NodeStruktur::Sekuen(vec![])
         };
         NodeStruktur::Sekuen(vec![if_node, next_part])
     }
-    fn bentuk_struktur_switch_case(
-        &mut self,
-        node: NodeIndex,
-        global_exit: Option<NodeIndex>,
-        targets: &[NodeIndex],
-        sccs: &[Vec<NodeIndex>],
-    ) -> NodeStruktur {
-        let block = &self.cfg[node];
-        let switch_var = self.ekstrak_variabel_switch(block);
-        let merge_point = self.cari_titik_konvergensi(node).or(global_exit);
-        self.processed_nodes.insert(node);
-        let mut current_if_chain: Option<NodeStruktur> = None;
-        for (idx, &target) in targets.iter().enumerate().rev() {
-            if Some(target) == merge_point {
-                continue;
-            }
-            let case_body = self.proses_region_skop(target, merge_point, sccs);
-            let compare_val = idx as u64; 
-            let condition = if let Some(ref var) = switch_var {
-                EkspresiPseudo::OperasiBiner {
-                    op: "==".to_string(),
-                    kiri: Box::new(var.clone()),
-                    kanan: Box::new(EkspresiPseudo::Konstanta(compare_val)),
-                }
-            } else {
-                EkspresiPseudo::TidakDiketahui
-            };
-            let new_if = NodeStruktur::KondisiJika {
-                kondisi: condition,
-                blok_true: Box::new(case_body),
-                blok_false: current_if_chain.map(Box::new),
-            };
-            current_if_chain = Some(new_if);
-        }
-        let switch_structure = current_if_chain.unwrap_or(NodeStruktur::Sekuen(vec![]));
-        let next_part = if let Some(merge) = merge_point {
-             self.proses_region_skop(merge, global_exit, sccs)
-        } else {
-            NodeStruktur::Sekuen(vec![])
-        };
-        NodeStruktur::Sekuen(vec![switch_structure, next_part])
-    }
     fn konversi_block_ke_node(&self, block: &BasicBlock) -> NodeStruktur {
-        let mut insts = Vec::new();
+        let mut stmts = Vec::new();
         for (va, irs) in &block.instructions {
             for ir in irs {
                 if !self.is_control_flow_instruction(ir) {
-                    insts.push(map_ir_ke_pernyataan_pseudo(ir, *va));
+                    stmts.push(map_ir_ke_pernyataan_pseudo(ir, *va));
                 }
             }
         }
-        if insts.is_empty() {
+        if stmts.is_empty() {
             NodeStruktur::Sekuen(vec![])
-        } else if insts.len() == 1 {
-            NodeStruktur::Pernyataan(insts.remove(0))
+        } else if stmts.len() == 1 {
+            NodeStruktur::Pernyataan(stmts.remove(0))
         } else {
              let mut seq = Vec::new();
-             for inst in insts {
-                 seq.push(NodeStruktur::Pernyataan(inst));
+             for s in stmts {
+                 seq.push(NodeStruktur::Pernyataan(s));
              }
              NodeStruktur::Sekuen(seq)
         }
+    }
+    fn ekstrak_pernyataan_tunggal(&self, block: &BasicBlock) -> Option<PernyataanPseudo> {
+        let mut valid_stmt = None;
+        for (va, irs) in &block.instructions {
+            for ir in irs {
+                if !self.is_control_flow_instruction(ir) {
+                    valid_stmt = Some(map_ir_ke_pernyataan_pseudo(ir, *va));
+                }
+            }
+        }
+        valid_stmt
     }
     fn is_control_flow_instruction(&self, ir: &MicroInstruction) -> bool {
         matches!(ir, MicroInstruction::Jump(_) | MicroInstruction::JumpKondisi(_, _) | MicroInstruction::Call(_) | MicroInstruction::Return)
