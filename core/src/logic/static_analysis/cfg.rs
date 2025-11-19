@@ -85,7 +85,7 @@ fn extract_base_table(expr: &MicroExpr) -> Option<u64> {
 	}
 }
 
-fn scan_target_table(va_basis: u64, binary: &Binary) -> Vec<u64> {
+fn scan_target_table(va_basis: u64, binary: &Binary, sz_limit: usize) -> Vec<u64> {
 	let mut list_target = Vec::new();
 	let sz_ptr = if binary.header.bits == 64 { 8 } else { 4 };
 	let seksi_teks = binary.sections.iter().find(|s| s.name.starts_with(".text"));
@@ -94,8 +94,9 @@ fn scan_target_table(va_basis: u64, binary: &Binary) -> Vec<u64> {
 	} else {
 		(0, u64::MAX)
 	};
-	for i in 0..256 {
-		let va_kini = va_basis + (i * sz_ptr);
+	let max_entries = if sz_limit > 0 { sz_limit } else { 256 };
+	for i in 0..max_entries {
+		let va_kini = va_basis + (i as u64 * sz_ptr);
 		match read_ptr_at_va(va_kini, binary) {
 			Some(va_target) => {
 				if va_target >= va_mulai && va_target < va_akhir {
@@ -115,7 +116,44 @@ fn scan_target_table(va_basis: u64, binary: &Binary) -> Vec<u64> {
 	list_target
 }
 
-fn determine_target_jump(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
+fn detect_bounds_check(
+	prev_instructions: &[MicroInstruction], 
+	reg_index: &str
+) -> Option<usize> {
+	for instr in prev_instructions.iter().rev() {
+		if let MicroInstruction::UpdateFlag(_, expr_flag) = instr {
+			if let MicroExpr::UnaryOp(_, inner) = expr_flag {
+				if let MicroExpr::Compare(left, right) = &**inner {
+					match (&**left, &**right) {
+						(MicroExpr::Operand(MicroOperand::SsaVar(v)), MicroExpr::Operand(MicroOperand::Konstanta(k))) 
+						if v.id_reg == reg_index => return Some(*k as usize),
+						(MicroExpr::Operand(MicroOperand::Konstanta(k)), MicroExpr::Operand(MicroOperand::SsaVar(v))) 
+						if v.id_reg == reg_index => return Some(*k as usize),
+						_ => {}
+					}
+				}
+			}
+		}
+	}
+	None
+}
+
+fn extract_index_reg(expr: &MicroExpr) -> Option<String> {
+	match expr {
+		MicroExpr::Operand(MicroOperand::SsaVar(v)) => Some(v.id_reg.clone()),
+		MicroExpr::BinaryOp(_, left, right) => {
+			extract_index_reg(left).or_else(|| extract_index_reg(right))
+		}
+		MicroExpr::LoadMemori(inner) => extract_index_reg(inner),
+		_ => None,
+	}
+}
+
+fn determine_target_jump(
+	expr: &MicroExpr, 
+	binary: &Binary,
+	prev_instructions: &[MicroInstruction]
+) -> Vec<u64> {
 	match expr {
 		MicroExpr::Operand(MicroOperand::Konstanta(imm)) => {
 			vec![*imm]
@@ -123,7 +161,12 @@ fn determine_target_jump(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
 		MicroExpr::LoadMemori(mem_expr) => {
 			match extract_base_table(mem_expr) {
 				Some(va_basis) => {
-					let list_target = scan_target_table(va_basis, binary);
+					let sz_limit = if let Some(reg) = extract_index_reg(mem_expr) {
+						detect_bounds_check(prev_instructions, &reg).unwrap_or(0)
+					} else {
+						0
+					};
+					let list_target = scan_target_table(va_basis, binary, sz_limit);
 					if !list_target.is_empty() {
 						list_target
 					} else {
@@ -138,8 +181,8 @@ fn determine_target_jump(expr: &MicroExpr, binary: &Binary) -> Vec<u64> {
 			}
 		}
 		MicroExpr::BinaryOp(_, left, right) => {
-			let mut list_target = determine_target_jump(left, binary);
-			list_target.extend(determine_target_jump(right, binary));
+			let mut list_target = determine_target_jump(left, binary, prev_instructions);
+			list_target.extend(determine_target_jump(right, binary, prev_instructions));
 			list_target
 		}
 		_ => vec![],
@@ -239,9 +282,9 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 						list_kerja.push(va_lanjut);
 					}
 					let list_target = match ir_akhir {
-						MicroInstruction::Jump(expr) => determine_target_jump(expr, biner),
-						MicroInstruction::JumpKondisi(_, expr) => determine_target_jump(expr, biner),
-						MicroInstruction::Call(expr) => determine_target_jump(expr, biner),
+						MicroInstruction::Jump(expr) => determine_target_jump(expr, biner, &vec_ir),
+						MicroInstruction::JumpKondisi(_, expr) => determine_target_jump(expr, biner, &vec_ir),
+						MicroInstruction::Call(expr) => determine_target_jump(expr, biner, &vec_ir),
 						_ => vec![]
 					};
 					for va_target in list_target {
@@ -319,6 +362,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 		};
 		let va_lanjut = blok.va_end;
 		let ir_akhir = blok.instructions.last().and_then(|(_, irs)| irs.last());
+		let irs_semua: Vec<MicroInstruction> = blok.instructions.iter().flat_map(|(_, irs)| irs.clone()).collect();
 		if ir_akhir.is_none() {
 			if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
 				list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough"));
@@ -327,7 +371,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 		}
 		match ir_akhir.unwrap() {
 			MicroInstruction::Jump(expr_target) => {
-				let list_target = determine_target_jump(expr_target, biner);
+				let list_target = determine_target_jump(expr_target, biner, &irs_semua);
 				if list_target.is_empty() {
 					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (Dynamic)"));
 				} else {
@@ -339,7 +383,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 				}
 			}
 			MicroInstruction::JumpKondisi(_, expr_target) => {
-				let list_target = determine_target_jump(expr_target, biner);
+				let list_target = determine_target_jump(expr_target, biner, &irs_semua);
 				if list_target.is_empty() {
 					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (True, Dynamic)"));
 				} else {

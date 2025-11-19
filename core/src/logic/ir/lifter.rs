@@ -201,7 +201,7 @@ pub fn lift_ssa_x86(
         }};
     }
     match mnem {
-        "mov" | "movsx" | "movzx" | "movabs" => {
+        "mov" | "movsx" | "movzx" | "movabs" | "movaps" | "movups" | "movdqa" | "movdqu" => {
             if operands.len() == 2 {
                 let op_tujuan = &operands[0];
                 let expr_sumber = map_op_to_expr_ssa_x86(&operands[1], cs);
@@ -342,18 +342,22 @@ pub fn lift_ssa_x86(
         "and" => lift_op_biner!(MicroBinOp::And, false),
         "or" => lift_op_biner!(MicroBinOp::Or, false),
         "xor" => lift_op_biner!(MicroBinOp::Xor, false),
-        "paddb" | "paddw" | "paddd" | "paddq" | "vpaddb" | "vpaddw" | "vpaddd" | "vpaddq" => {
+        "addps" | "addpd" | "paddb" | "paddw" | "paddd" | "paddq" | "vpaddb" | "vpaddw" | "vpaddd" | "vpaddq" => {
             if operands.len() >= 2 {
                 let vec_op1 = operands.iter().map(|op| map_op_to_micro_op_x86(op, cs)).collect();
                 let vec_op2 = Vec::new(); 
                 if let X86OperandType::Reg(id_reg) = operands[0].op_type {
                     let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
-                    let tipe_op = match mnem.chars().last().unwrap_or('d') {
-                        'b' => MicroBinOp::VecAddI8,
-                        'w' => MicroBinOp::VecAddI16,
-                        'd' => MicroBinOp::VecAddI32,
-                        'q' => MicroBinOp::VecAddI64,
-                        _ => MicroBinOp::VecAddI32,
+                    let tipe_op = if mnem.contains("ps") || mnem.contains("pd") {
+                         MicroBinOp::TambahFloat
+                    } else {
+                         match mnem.chars().last().unwrap_or('d') {
+                             'b' => MicroBinOp::VecAddI8,
+                             'w' => MicroBinOp::VecAddI16,
+                             'd' => MicroBinOp::VecAddI32,
+                             'q' => MicroBinOp::VecAddI64,
+                             _ => MicroBinOp::VecAddI32,
+                         }
                     };
                     vec![MicroInstruction::VectorOp {
                         op: tipe_op,
@@ -369,7 +373,7 @@ pub fn lift_ssa_x86(
                 vec![MicroInstruction::Undefined]
             }
         }
-        "pxor" | "vpxor" => {
+        "pxor" | "vpxor" | "xorps" | "xorpd" => {
              if let X86OperandType::Reg(id_reg) = operands[0].op_type {
                  let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
                  let vec_op1 = operands.iter().map(|op| map_op_to_micro_op_x86(op, cs)).collect();
@@ -553,8 +557,8 @@ pub fn lift_ssa_aarch64(
     let mnem = insn.mnemonic().unwrap_or("");
     let operands: Vec<Arm64Operand> = detail.operands().collect();
     match mnem {
-        "mov" | "fmov" => {
-            if operands.len() == 2 {
+        "mov" | "fmov" | "ldr" | "ldur" => {
+            if operands.len() >= 2 {
                 if let Arm64OperandType::Reg(id_reg) = operands[0].op_type {
                     let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
                     let expr_sumber = map_op_to_expr_ssa_aarch64(&operands[1], cs);
@@ -566,13 +570,41 @@ pub fn lift_ssa_aarch64(
                 vec![MicroInstruction::Undefined]
             }
         }
-        "add" | "fadd" => {
-            if operands.len() == 3 {
+        "str" | "stur" => {
+             if operands.len() == 2 {
+                let expr_sumber = map_op_to_expr_ssa_aarch64(&operands[0], cs);
+                if let Arm64OperandType::Mem(op_mem) = operands[1].op_type {
+                    let expr_addr = map_addr_mem_aarch64(&op_mem, cs);
+                    vec![MicroInstruction::StoreMemori(expr_addr, expr_sumber)]
+                } else {
+                    vec![MicroInstruction::Undefined]
+                }
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        }
+        "add" | "sub" | "fadd" | "fsub" | "fmul" | "fdiv" => {
+            if operands.len() >= 2 {
                 if let Arm64OperandType::Reg(id_reg) = operands[0].op_type {
                     let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
-                    let src1_expr = map_op_to_expr_ssa_aarch64(&operands[1], cs);
-                    let src2_expr = map_op_to_expr_ssa_aarch64(&operands[2], cs);
-                    let op = if mnem == "fadd" { MicroBinOp::TambahFloat } else { MicroBinOp::Add };
+                    let src1_expr = if operands.len() == 2 {
+                         MicroExpr::Operand(MicroOperand::SsaVar(var_tujuan.clone()))
+                    } else {
+                        map_op_to_expr_ssa_aarch64(&operands[1], cs)
+                    };
+                    let src2_expr = if operands.len() == 2 {
+                        map_op_to_expr_ssa_aarch64(&operands[1], cs)
+                    } else {
+                        map_op_to_expr_ssa_aarch64(&operands[2], cs)
+                    };
+                    let op = match mnem {
+                        "fadd" => MicroBinOp::TambahFloat,
+                        "fsub" => MicroBinOp::KurangFloat,
+                        "fmul" => MicroBinOp::KaliFloat,
+                        "fdiv" => MicroBinOp::BagiFloat,
+                        "sub" => MicroBinOp::Sub,
+                        _ => MicroBinOp::Add,
+                    };
                     vec![MicroInstruction::Assign(
                         var_tujuan,
                         MicroExpr::BinaryOp(
@@ -606,6 +638,90 @@ pub fn lift_ssa_aarch64(
             } else {
                 vec![MicroInstruction::Undefined]
             }
+        }
+        "and" | "orr" | "eor" | "bic" => {
+            if operands.len() >= 2 {
+                if let Arm64OperandType::Reg(id_reg) = operands[0].op_type {
+                    let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
+                    let src1_expr = if operands.len() == 2 {
+                        MicroExpr::Operand(MicroOperand::SsaVar(var_tujuan.clone()))
+                    } else {
+                        map_op_to_expr_ssa_aarch64(&operands[1], cs)
+                    };
+                    let src2_expr = if operands.len() == 2 {
+                        map_op_to_expr_ssa_aarch64(&operands[1], cs)
+                    } else {
+                        map_op_to_expr_ssa_aarch64(&operands[2], cs)
+                    };
+                    let op = match mnem {
+                        "and" => MicroBinOp::And,
+                        "orr" => MicroBinOp::Or,
+                        "eor" => MicroBinOp::Xor,
+                        "bic" => MicroBinOp::And, 
+                        _ => MicroBinOp::And,
+                    };
+                    vec![MicroInstruction::Assign(
+                         var_tujuan,
+                         MicroExpr::BinaryOp(op, Box::new(src1_expr), Box::new(src2_expr))
+                    )]
+                } else {
+                     vec![MicroInstruction::Undefined]
+                }
+            } else {
+                 vec![MicroInstruction::Undefined]
+            }
+        }
+        "cmp" | "fcmp" => {
+             if operands.len() == 2 {
+                let op1 = map_op_to_expr_ssa_aarch64(&operands[0], cs);
+                let op2 = map_op_to_expr_ssa_aarch64(&operands[1], cs);
+                let expr_hasil = MicroExpr::BinaryOp(MicroBinOp::Sub, Box::new(op1.clone()), Box::new(op2.clone()));
+                let mut list_instr = Vec::new();
+                list_instr.push(MicroInstruction::UpdateFlag("ZF".to_string(), MicroExpr::UnaryOp(MicroUnOp::ExtractZeroFlag, Box::new(expr_hasil.clone()))));
+                list_instr.push(MicroInstruction::UpdateFlag("NF".to_string(), MicroExpr::UnaryOp(MicroUnOp::ExtractSignFlag, Box::new(expr_hasil.clone()))));
+                list_instr
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        }
+        "b" => {
+             if operands.len() == 1 {
+                 vec![MicroInstruction::Jump(map_op_to_expr_ssa_aarch64(&operands[0], cs))]
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        }
+        "b.eq" | "b.ne" | "b.lt" | "b.le" | "b.gt" | "b.ge" => {
+             let cond_flag = match mnem {
+                 "b.eq" => MicroExpr::Operand(MicroOperand::Flag("ZF".to_string())),
+                 "b.ne" => MicroExpr::UnaryOp(MicroUnOp::Not, Box::new(MicroExpr::Operand(MicroOperand::Flag("ZF".to_string())))),
+                 _ => MicroExpr::Operand(MicroOperand::Konstanta(1)), 
+             };
+             if operands.len() == 1 {
+                  let target = map_op_to_expr_ssa_aarch64(&operands[0], cs);
+                  vec![MicroInstruction::JumpKondisi(cond_flag, target)]
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        }
+        "bl" => {
+             if operands.len() == 1 {
+                 vec![MicroInstruction::Call(map_op_to_expr_ssa_aarch64(&operands[0], cs))]
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
+        }
+        "br" | "blr" => {
+             if operands.len() == 1 {
+                 let target = map_op_to_expr_ssa_aarch64(&operands[0], cs);
+                 if mnem == "blr" {
+                      vec![MicroInstruction::Call(target)]
+                 } else {
+                      vec![MicroInstruction::Jump(target)]
+                 }
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
         }
         "ldxr" => {
              if operands.len() == 2 {
