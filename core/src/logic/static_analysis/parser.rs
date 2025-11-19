@@ -262,14 +262,17 @@ impl Binary {
             let off_data = section.offset as usize;
             let sz_data = section.size as usize;
             let addr_basis = section.addr;
-            if off_data.saturating_add(sz_data) > biner.file_data.len() {
+            if off_data.checked_add(sz_data).map_or(true, |end| end > biner.file_data.len()) {
                 warn!("Seksi executable di luar batas file: {}", section.name);
                 continue;
             }
             let data_section = &biner.file_data[off_data..(off_data + sz_data)];
             let mut offset: usize = 0;
             while offset < data_section.len() {
-                let va = addr_basis + offset as u64;
+                let va = match addr_basis.checked_add(offset as u64) {
+                    Some(v) => v,
+                    None => break,
+                };
                 let (sz_instr, irs) = match lift_blok_instr(&data_section[offset..], va, arch) {
                     Ok((sz, ir_vec)) if sz > 0 => (sz, ir_vec),
                     _ => (1, vec![MicroInstruction::Undefined]),
@@ -281,7 +284,10 @@ impl Binary {
                 for ir in irs {
                     Self::scan_ir_xrefs(ir, va, &mut call_graph, &mut data_access_graph, biner);
                 }
-                offset += sz_instr;
+                offset = match offset.checked_add(sz_instr) {
+                    Some(o) => o,
+                    None => break,
+                };
             }
         }
         info!("Selesai build XRefs. Ditemukan {} calls, {} data refs", call_graph.len(), data_access_graph.len());

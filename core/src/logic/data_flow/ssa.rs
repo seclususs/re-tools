@@ -9,6 +9,7 @@ use petgraph::Direction;
 use std::collections::{HashMap, HashSet};
 
 const ID_MEMORI: &str = "@@MEM";
+const MAX_RECURSION_DEPTH: usize = 4096;
 
 struct StateRename {
     stack_var: HashMap<String, Vec<u32>>,
@@ -56,7 +57,7 @@ impl<'a> SsaBuilder<'a> {
         self.insert_node_phi();
         let mut state = StateRename::new(&self.set_var_asli);
         let root = self.graf_cfg.node_identifiers().next().unwrap();
-        self.rename_rekursif(root, &mut state);
+        self.rename_rekursif(root, &mut state, 0);
     }
     fn calc_dom_frontiers(&mut self) {
         let mut frontiers: HashMap<NodeIndex, HashSet<NodeIndex>> = HashMap::new();
@@ -168,7 +169,10 @@ impl<'a> SsaBuilder<'a> {
             }
         }
     }
-    fn rename_rekursif(&mut self, u: NodeIndex, state: &mut StateRename) {
+    fn rename_rekursif(&mut self, u: NodeIndex, state: &mut StateRename, kedalaman: usize) {
+        if kedalaman > MAX_RECURSION_DEPTH {
+            return;
+        }
         let mut cnt_push: HashMap<String, usize> = HashMap::new();
         let push_versi = |nama_var: String, st: &mut StateRename, cnt: &mut HashMap<String, usize>| -> u32 {
             let ver_baru = *st.cnt_var.get(&nama_var).unwrap_or(&0) + 1;
@@ -232,7 +236,7 @@ impl<'a> SsaBuilder<'a> {
         children.sort_by(|a, b| a.index().cmp(&b.index()));
         for v in children {
             if v != u {
-                self.rename_rekursif(v, state);
+                self.rename_rekursif(v, state, kedalaman + 1);
             }
         }
         for (var, count) in cnt_push {

@@ -19,7 +19,7 @@ fn wrap_decode_instr(
     off_set: usize,
     id_arch: u32,
     va_basis: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let slice_bytes = bytes_data.as_bytes();
     let len_data = slice_bytes.len();
     let ptr_data = slice_bytes.as_ptr();
@@ -35,7 +35,7 @@ fn wrap_decode_instr(
         _ => ArsitekturDisasm::ARCH_UNKNOWN,
     };
     let c_instr = decode_instr_single(ptr_data, len_data, off_set, va_basis, arch);
-    let dict = PyDict::new_bound(py);
+    let dict = PyDict::new(py);
     dict.set_item("valid", c_instr.valid != 0)?;
     dict.set_item("size", c_instr.ukuran)?;
     if c_instr.valid != 0 {
@@ -49,7 +49,7 @@ fn wrap_decode_instr(
         dict.set_item("mnemonic", "INVALID")?;
         dict.set_item("operands", "")?;
     }
-    Ok(dict.to_object(py))
+    Ok(dict.into())
 }
 
 #[pyfunction(name = "getIrForInstruksi")]
@@ -59,7 +59,7 @@ fn wrap_lift_ir(
     off_set: usize,
     id_arch: u32,
     va_basis: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let slice_bytes = bytes_data.as_bytes();
     if off_set >= slice_bytes.len() {
         return Err(PyValueError::new_err("Offset di luar batas"));
@@ -80,18 +80,18 @@ fn wrap_lift_ir(
         Ok((_size, ir_vec)) => {
             let json_str = serde_json::to_string(&ir_vec)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let json_module = PyModule::import_bound(py, "json")?;
+            let json_module = PyModule::import(py, "json")?;
             let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-            Ok(py_json.to_object(py))
+            Ok(py_json.into())
         }
         Err(e) => Err(convert_err_py(e)),
     }
 }
 
 #[pyfunction(name = "optimizeIrCfg")]
-fn wrap_calc_opt(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_opt(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
     let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-    let mut cfg = build_cfg_internal(&binary).map_err(convert_err_py)?;
+    let mut cfg = build_cfg_internal(&binary, None).map_err(convert_err_py)?;
     let mut optimizer = IrOptimizer::new();
     optimizer.run_pass_opt(&mut cfg);
     let mut result_map = std::collections::HashMap::new();
@@ -102,9 +102,9 @@ fn wrap_calc_opt(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
     }
     let json_str = serde_json::to_string(&result_map)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let json_module = PyModule::import_bound(py, "json")?;
+    let json_module = PyModule::import(py, "json")?;
     let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-    Ok(py_json.to_object(py))
+    Ok(py_json.into())
 }
 
 pub fn init_modul_ir(m: &Bound<'_, PyModule>) -> PyResult<()> {

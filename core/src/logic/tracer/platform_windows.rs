@@ -97,6 +97,33 @@ impl WindowsTracer {
         CloseHandle(ptr_handle_token);
         b_ok != 0
     }
+    unsafe fn check_memory_permission(&self, addr: u64, _len: usize, is_write: bool) -> Result<(), ReToolsError> {
+        let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+        if VirtualQueryEx(
+            self.ptr_handle_proses,
+            addr as *const c_void,
+            &mut mbi,
+            std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        ) == 0 {
+            return Err(ReToolsError::Generic("VirtualQueryEx failed - invalid address".to_string()));
+        }
+        if mbi.State != windows_sys::Win32::System::Memory::MEM_COMMIT {
+            return Err(ReToolsError::Generic("Memory not committed".to_string()));
+        }
+        if mbi.Protect & windows_sys::Win32::System::Memory::PAGE_NOACCESS != 0 {
+             return Err(ReToolsError::Generic("Access violation: PAGE_NOACCESS".to_string()));
+        }
+        if is_write {
+            let writable_flags = windows_sys::Win32::System::Memory::PAGE_READWRITE |
+                windows_sys::Win32::System::Memory::PAGE_WRITECOPY |
+                windows_sys::Win32::System::Memory::PAGE_EXECUTE_READWRITE |
+                windows_sys::Win32::System::Memory::PAGE_EXECUTE_WRITECOPY;
+             if (mbi.Protect & writable_flags) == 0 {
+                 return Err(ReToolsError::Generic("Access violation: Write protected".to_string()));
+             }
+        }
+        Ok(())
+    }
     unsafe fn get_handle_thread(
         &self,
         id_thread: u32,
@@ -295,11 +322,13 @@ impl WindowsTracer {
                 }
                 _ => {}
             }
-            ContinueDebugEvent(
+            if ContinueDebugEvent(
                 event_debug.dwProcessId,
                 event_debug.dwThreadId,
                 status_lanjut,
-            );
+            ) == 0 {
+                return Err(ReToolsError::Generic("Failed to continue debug event (Process dead?)".to_string()));
+            }
             Ok(false)
         }
     }
@@ -343,7 +372,10 @@ impl PlatformTracer for WindowsTracer {
             self.map_titik_henti.clear();
             if self.ptr_handle_proses != 0 {
                 if DebugActiveProcessStop(self.pid_sasaran) == 0 {
-                    return Err(ReToolsError::IoError(std::io::Error::last_os_error()));
+                    let err = std::io::Error::last_os_error();
+                     if err.raw_os_error() != Some(87) { 
+                         return Err(ReToolsError::IoError(err));
+                     }
                 }
                 CloseHandle(self.ptr_handle_proses);
                 self.ptr_handle_proses = 0;
@@ -352,6 +384,11 @@ impl PlatformTracer for WindowsTracer {
         }
     }
     fn read_memori(&self, va_alamat: u64, sz_ukuran: c_int) -> Result<Vec<u8>, ReToolsError> {
+        unsafe {
+            if let Err(e) = self.check_memory_permission(va_alamat, sz_ukuran as usize, false) {
+                return Err(e);
+            }
+        }
         let mut vec_buffer = vec![0u8; sz_ukuran as usize];
         let mut sz_terbaca: usize = 0;
         unsafe {
@@ -371,6 +408,11 @@ impl PlatformTracer for WindowsTracer {
         }
     }
     fn write_memori(&self, va_alamat: u64, buf_data: &[u8]) -> Result<usize, ReToolsError> {
+        unsafe {
+            if let Err(e) = self.check_memory_permission(va_alamat, buf_data.len(), true) {
+                return Err(e);
+            }
+        }
         let mut sz_tertulis: usize = 0;
         unsafe {
             if WriteProcessMemory(

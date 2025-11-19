@@ -20,7 +20,7 @@ fn wrap_calc_analisis<F>(
 	py: Python,
 	jalur_berkas: &str,
 	f: F,
-) -> PyResult<PyObject>
+) -> PyResult<Py<PyAny>>
 where
 	F: FnOnce(
 		&Binary,
@@ -32,16 +32,16 @@ where
 {
 	info!("py: Menganalisis binary: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let mut cfg = build_cfg_internal(&binary).map_err(convert_err_py)?;
+	let mut cfg = build_cfg_internal(&binary, None).map_err(convert_err_py)?;
     construct_ssa_complete(&mut cfg);
 	let json_str = f(&binary, &mut cfg)?;
-	let json_module = PyModule::import_bound(py, "json")?;
+	let json_module = PyModule::import(py, "json")?;
 	let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-	Ok(py_json.to_object(py))
+	Ok(py_json.into())
 }
 
 #[pyfunction(name = "getLivenessAnalysis")]
-fn wrap_calc_liveness(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_liveness(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
 		let liveness = calc_live_var(cfg);
 		let mut simple_liveness: HashMap<String, (HashSet<String>, HashSet<String>)> =
@@ -55,7 +55,7 @@ fn wrap_calc_liveness(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getReachingDefs")]
-fn wrap_calc_reaching(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_reaching(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
 		let (info, _, _) = build_chain_def(cfg);
 		let mut simple_info: HashMap<String, (ReachingDefSet, ReachingDefSet)> = HashMap::new();
@@ -69,7 +69,7 @@ fn wrap_calc_reaching(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getDefUseChains")]
-fn wrap_calc_def_use(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_def_use(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
 		let (_, def_use, _) = build_chain_def(cfg);
 		serde_json::to_string(&def_use.chains).map_err(|e| PyValueError::new_err(e.to_string()))
@@ -77,7 +77,7 @@ fn wrap_calc_def_use(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getUseDefChains")]
-fn wrap_calc_use_def(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_use_def(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
 		let (_, _, use_def) = build_chain_def(cfg);
 		serde_json::to_string(&use_def.chains).map_err(|e| PyValueError::new_err(e.to_string()))
@@ -85,9 +85,9 @@ fn wrap_calc_use_def(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getValueSetAnalysis")]
-fn wrap_calc_vsa(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
-	wrap_calc_analisis(py, jalur_berkas, |_binary, cfg| {
-		let vsa = analyze_set_nilai(cfg);
+fn wrap_calc_vsa(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
+	wrap_calc_analisis(py, jalur_berkas, |binary, cfg| {
+		let vsa = analyze_set_nilai(cfg, binary, None);
 		let simple_vsa: HashMap<String, (VsaState, VsaState)> = vsa
 			.into_iter()
 			.map(|(idx, states)| (format!("block_{}", idx.index()), states))
@@ -97,9 +97,9 @@ fn wrap_calc_vsa(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getTipeInference")]
-fn wrap_calc_tipe(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_calc_tipe(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |binary, cfg| {
-		let vsa = analyze_set_nilai(cfg);
+		let vsa = analyze_set_nilai(cfg, binary, None);
 		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
 			.into_iter()
 			.map(|(idx, (_, out_state))| (idx, out_state))
@@ -110,9 +110,9 @@ fn wrap_calc_tipe(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction(name = "getMemoryAccessCheck")]
-fn wrap_scan_mem_check(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_scan_mem_check(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	wrap_calc_analisis(py, jalur_berkas, |binary, cfg| {
-		let vsa = analyze_set_nilai(cfg);
+		let vsa = analyze_set_nilai(cfg, binary, None);
 		let vsa_out_states: HashMap<NodeIndex, VsaState> = vsa
 			.into_iter()
 			.map(|(idx, (_, out_state))| (idx, out_state))

@@ -193,7 +193,10 @@ fn is_ir_branch(ir: &MicroInstruction) -> bool {
 	matches!(ir, MicroInstruction::Jump(_) | MicroInstruction::JumpKondisi(_, _) | MicroInstruction::Return | MicroInstruction::Call(_))
 }
 
-pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static str>, ReToolsError> {
+pub fn build_cfg_internal(
+    biner: &Binary,
+    peta_target_dinamis: Option<&HashMap<u64, u64>>
+) -> Result<DiGraph<BasicBlock, &'static str>, ReToolsError> {
 	info!("Mulai bangun CFG (IR-based) untuk: {}", biner.path_berkas);
 	let seksi_teks = biner
 		.sections
@@ -264,6 +267,16 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 			}
 		}
 	}
+    if let Some(peta_dinamis) = peta_target_dinamis {
+        for (_, va_target) in peta_dinamis {
+             if *va_target >= va_basis && *va_target < va_akhir_teks {
+                if set_leader.insert(*va_target) {
+                    list_kerja.push(*va_target);
+                    info!("Menambahkan leader dari trace dinamis: 0x{:x}", va_target);
+                }
+            }
+        }
+    }
 	info!("Pass 1 (Leader Discovery) mulai dengan {} entries...", list_kerja.len());
 	while let Some(va_saat_ini) = list_kerja.pop() {
 		let mut va_kini = va_saat_ini;
@@ -281,12 +294,20 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 					if va_lanjut < va_akhir_teks && set_leader.insert(va_lanjut) {
 						list_kerja.push(va_lanjut);
 					}
-					let list_target = match ir_akhir {
-						MicroInstruction::Jump(expr) => determine_target_jump(expr, biner, &vec_ir),
-						MicroInstruction::JumpKondisi(_, expr) => determine_target_jump(expr, biner, &vec_ir),
-						MicroInstruction::Call(expr) => determine_target_jump(expr, biner, &vec_ir),
-						_ => vec![]
-					};
+                    let mut list_target = Vec::new();
+                    if let Some(peta_dinamis) = peta_target_dinamis {
+                        if let Some(target_dinamis) = peta_dinamis.get(&va_kini) {
+                             list_target.push(*target_dinamis);
+                        }
+                    }
+                    if list_target.is_empty() {
+                        list_target = match ir_akhir {
+                            MicroInstruction::Jump(expr) => determine_target_jump(expr, biner, &vec_ir),
+                            MicroInstruction::JumpKondisi(_, expr) => determine_target_jump(expr, biner, &vec_ir),
+                            MicroInstruction::Call(expr) => determine_target_jump(expr, biner, &vec_ir),
+                            _ => vec![]
+                        };
+                    }
 					for va_target in list_target {
 						if va_target >= va_basis && va_target < va_akhir_teks && set_leader.insert(va_target) {
 							list_kerja.push(va_target);
@@ -362,6 +383,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 		};
 		let va_lanjut = blok.va_end;
 		let ir_akhir = blok.instructions.last().and_then(|(_, irs)| irs.last());
+        let va_ir_akhir = blok.instructions.last().map(|(v, _)| *v).unwrap_or(0);
 		let irs_semua: Vec<MicroInstruction> = blok.instructions.iter().flat_map(|(_, irs)| irs.clone()).collect();
 		if ir_akhir.is_none() {
 			if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
@@ -369,9 +391,17 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 			}
 			continue;
 		}
+        let resolve_targets = |expr: &MicroExpr, va_sumber: u64| -> Vec<u64> {
+            if let Some(peta_dinamis) = peta_target_dinamis {
+                if let Some(target) = peta_dinamis.get(&va_sumber) {
+                    return vec![*target];
+                }
+            }
+            determine_target_jump(expr, biner, &irs_semua)
+        };
 		match ir_akhir.unwrap() {
 			MicroInstruction::Jump(expr_target) => {
-				let list_target = determine_target_jump(expr_target, biner, &irs_semua);
+				let list_target = resolve_targets(expr_target, va_ir_akhir);
 				if list_target.is_empty() {
 					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (Dynamic)"));
 				} else {
@@ -383,7 +413,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 				}
 			}
 			MicroInstruction::JumpKondisi(_, expr_target) => {
-				let list_target = determine_target_jump(expr_target, biner, &irs_semua);
+				let list_target = resolve_targets(expr_target, va_ir_akhir);
 				if list_target.is_empty() {
 					list_sisi.push((idx_simpul, simpul_lompat_dinamis, "Jump (True, Dynamic)"));
 				} else {
@@ -399,7 +429,14 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 			}
 			MicroInstruction::Return => {
 			}
-			MicroInstruction::Call(_) => {
+			MicroInstruction::Call(expr_target) => {
+                let list_target = resolve_targets(expr_target, va_ir_akhir);
+                 for va_target in list_target {
+                    if let Some(idx_target) = peta_simpul.get(&va_target) {
+                        list_sisi.push((idx_simpul, *idx_target, "Call"));
+                    }
+                 }
+
 				 if let Some(idx_lanjut) = peta_simpul.get(&va_lanjut) {
 					list_sisi.push((idx_simpul, *idx_lanjut, "Fallthrough (Call)"));
 				}
@@ -419,7 +456,7 @@ pub fn build_cfg_internal(biner: &Binary) -> Result<DiGraph<BasicBlock, &'static
 }
 
 pub fn create_graf_cfg(biner: &Binary) -> Result<String, ReToolsError> {
-	let graf = build_cfg_internal(biner)?;
+	let graf = build_cfg_internal(biner, None)?;
 	let dot_str = Dot::with_config(&graf, &[]);
 	Ok(format!("{}", dot_str))
 }

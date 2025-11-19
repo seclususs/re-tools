@@ -185,6 +185,11 @@ impl VsaState {
             memory_abstract: merged_mem,
         }
     }
+    pub fn inject_hint(&mut self, hints: &HashMap<String, u64>) {
+        for (reg, val) in hints {
+            self.variables.insert(reg.clone(), ValueDomain::Constant(*val));
+        }
+    }
 }
 
 fn eval_expr_alias(expr: &MicroExpr, state: &VsaState) -> ValueDomain {
@@ -256,9 +261,13 @@ fn func_transfer_alias(
     blok: &BasicBlock, 
     state_in: &VsaState, 
     binary: &Binary,
-    summaries: &HashMap<String, RingkasanFungsi>
+    summaries: &HashMap<String, RingkasanFungsi>,
+    trace_hints: Option<&HashMap<String, u64>>
 ) -> VsaState {
     let mut state_out = state_in.clone();
+    if let Some(hints) = trace_hints {
+         state_out.inject_hint(hints);
+    }
     for (_, list_instr) in &blok.instructions {
         for instr in list_instr {
             match instr {
@@ -344,6 +353,7 @@ fn func_transfer_alias(
 pub fn analyze_set_nilai(
     graf: &DiGraph<BasicBlock, &'static str>,
     binary: &Binary,
+    peta_hint_trace: Option<&HashMap<u64, HashMap<String, u64>>>
 ) -> HashMap<NodeIndex, (VsaState, VsaState)> {
     let summaries = get_ringkasan_bawaan();
     let mut peta_state_masuk: HashMap<NodeIndex, VsaState> = HashMap::new();
@@ -359,7 +369,7 @@ pub fn analyze_set_nilai(
     while let Some(simpul) = list_kerja.pop() {
         iter += 1;
         if iter > list_simpul.len() * MAX_ITERASI {
-            break;
+            return list_simpul.into_iter().map(|n| (n, (VsaState::new(), VsaState::new()))).collect();
         }
         let mut state_masuk_baru = VsaState::new();
         let mut first_pred = true;
@@ -372,13 +382,16 @@ pub fn analyze_set_nilai(
                 state_masuk_baru = state_masuk_baru.merge(pred_out);
             }
         }
+        let va_blok = graf.node_weight(simpul).unwrap().va_start;
+        let hint_blok = peta_hint_trace.and_then(|m| m.get(&va_blok));
         if state_masuk_baru != *peta_state_masuk.get(&simpul).unwrap() {
             peta_state_masuk.insert(simpul, state_masuk_baru.clone());
             let state_keluar_baru = func_transfer_alias(
                 graf.node_weight(simpul).unwrap(), 
                 &state_masuk_baru,
                 binary,
-                &summaries
+                &summaries,
+                hint_blok
             );
             if state_keluar_baru != *peta_state_keluar.get(&simpul).unwrap() {
                 peta_state_keluar.insert(simpul, state_keluar_baru);

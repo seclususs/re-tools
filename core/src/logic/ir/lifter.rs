@@ -374,16 +374,20 @@ pub fn lift_ssa_x86(
             }
         }
         "pxor" | "vpxor" | "xorps" | "xorpd" => {
-             if let X86OperandType::Reg(id_reg) = operands[0].op_type {
-                 let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
-                 let vec_op1 = operands.iter().map(|op| map_op_to_micro_op_x86(op, cs)).collect();
-                 vec![MicroInstruction::VectorOp {
-                        op: MicroBinOp::VecXor,
-                        tujuan: var_tujuan,
-                        sz_elemen: 128,
-                        op_1: vec_op1,
-                        op_2: Vec::new(),
-                 }]
+             if !operands.is_empty() {
+                 if let X86OperandType::Reg(id_reg) = operands[0].op_type {
+                     let var_tujuan = create_var_ssa_from_reg(id_reg, cs);
+                     let vec_op1 = operands.iter().map(|op| map_op_to_micro_op_x86(op, cs)).collect();
+                     vec![MicroInstruction::VectorOp {
+                            op: MicroBinOp::VecXor,
+                            tujuan: var_tujuan,
+                            sz_elemen: 128,
+                            op_1: vec_op1,
+                            op_2: Vec::new(),
+                     }]
+                 } else {
+                     vec![MicroInstruction::Undefined]
+                 }
              } else {
                  vec![MicroInstruction::Undefined]
              }
@@ -432,14 +436,22 @@ pub fn lift_ssa_x86(
             }
         }
         "je" | "jz" => {
-             let cond = MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()));
-             let target = map_op_to_expr_ssa_x86(&operands[0], cs);
-             vec![MicroInstruction::JumpKondisi(cond, target)]
+             if operands.len() == 1 {
+                 let cond = MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()));
+                 let target = map_op_to_expr_ssa_x86(&operands[0], cs);
+                 vec![MicroInstruction::JumpKondisi(cond, target)]
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
         }
         "jne" | "jnz" => {
-             let cond = MicroExpr::UnaryOp(MicroUnOp::Not, Box::new(MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()))));
-             let target = map_op_to_expr_ssa_x86(&operands[0], cs);
-             vec![MicroInstruction::JumpKondisi(cond, target)]
+             if operands.len() == 1 {
+                 let cond = MicroExpr::UnaryOp(MicroUnOp::Not, Box::new(MicroExpr::Operand(MicroOperand::Flag("ZF".to_string()))));
+                 let target = map_op_to_expr_ssa_x86(&operands[0], cs);
+                 vec![MicroInstruction::JumpKondisi(cond, target)]
+             } else {
+                 vec![MicroInstruction::Undefined]
+             }
         }
         "call" => {
             if operands.len() == 1 {
@@ -1025,10 +1037,16 @@ pub fn lift_blok_instr(
     va_base_instr: u64,
     arch: ArsitekturDisasm,
 ) -> Result<(usize, Vec<MicroInstruction>), ReToolsError> {
+    if ptr_kode.is_empty() {
+        return Ok((0, Vec::new()));
+    }
     let cs = create_instance_capstone_by_arch(arch)?;
-    let insns = cs
-        .disasm_count(ptr_kode, va_base_instr, 1)
-        .map_err(ReToolsError::from)?;
+    let insns_result = cs.disasm_count(ptr_kode, va_base_instr, 1);
+    
+    if let Err(_) = insns_result {
+        return Ok((1, vec![MicroInstruction::Undefined]));
+    }
+    let insns = insns_result.unwrap();
     let insn = insns
         .first()
         .ok_or(ReToolsError::Generic("Disasm failed".to_string()))?;

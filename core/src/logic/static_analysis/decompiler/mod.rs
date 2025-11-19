@@ -15,7 +15,7 @@ pub fn decompile_function_internal(
 		"Mulai dekompilasi untuk fungsi di 0x{:x} pada file {}",
 		function_address, binary.path_berkas
 	);
-	let cfg = match build_cfg_internal(binary) {
+	let cfg = match build_cfg_internal(binary, None) {
 		Ok(g) => g,
 		Err(e) => {
 			error!("Gagal membangun CFG: {}", e);

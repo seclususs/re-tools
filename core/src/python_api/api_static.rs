@@ -36,11 +36,11 @@ pub fn convert_err_py(err: ReToolsError) -> PyErr {
 }
 
 #[pyfunction(name = "parseHeaderInfo")]
-fn wrap_parse_header(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_header(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseHeaderInfo dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	let header_info = &binary.header;
-	let dict = PyDict::new_bound(py);
+	let dict = PyDict::new(py);
 	dict.set_item("valid", header_info.valid)?;
 	dict.set_item("format", header_info.format)?;
 	dict.set_item("arch", header_info.arch)?;
@@ -49,7 +49,7 @@ fn wrap_parse_header(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 	dict.set_item("machine_id", header_info.machine_id)?;
 	dict.set_item("is_lib", header_info.is_lib)?;
 	dict.set_item("file_size", header_info.sz_berkas)?;
-	Ok(dict.to_object(py))
+	Ok(dict.into())
 }
 
 #[pyfunction(name = "parseHeaderInfoRaw")]
@@ -58,7 +58,7 @@ fn wrap_parse_header_raw(
 	jalur_berkas: &str,
 	id_arch: u32,
 	va_basis: u64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
 	info!("py: parseHeaderInfoRaw dipanggil untuk: {}", jalur_berkas);
 	let arch = match id_arch {
 		1 => ArsitekturDisasm::ARCH_X86_32,
@@ -69,7 +69,7 @@ fn wrap_parse_header_raw(
 	};
 	let binary = Binary::load_raw(jalur_berkas, arch, va_basis).map_err(convert_err_py)?;
 	let header_info = &binary.header;
-	let dict = PyDict::new_bound(py);
+	let dict = PyDict::new(py);
 	dict.set_item("valid", header_info.valid)?;
 	dict.set_item("format", header_info.format)?;
 	dict.set_item("arch", header_info.arch)?;
@@ -78,17 +78,18 @@ fn wrap_parse_header_raw(
 	dict.set_item("machine_id", header_info.machine_id)?;
 	dict.set_item("is_lib", header_info.is_lib)?;
 	dict.set_item("file_size", header_info.sz_berkas)?;
-	Ok(dict.to_object(py))
+	Ok(dict.into())
 }
 
 #[pyfunction(name = "ekstrakStrings")]
-fn wrap_extract_str(py: Python, jalur_berkas: &str, len_min: usize) -> PyResult<PyObject> {
+fn wrap_extract_str(py: Python, jalur_berkas: &str, len_min: usize) -> PyResult<Py<PyAny>> {
 	info!("py: ekstrakStrings dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	match extract_str_raw(&binary, len_min) {
 		Ok(strings_info) => {
 			let py_strings: Vec<String> = strings_info.into_iter().map(|s| s.content).collect();
-			Ok(py_strings.to_object(py))
+			let list = PyList::new(py, py_strings)?;
+			Ok(list.into())
 		}
 		Err(e) => Err(convert_err_py(e)),
 	}
@@ -115,18 +116,18 @@ fn wrap_scan_pola(_py: Python, jalur_berkas: &str, pola_regex: &str) -> PyResult
 }
 
 #[pyfunction(name = "scanYara")]
-fn wrap_scan_yara(py: Python, jalur_berkas: &str, aturan_yara: &str) -> PyResult<PyObject> {
+fn wrap_scan_yara(py: Python, jalur_berkas: &str, aturan_yara: &str) -> PyResult<Py<PyAny>> {
 	info!("py: scanYara dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	match scan_yara(&binary, aturan_yara) {
 		Ok(results) => {
-			let py_results = PyList::empty_bound(py);
+			let py_results = PyList::empty(py);
 			for m in results {
-				let dict = PyDict::new_bound(py);
+				let dict = PyDict::new(py);
 				dict.set_item("rule_name", m.rule_name)?;
-				let py_strings = PyList::empty_bound(py);
+				let py_strings = PyList::empty(py);
 				for s in m.strings {
-					let string_dict = PyDict::new_bound(py);
+					let string_dict = PyDict::new(py);
 					string_dict.set_item("identifier", s.identifier)?;
 					string_dict.set_item("offset", s.offset)?;
 					py_strings.append(string_dict)?;
@@ -134,23 +135,23 @@ fn wrap_scan_yara(py: Python, jalur_berkas: &str, aturan_yara: &str) -> PyResult
 				dict.set_item("strings", py_strings)?;
 				py_results.append(dict)?;
 			}
-			Ok(py_results.to_object(py))
+			Ok(py_results.into())
 		}
 		Err(e) => Err(convert_err_py(e)),
 	}
 }
 
 #[pyfunction(name = "scanCryptoConstants")]
-fn wrap_scan_crypto(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_scan_crypto(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: scanCryptoConstants dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	match scan_crypto_const(&binary) {
 		Ok(results) => {
 			let json_str = serde_json::to_string(&results)
 				.map_err(|e| PyValueError::new_err(e.to_string()))?;
-			let json_module = PyModule::import_bound(py, "json")?;
+			let json_module = PyModule::import(py, "json")?;
 			let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-			Ok(py_json.to_object(py))
+			Ok(py_json.into())
 		}
 		Err(e) => Err(convert_err_py(e)),
 	}
@@ -161,16 +162,16 @@ fn wrap_scan_packer(
 	py: Python,
 	jalur_berkas: &str,
 	nilai_ambang: f64,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
 	info!("py: deteksiHeuristicPacker dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	match detect_packer(&binary, nilai_ambang) {
 		Ok(results) => {
 			let json_str = serde_json::to_string(&results)
 				.map_err(|e| PyValueError::new_err(e.to_string()))?;
-			let json_module = PyModule::import_bound(py, "json")?;
+			let json_module = PyModule::import(py, "json")?;
 			let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-			Ok(py_json.to_object(py))
+			Ok(py_json.into())
 		}
 		Err(e) => Err(convert_err_py(e)),
 	}
@@ -181,16 +182,16 @@ fn wrap_scan_lib(
 	py: Python,
 	jalur_berkas: &str,
 	sig_json: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
 	info!("py: identifikasiFungsiLibrary dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
 	match identify_lib(&binary, sig_json) {
 		Ok(results) => {
 			let json_str = serde_json::to_string(&results)
 				.map_err(|e| PyValueError::new_err(e.to_string()))?;
-			let json_module = PyModule::import_bound(py, "json")?;
+			let json_module = PyModule::import(py, "json")?;
 			let py_json = json_module.getattr("loads")?.call1((json_str,))?;
-			Ok(py_json.to_object(py))
+			Ok(py_json.into())
 		}
 		Err(e) => Err(convert_err_py(e)),
 	}
@@ -224,18 +225,18 @@ fn wrap_create_decomp(
 }
 
 #[pyfunction(name = "diffBinary")]
-fn wrap_calc_diff(py: Python, jalur_1: &str, jalur_2: &str) -> PyResult<Vec<PyObject>> {
+fn wrap_calc_diff(py: Python, jalur_1: &str, jalur_2: &str) -> PyResult<Vec<Py<PyAny>>> {
 	info!("py: diffBinary dipanggil untuk: {} vs {}", jalur_1, jalur_2);
 	match diff_binary_internal(jalur_1, jalur_2) {
 		Ok(results) => {
-			let mut py_results: Vec<PyObject> = Vec::new();
+			let mut py_results: Vec<Py<PyAny>> = Vec::new();
 			for res in results {
-				let dict = PyDict::new_bound(py);
+				let dict = PyDict::new(py);
 				dict.set_item("functionName", res.function_name)?;
 				dict.set_item("addressFile1", format!("0x{:x}", res.address_file1))?;
 				dict.set_item("addressFile2", format!("0x{:x}", res.address_file2))?;
 				dict.set_item("status", res.status)?;
-				py_results.push(dict.to_object(py));
+				py_results.push(dict.into());
 			}
 			Ok(py_results)
 		}
@@ -278,12 +279,12 @@ fn wrap_scan_bytes(_py: Python, jalur_berkas: &str, pola_bytes: &Bound<'_, PyByt
 }
 
 #[pyfunction(name = "parseSections")]
-fn wrap_parse_seksi(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_seksi(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseSections dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let py_list = PyList::empty_bound(py);
+	let py_list = PyList::empty(py);
 	for section in &binary.sections {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("name", &section.name)?;
 		dict.set_item("addr", section.addr)?;
 		dict.set_item("size", section.size)?;
@@ -291,16 +292,16 @@ fn wrap_parse_seksi(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 		dict.set_item("flags", section.flags)?;
 		py_list.append(dict)?;
 	}
-	Ok(py_list.to_object(py))
+	Ok(py_list.into())
 }
 
 #[pyfunction(name = "parseSymbols")]
-fn wrap_parse_simbol(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_simbol(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseSymbols dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let py_list = PyList::empty_bound(py);
+	let py_list = PyList::empty(py);
 	for symbol in &binary.symbols {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("name", &symbol.name)?;
 		dict.set_item("addr", symbol.addr)?;
 		dict.set_item("size", symbol.size)?;
@@ -308,48 +309,48 @@ fn wrap_parse_simbol(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
 		dict.set_item("bind", &symbol.bind)?;
 		py_list.append(dict)?;
 	}
-	Ok(py_list.to_object(py))
+	Ok(py_list.into())
 }
 
 #[pyfunction(name = "parseImports")]
-fn wrap_parse_impor(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_impor(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseImports dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let py_list = PyList::empty_bound(py);
+	let py_list = PyList::empty(py);
 	for import_info in &binary.imports {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("name", &import_info.name)?;
 		py_list.append(dict)?;
 	}
-	Ok(py_list.to_object(py))
+	Ok(py_list.into())
 }
 
 #[pyfunction(name = "parseExports")]
-fn wrap_parse_ekspor(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_ekspor(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseExports dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let py_list = PyList::empty_bound(py);
+	let py_list = PyList::empty(py);
 	for export_info in &binary.exports {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("name", &export_info.name)?;
 		dict.set_item("addr", export_info.addr)?;
 		py_list.append(dict)?;
 	}
-	Ok(py_list.to_object(py))
+	Ok(py_list.into())
 }
 
 #[pyfunction(name = "parseDynamicSectionElf")]
-fn wrap_parse_dyn(py: Python, jalur_berkas: &str) -> PyResult<PyObject> {
+fn wrap_parse_dyn(py: Python, jalur_berkas: &str) -> PyResult<Py<PyAny>> {
 	info!("py: parseDynamicSectionElf dipanggil untuk: {}", jalur_berkas);
 	let binary = Binary::load(jalur_berkas).map_err(convert_err_py)?;
-	let py_list = PyList::empty_bound(py);
+	let py_list = PyList::empty(py);
 	for entry in &binary.elf_dynamic_info {
-		let dict = PyDict::new_bound(py);
+		let dict = PyDict::new(py);
 		dict.set_item("tag_name", &entry.tag_name)?;
 		dict.set_item("value", entry.value)?;
 		py_list.append(dict)?;
 	}
-	Ok(py_list.to_object(py))
+	Ok(py_list.into())
 }
 
 #[pyfunction(name = "getKodeAksesData")]

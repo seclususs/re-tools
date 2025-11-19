@@ -29,6 +29,32 @@ impl LinuxTracer {
             mode_senyap: false,
         })
     }
+    fn validate_mem_access(&self, addr: u64, len: usize, check_write: bool) -> Result<(), ReToolsError> {
+        let maps_path = format!("/proc/{}/maps", self.pid_sasaran.as_raw());
+        let content = match std::fs::read_to_string(&maps_path) {
+            Ok(c) => c,
+            Err(_) => return Err(ReToolsError::Generic("Target process not found or inaccessible".to_string())),
+        };
+        let end_addr = addr.saturating_add(len as u64);
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 { continue; }
+            let range: Vec<&str> = parts[0].split('-').collect();
+            if range.len() != 2 { continue; }
+            let r_start = u64::from_str_radix(range[0], 16).unwrap_or(u64::MAX);
+            let r_end = u64::from_str_radix(range[1], 16).unwrap_or(0);
+            if addr >= r_start && end_addr <= r_end {
+                let perms = parts[1];
+                if check_write {
+                    if perms.contains('w') { return Ok(()); }
+                } else {
+                    if perms.contains('r') { return Ok(()); }
+                }
+                return Err(ReToolsError::Generic(format!("Page permission denied for range 0x{:x}-0x{:x}", addr, end_addr)));
+            }
+        }
+        Err(ReToolsError::Generic(format!("Memory address 0x{:x} not found in process maps", addr)))
+    }
     unsafe fn handle_logika_bp(&mut self, pid: Pid, va_bp: u64) -> bool {
         let Some(&byte_asli) = self.map_titik_henti.get(&va_bp) else {
             return false;
@@ -54,13 +80,18 @@ impl LinuxTracer {
         true
     }
     fn step_internal(&mut self, pid: Pid) -> Result<(), ReToolsError> {
-         ptrace::step(pid, None)?;
+         match ptrace::step(pid, None) {
+             Ok(_) => {},
+             Err(nix::Error::ESRCH) => return Err(ReToolsError::Generic("Process died during step".to_string())),
+             Err(e) => return Err(e.into()),
+         }
         match waitpid(pid, None) {
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => Ok(()),
             Ok(status) => Err(ReToolsError::Generic(format!(
                 "Status waitpid tidak terduga setelah step: {:?}",
                 status
             ))),
+            Err(nix::Error::ECHILD) | Err(nix::Error::ESRCH) => Err(ReToolsError::Generic("Target lost during wait".to_string())),
             Err(e) => Err(e.into()),
         }
     }
@@ -71,7 +102,7 @@ impl LinuxTracer {
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut reg_konteks = ptrace::getregs(self.pid_sasaran)?;
+        let mut reg_konteks = ptrace::getregs(self.pid_sasaran).map_err(|_| ReToolsError::Generic("Failed to get regs (process dead?)".to_string()))?;
         let val_dr7 = reg_konteks.dr7;
         let mask_lokal = 1 << (idx_slot * 2);
         let mask_global = 1 << (idx_slot * 2 + 1);
@@ -86,7 +117,7 @@ impl LinuxTracer {
             _ => unreachable!(),
         }
         reg_konteks.dr7 = val_dr7_baru;
-        ptrace::setregs(self.pid_sasaran, reg_konteks)?;
+        ptrace::setregs(self.pid_sasaran, reg_konteks).map_err(|_| ReToolsError::Generic("Failed to set regs (process dead?)".to_string()))?;
         Ok(())
     }
     #[cfg(target_arch = "x86_64")]
@@ -96,7 +127,7 @@ impl LinuxTracer {
                 "Indeks hardware breakpoint harus 0-3".to_string(),
             ));
         }
-        let mut reg_konteks = ptrace::getregs(self.pid_sasaran)?;
+        let mut reg_konteks = ptrace::getregs(self.pid_sasaran).map_err(|_| ReToolsError::Generic("Failed to get regs (process dead?)".to_string()))?;
         let mask_disable_lokal = !(1 << (idx_slot * 2));
         let mask_disable_global = !(1 << (idx_slot * 2 + 1));
         reg_konteks.dr7 &= mask_disable_lokal & mask_disable_global;
@@ -107,7 +138,7 @@ impl LinuxTracer {
             3 => reg_konteks.dr3 = 0,
             _ => unreachable!(),
         }
-        ptrace::setregs(self.pid_sasaran, reg_konteks)?;
+        ptrace::setregs(self.pid_sasaran, reg_konteks).map_err(|_| ReToolsError::Generic("Failed to set regs (process dead?)".to_string()))?;
         Ok(())
     }
     #[cfg(not(target_arch = "x86_64"))]
@@ -126,7 +157,13 @@ impl LinuxTracer {
         unsafe {
             match status {
                 WaitStatus::Stopped(pid, Signal::SIGTRAP) => {
-                    let reg_konteks = ptrace::getregs(pid)?;
+                    let reg_konteks = match ptrace::getregs(pid) {
+                        Ok(r) => r,
+                        Err(_) => {
+                             (*ptr_event).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                             return Ok(true);
+                        }
+                    };
                     let va_potensial = reg_konteks.rip.saturating_sub(1);
                     if self.map_titik_henti.contains_key(&va_potensial) {
                         if self.handle_logika_bp(pid, va_potensial) {
@@ -155,7 +192,13 @@ impl LinuxTracer {
                          ptrace::cont(pid, None).ok();
                          return Ok(false);
                     }
-                    let reg_konteks = ptrace::getregs(pid)?;
+                    let reg_konteks = match ptrace::getregs(pid) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            (*ptr_event).tipe = DebugEventTipe::EVENT_PROSES_EXIT;
+                            return Ok(true);
+                        }
+                    };
                     if reg_konteks.orig_rax != u64::MAX {
                         (*ptr_event).tipe = DebugEventTipe::EVENT_SYSCALL_ENTRY;
                     } else {
@@ -168,12 +211,12 @@ impl LinuxTracer {
                 WaitStatus::PtraceEvent(pid, _signal, event) => {
                      let tipe_event = match event {
                         libc::PTRACE_EVENT_CLONE => {
-                            let raw_pid_baru = ptrace::getevent(pid)? as c_int;
+                            let raw_pid_baru = ptrace::getevent(pid).unwrap_or(0) as c_int;
                             (*ptr_event).info_alamat = raw_pid_baru as u64;
                             Some(DebugEventTipe::EVENT_THREAD_BARU)
                         },
                         libc::PTRACE_EVENT_FORK | libc::PTRACE_EVENT_VFORK => {
-                            let raw_pid_baru = ptrace::getevent(pid)? as c_int;
+                            let raw_pid_baru = ptrace::getevent(pid).unwrap_or(0) as c_int;
                             (*ptr_event).info_alamat = raw_pid_baru as u64;
                             Some(DebugEventTipe::EVENT_THREAD_BARU)
                         }
@@ -234,31 +277,48 @@ impl PlatformTracer for LinuxTracer {
             self.write_memori(*va, &[*byte_asli]).ok();
         }
         self.map_titik_henti.clear();
-        ptrace::detach(self.pid_sasaran, None)?;
-        Ok(())
+        match ptrace::detach(self.pid_sasaran, None) {
+            Ok(_) => Ok(()),
+            Err(nix::Error::ESRCH) => Ok(()), 
+            Err(e) => Err(e.into()),
+        }
     }
     fn read_memori(&self, va_alamat: u64, sz_ukuran: c_int) -> Result<Vec<u8>, ReToolsError> {
+        if let Err(e) = self.validate_mem_access(va_alamat, sz_ukuran as usize, false) {
+            return Err(e);
+        }
         let mut vec_buffer = vec![0u8; sz_ukuran as usize];
         let mut arr_iov_lokal = [IoSliceMut::new(&mut vec_buffer)];
         let arr_iov_remote = [RemoteIoVec {
             base: va_alamat as usize,
             len: sz_ukuran as usize,
         }];
-        let sz_terbaca = process_vm_readv(self.pid_sasaran, &mut arr_iov_lokal, &arr_iov_remote)?;
-        vec_buffer.truncate(sz_terbaca);
-        Ok(vec_buffer)
+        match process_vm_readv(self.pid_sasaran, &mut arr_iov_lokal, &arr_iov_remote) {
+            Ok(sz_terbaca) => {
+                vec_buffer.truncate(sz_terbaca);
+                Ok(vec_buffer)
+            },
+            Err(nix::Error::ESRCH) => Err(ReToolsError::Generic("Process died".to_string())),
+            Err(e) => Err(e.into())
+        }
     }
     fn write_memori(&self, va_alamat: u64, buf_data: &[u8]) -> Result<usize, ReToolsError> {
+        if let Err(e) = self.validate_mem_access(va_alamat, buf_data.len(), true) {
+            return Err(e);
+        }
         let arr_iov_lokal = [std::io::IoSlice::new(buf_data)];
         let arr_iov_remote = [RemoteIoVec {
             base: va_alamat as usize,
             len: buf_data.len(),
         }];
-        let sz_tertulis = process_vm_writev(self.pid_sasaran, &arr_iov_lokal, &arr_iov_remote)?;
-        Ok(sz_tertulis)
+        match process_vm_writev(self.pid_sasaran, &arr_iov_lokal, &arr_iov_remote) {
+             Ok(sz) => Ok(sz),
+             Err(nix::Error::ESRCH) => Err(ReToolsError::Generic("Process died".to_string())),
+             Err(e) => Err(e.into())
+        }
     }
     fn get_register(&self) -> Result<C_Registers, ReToolsError> {
-        let reg_konteks = ptrace::getregs(self.pid_sasaran)?;
+        let reg_konteks = ptrace::getregs(self.pid_sasaran).map_err(|_| ReToolsError::Generic("Failed to read registers".to_string()))?;
         Ok(C_Registers {
             rax: reg_konteks.rax,
             rbx: reg_konteks.rbx,
@@ -281,7 +341,7 @@ impl PlatformTracer for LinuxTracer {
         })
     }
     fn set_register(&self, reg_nilai: &C_Registers) -> Result<(), ReToolsError> {
-        let mut reg_konteks = ptrace::getregs(self.pid_sasaran)?;
+        let mut reg_konteks = ptrace::getregs(self.pid_sasaran).map_err(|_| ReToolsError::Generic("Failed to read registers for set".to_string()))?;
         reg_konteks.rax = reg_nilai.rax;
         reg_konteks.rbx = reg_nilai.rbx;
         reg_konteks.rcx = reg_nilai.rcx;
@@ -304,12 +364,16 @@ impl PlatformTracer for LinuxTracer {
         Ok(())
     }
     fn continue_proses(&self) -> Result<(), ReToolsError> {
-        if self.trace_syscall_aktif {
-            ptrace::syscall(self.pid_sasaran, None)?;
+        let res = if self.trace_syscall_aktif {
+            ptrace::syscall(self.pid_sasaran, None)
         } else {
-            ptrace::cont(self.pid_sasaran, None)?;
+            ptrace::cont(self.pid_sasaran, None)
         };
-        Ok(())
+        match res {
+             Ok(_) => Ok(()),
+             Err(nix::Error::ESRCH) => Err(ReToolsError::Generic("Process died".to_string())),
+             Err(e) => Err(e.into())
+        }
     }
     fn step_instruksi(&mut self) -> Result<(), ReToolsError> {
         self.step_internal(self.pid_sasaran)
@@ -318,6 +382,7 @@ impl PlatformTracer for LinuxTracer {
         loop {
             let status = match waitpid(Pid::from_raw(-1), None) {
                 Ok(s) => s,
+                Err(nix::Error::ECHILD) => return Ok(0),
                 Err(e) => return Err(e.into()),
             };
             if self.process_status_wait(status, ptr_event_out)? {
@@ -364,18 +429,26 @@ impl PlatformTracer for LinuxTracer {
     fn list_thread(&self) -> Result<Vec<c_int>, ReToolsError> {
          let jalur_task = format!("/proc/{}/task", self.pid_sasaran.as_raw());
         let mut vec_thread = Vec::new();
-        for entri in std::fs::read_dir(jalur_task)? {
-            let entri = entri?;
-            let str_tid = entri.file_name().into_string().unwrap_or_default();
-            if let Ok(tid) = str_tid.parse::<c_int>() {
-                vec_thread.push(tid);
-            }
+        match std::fs::read_dir(jalur_task) {
+            Ok(entries) => {
+                for entri in entries {
+                    let entri = entri?;
+                    let str_tid = entri.file_name().into_string().unwrap_or_default();
+                    if let Ok(tid) = str_tid.parse::<c_int>() {
+                        vec_thread.push(tid);
+                    }
+                }
+                Ok(vec_thread)
+            },
+            Err(_) => Ok(Vec::new()) 
         }
-        Ok(vec_thread)
     }
     fn get_region_memori(&self) -> Result<Vec<C_MemoryRegionInfo>, ReToolsError> {
         let berkas_maps = format!("/proc/{}/maps", self.pid_sasaran.as_raw());
-        let konten = std::fs::read_to_string(berkas_maps)?;
+        let konten = match std::fs::read_to_string(berkas_maps) {
+            Ok(k) => k,
+            Err(_) => return Ok(Vec::new()),
+        };
         let mut vec_region = Vec::new();
         for baris in konten.lines() {
             let vec_bagian: Vec<&str> = baris.split_whitespace().collect();
