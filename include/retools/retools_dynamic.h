@@ -170,6 +170,22 @@ int rt_setTraceSyscall(RT_Handle ptr_handle, bool is_aktif);
  */
 char* rt_readInfoSyscall_json(RT_Handle ptr_handle, int id_thread);
 
+// ===================================================================================
+// === HYBRID ANALYSIS ===
+// ===================================================================================
+
+/**
+ * @brief Performs Smart/Hybrid analysis by resolving dynamic jumps.
+ * @details Traces the binary for `max_langkah` instructions to resolve
+ * indirect branches, then refines the CFG and VSA results.
+ *
+ * @param ptr_jalur_biner Path to the binary file.
+ * @param pid_target PID of the running process to attach to.
+ * @param max_langkah Maximum instructions to trace.
+ * @return JSON string containing coverage and iteration stats. Caller must free using `c_freeString`.
+ */
+char* rt_resolveDynamic(const char* ptr_jalur_biner, int pid_target, int max_langkah);
+
 #ifdef __cplusplus
 }
 #endif
