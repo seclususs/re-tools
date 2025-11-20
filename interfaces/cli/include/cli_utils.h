@@ -3,6 +3,8 @@
 
 #include <string>
 #include <vector>
+#include <deque>
+#include <mutex>
 
 enum class LogLevel {
     INFO,
@@ -12,22 +14,24 @@ enum class LogLevel {
     DEBUG
 };
 
+struct LogEntry {
+    LogLevel level;
+    std::string message;
+    std::string timestamp;
+};
+
 class CliUtils {
 public:
     static void log(LogLevel level, const std::string& message);
+    static std::vector<LogEntry> get_logs();
     static void print_header(const std::string& title);
-    static void print_kv(const std::string& key, const std::string& value);
-    static std::vector<std::string> split_args(const std::string& input);
     static void clear_screen();
+    static std::vector<std::string> split_args(const std::string& input);
 
 private:
-    static const std::string RESET;
-    static const std::string RED;
-    static const std::string GREEN;
-    static const std::string YELLOW;
-    static const std::string BLUE;
-    static const std::string CYAN;
-    static const std::string BOLD;
+    static std::deque<LogEntry> log_buffer;
+    static std::mutex log_mutex;
+    static const size_t MAX_LOG_SIZE = 100;
 };
 
 #endif

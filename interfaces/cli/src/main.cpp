@@ -1,66 +1,47 @@
 #include <iostream>
-#include <string>
-#include <vector>
-#include <cstring>
+#include <fstream>
 #include "cli_engine.h"
 #include "cli_repl.h"
 #include "cli_utils.h"
 
-void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " [options] <mode> <args...>" << std::endl;
-    std::cerr << "Options:" << std::endl;
-    std::cerr << "  -i, --interactive  : Start interactive shell (REPL)" << std::endl;
-    std::cerr << "Modes (Non-interactive):" << std::endl;
-    std::cerr << "  hybrid    : <binary_path> --pid <pid> [--steps <count>]" << std::endl;
-    std::cerr << "  security  : <binary_path>" << std::endl;
-    std::cerr << "  forensics : <binary_path> [--diff <second_binary>]" << std::endl;
+void suppress_stderr() {
+#ifdef _WIN32
+    FILE* trash;
+    freopen_s(&trash, "NUL", "w", stderr);
+#else
+    freopen("/dev/null", "w", stderr);
+#endif
 }
 
 int main(int argc, char* argv[]) {
+    std::ios::sync_with_stdio(false);
+    suppress_stderr();
     CliEngine engine;
-    if (argc > 1 && (strcmp(argv[1], "-i") == 0 || strcmp(argv[1], "--interactive") == 0)) {
-        CliRepl repl(engine);
-        repl.run();
-        return 0;
+    bool interactive = true;
+    if (argc > 1) {
+        std::string arg = argv[1];
+        if (arg == "--headless") {
+            interactive = false;
+        } else if (arg == "--help") {
+            std::cout << "ReTools CLI" << std::endl;
+            return 0;
+        }
     }
-    if (argc < 3) {
-        print_usage(argv[0]);
-        return 1;
-    }
-    std::string mode = argv[1];
-    std::string binary_path = argv[2];
-    engine.print_banner();
-    if (mode == "hybrid") {
-        int pid = -1;
-        int steps = 1000;
-        for (int i = 3; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--pid" && i + 1 < argc) {
-                pid = std::stoi(argv[++i]);
-            } else if (arg == "--steps" && i + 1 < argc) {
-                steps = std::stoi(argv[++i]);
-            }
+    if (interactive) {
+        try {
+            CliRepl repl(engine);
+            repl.run();
+        } catch (const std::exception& e) {
+            #ifdef _WIN32
+            FILE* console;
+            freopen_s(&console, "CONOUT$", "w", stderr);
+            #else
+            freopen("/dev/tty", "w", stderr);
+            #endif
+            std::cerr << "[FATAL ERROR] UI Crash: " << e.what() << std::endl;
         }
-        if (pid == -1) {
-            CliUtils::log(LogLevel::ERROR, "--pid is required for hybrid analysis.");
-            return 1;
-        }
-        engine.handle_hybrid_analysis(binary_path, pid, steps);
-    } else if (mode == "security") {
-        engine.handle_security_analysis(binary_path);
-    } else if (mode == "forensics") {
-        std::string diff_target = "";
-        for (int i = 3; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--diff" && i + 1 < argc) {
-                diff_target = argv[++i];
-            }
-        }
-        engine.handle_forensics_analysis(binary_path, diff_target);
     } else {
-        CliUtils::log(LogLevel::ERROR, "Unknown mode: " + mode);
-        print_usage(argv[0]);
-        return 1;
+        std::cout << "Headless mode not implemented yet." << std::endl;
     }
     return 0;
 }
