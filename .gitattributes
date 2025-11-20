@@ -1,5 +1,11 @@
 * text eol=lf
 
+# Shell scripts
+*.sh text eol=lf
+
+# Batch scripts
+*.bat text eol=crlf
+
 # Rust
 *.rs text eol=lf
 *.toml text eol=lf
